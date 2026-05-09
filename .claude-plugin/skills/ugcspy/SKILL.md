@@ -1,18 +1,28 @@
 ---
 name: ugcspy
-description: Use this skill when the user asks to research, track, or analyze a competitor's organic short-form video (TikTok or Instagram Reels) — for example "what is @glossier posting", "track @rarebeauty's organic UGC", "what's working for [brand] on TikTok", or any request to find top-performing competitor videos, set up alerts on viral competitor content, or generate a creator brief inspired by a competitor video. Invoke `ugcspy` via the Bash tool.
+description: Use this skill when the user asks about competitor UGC on TikTok or Instagram Reels — for example "find creators promoting [brand]", "what's the UGC around [brand]", "who's posting about [brand]", "what is @[brand] posting", "track [brand] on TikTok", or any request to discover third-party creators promoting a brand or to research a brand's own social posts. Invoke `ugcspy` via the Bash tool.
 ---
 
-# ugcspy — competitor organic UGC intelligence
+# ugcspy — competitor UGC intelligence
 
-`ugcspy` is a CLI installed on the user's machine. Run it via the Bash tool. Three subcommands cover the V1 surface; everything is JSON-friendly via `--json`.
+`ugcspy` is a CLI installed on the user's machine. Run it via the Bash tool. The headline use case is **finding third-party creators promoting a brand** — sponsored UGC, organic mentions, the @creators worth reaching out to.
 
 ## When to use
 
-- "What is @glossier posting on TikTok?" → `ugcspy search @glossier` (the headline use case)
-- "Show me Rare Beauty's top 20 videos" → `ugcspy search @rarebeauty --limit 20`
-- "Newest first, not by views" → `ugcspy search @brand --sort recency`
-- "Turn this video into a brief I can hand to a creator" → `ugcspy fork <url>`
+The default question is "find me UGC creators promoting BRAND" — that's plain-word search:
+
+- "Find creators promoting BeFreed" → `ugcspy search befreed` (hashtag mode, third-party)
+- "Who's posting about Liquid Death?" → `ugcspy search liquiddeath`
+- "Show me all the Glossier UGC from the last week" → `ugcspy search glossier --sort recency --days 7`
+- "Top 20 creators talking about Notion" → `ugcspy search notion --limit 20`
+
+Use `@handle` only if the user explicitly wants the BRAND'S OWN posts (rare in BigSpy-style research):
+
+- "What is Glossier's account posting?" → `ugcspy search @glossier`
+
+Other commands:
+
+- "Turn this video into a brief I can hand to a creator" → `/ugcspy-fork <url>`
 - "Slack-alert me when a competitor breaks out" (only if explicitly asked) → see Watch + daemon below
 
 Skip if the user is asking about **paid ads** (different tool — TikTok Creative Center / Facebook Ad Library).
@@ -22,11 +32,18 @@ Skip if the user is asking about **paid ads** (different tool — TikTok Creativ
 ### Search (the core command)
 
 ```bash
-ugcspy search <handle> [--platform tiktok|instagram|all] [--limit N] \
-                      [--sort views|recency] [--format <tags>] [--json]
+ugcspy search <query> [--platform tiktok|instagram|all] [--limit N] \
+                     [--sort views|recency] [--mode user|hashtag] [--json]
 ```
 
-Returns the handle's recent organic videos ranked by **views descending** (default — BigSpy-style highest-reach-first) or recency, with extracted hooks and format tags. Use `--json` when you need to feed results into the rest of a workflow.
+Auto-detects mode from query prefix:
+- `befreed` (no prefix) → hashtag mode = third-party creators promoting BeFreed
+- `@befreed` → user mode = BeFreed's own account posts
+- `#befreed` → explicit hashtag mode
+
+Returns videos ranked by **views descending** (default — BigSpy-style highest-reach-first) or recency. Hashtag mode includes a `Creator` column showing each row's actual poster, plus a "most prolific creators" summary at the bottom (the SMM insight: who's posting about this brand most often).
+
+Precision filter: hashtag results only keep videos whose caption explicitly carries `#brand`, `#brand_NNNN` (campaign codes), or `@brand`. This rejects unrelated videos that TikTok's hashtag endpoint over-matches.
 
 ### Fork (video → creator brief)
 

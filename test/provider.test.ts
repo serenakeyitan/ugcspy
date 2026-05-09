@@ -1,6 +1,31 @@
 import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../src/providers/mock.ts";
 
+describe("MockProvider hashtag mode", () => {
+  test("returns videos with author_handle set", async () => {
+    const p = new MockProvider();
+    const videos = await p.fetchHashtagVideos("befreed", "tiktok", 30);
+    expect(videos.length).toBeGreaterThan(0);
+    expect(videos[0]?.author_handle).toBeTruthy();
+    expect(videos[0]?.author_handle).not.toContain("@"); // bare handle
+  });
+
+  test("authors vary across rows (third-party UGC, not single account)", async () => {
+    const p = new MockProvider();
+    const videos = await p.fetchHashtagVideos("befreed", "tiktok", 30);
+    const uniqueAuthors = new Set(videos.map((v) => v.author_handle));
+    expect(uniqueAuthors.size).toBeGreaterThan(1);
+  });
+
+  test("video_url uses the actual creator handle, not the brand", async () => {
+    const p = new MockProvider();
+    const videos = await p.fetchHashtagVideos("befreed", "tiktok", 30);
+    for (const v of videos) {
+      expect(v.video_url).toContain(`@${v.author_handle}/`);
+    }
+  });
+});
+
 describe("MockProvider", () => {
   test("is deterministic per (handle, platform)", async () => {
     const p = new MockProvider();

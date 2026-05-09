@@ -34,21 +34,38 @@ Skip step 2 if you only want to try the CLI shape — the `mock` provider serves
 
 ## The core flow
 
+Two search modes, auto-detected from the query prefix:
+
 ```bash
-# Highest-reach videos first (BigSpy-style — default sort)
+# Plain word → hashtag mode = third-party creators promoting the brand
+# (the BigSpy use case — finding UGC, not the brand's own marketing)
+ugcspy search befreed --platform tiktok
+ugcspy search liquiddeath
+ugcspy search notion
+
+# @handle → user mode = the brand's OWN account posts
 ugcspy search @glossier --platform tiktok
 
-# Newest first instead
-ugcspy search @glossier --sort recency
+# #tag → explicit hashtag mode
+ugcspy search "#booktok"
 
-# JSON for piping into other tools
-ugcspy search @glossier --json | jq '.[] | {views: .view_count, hook: .hook_text}'
+# Newest first instead of highest-reach
+ugcspy search befreed --sort recency
+
+# JSON output for piping
+ugcspy search befreed --json | jq '.[] | {creator: .author_handle, views: .view_count}'
 
 # Force a refresh (bypass the SQLite cache)
-ugcspy search @glossier --refresh
+ugcspy search befreed --refresh
 ```
 
 The default sort is **views descending** — same as BigSpy ranks ads by impressions.
+
+### Why hashtag mode is the default
+
+The BigSpy-for-UGC question is "who's posting about this brand?", not "what is the brand posting?". Hashtag mode answers the first; `@handle` answers the second. Both are useful, but the wedge — the thing you can't easily get from any existing SaaS — is finding the third-party creator cohort.
+
+A precision filter rejects videos that TikTok's hashtag endpoint over-matches (e.g. "be freed" / "freed" appearing in unrelated contexts collide with `#befreed`). Only videos with an explicit `#brand`, `#brand_NNNN` campaign code, or `@brand` mention are kept.
 
 ## Claude Code plugin
 

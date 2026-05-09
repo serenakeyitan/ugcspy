@@ -1,6 +1,6 @@
 ---
-description: Search a competitor's recent organic TikTok / Instagram Reels videos
-argument-hint: "<handle> [--platform tiktok|instagram|all] [--limit N] [--json]"
+description: Find competitor UGC on TikTok — third-party creators promoting a brand, or a brand's own posts
+argument-hint: "<brand-or-@handle> [--platform tiktok|instagram|all] [--limit N] [--json] [--sort views|recency]"
 ---
 
 You are running `ugcspy search` for the user. The CLI binary is `ugcspy` on PATH.
@@ -13,8 +13,29 @@ Run via the Bash tool:
 ugcspy search $ARGUMENTS
 ```
 
-If the user did not specify `--json`, the CLI prints a formatted table; relay it as a code block. If they passed `--json`, parse and summarize the top 5 in a markdown table, then offer to deep-dive on any row (each row has an `id` you can pass to `/ugcspy-fork` to generate a creator brief in this chat).
+## Two search modes (auto-detected from query prefix)
 
-The default sort is `views` (highest reach first, BigSpy-style). If the user wants newest-first, suggest `--sort recency`.
+- **Plain word** (e.g. `befreed`, `glossier`, `liquiddeath`) → **hashtag mode**: finds third-party creators promoting the brand. This is the BigSpy-for-UGC default — most users want this.
+- **`@handle`** (e.g. `@befreed`) → **user mode**: pulls the brand's OWN posts.
+- **`#tag`** → explicit hashtag mode.
+- **`--mode user|hashtag`** flag overrides auto-detection.
 
-If the user has not run `ugcspy init`, the CLI will surface a clear error — relay it and suggest they run init.
+When a user says "what's working for [brand] on TikTok" or "find creators promoting [brand]", default to hashtag mode (no prefix). When they say "what is [brand] posting", that's user mode (`@brand`).
+
+## Output
+
+If the user did not pass `--json`, the CLI prints a formatted table with brand hashtags highlighted, plus a summary of the most prolific creators when in hashtag mode. Relay the table as-is (it's already formatted).
+
+If they passed `--json`, parse the array and summarize the top 5 in a markdown table. Each row has an `id` field; the user can pass any id to `/ugcspy-fork` to generate a creator brief in this chat.
+
+## Defaults
+
+- Sort: `views` (highest reach first — BigSpy-style)
+- Window: last 30 days
+- Platform: `all` (the standalone CLI tries TikTok and Instagram; tiktok-oss only supports TikTok so it'll cleanly skip IG)
+
+## Setup errors
+
+If the user gets `tiktok-oss: TikTokApi not installed`, suggest `ugcspy install-deps`.
+
+If the user gets a bot-detection error ("TikTok returned an empty response"), suggest setting `MS_TOKEN` from their browser cookies — see README troubleshooting.
