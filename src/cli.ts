@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { Command } from "commander";
 import { runInit } from "./commands/init.ts";
+import { runInstallDeps } from "./commands/install-deps.ts";
 import { runSearch, type SearchOptions } from "./commands/search.ts";
 import { runWatchAdd, runWatchList, runWatchRemove } from "./commands/watch.ts";
 import { runDaemon } from "./commands/daemon.ts";
@@ -19,6 +20,13 @@ program
   .description("Interactive setup — writes ~/.ugcspy/config.json")
   .action(async () => {
     await runInit();
+  });
+
+program
+  .command("install-deps")
+  .description("Install Python deps for the tiktok-oss provider (TikTokApi + Chromium)")
+  .action(async () => {
+    await runInstallDeps();
   });
 
 program

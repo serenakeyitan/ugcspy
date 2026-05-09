@@ -17,28 +17,35 @@ After publishing to npm: `npm install -g ugcspy`.
 
 ## Quick start
 
+First-run, free real-data path (TikTok only) takes ~60 seconds:
+
 ```bash
-# 1. One-time setup (paste API keys, choose provider)
+# 1. Set up config (pick `tiktok-oss` provider when prompted)
 bun run src/cli.ts init
 
-# 2. Search a competitor — works against mock data with no keys
+# 2. Install Python deps (TikTokApi + Chromium) — one-time, ~150MB
+bun run src/cli.ts install-deps
+
+# 3. Search real Glossier TikToks
 bun run src/cli.ts search @glossier --platform tiktok --limit 10
 
-# 3. Watch a competitor and Slack-alert on breakouts (≥ 2x trailing median)
+# 4. Watch and Slack-alert on breakouts (≥ 2x trailing median)
 bun run src/cli.ts watch add @glossier --slack-webhook https://hooks.slack.com/...
-
-# 4. Tick the daemon once (or `bun run src/cli.ts daemon` to loop every 6h)
 bun run src/cli.ts daemon --once
 
 # 5. Pick a video id from `search --json` and fork it into a creator brief
+#    (needs an Anthropic API key in `init`)
 bun run src/cli.ts fork 42
 ```
+
+Skip step 2 entirely if you only want to try the CLI shape — the default `mock` provider serves deterministic synthetic data with zero setup.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `init` | Interactive setup — writes `~/.ugcspy/config.json` (chmod 0600) |
+| `install-deps` | Install Python deps for the `tiktok-oss` provider (one-time) |
 | `search <handle>` | Ranked feed of recent organic videos with extracted hooks |
 | `watch add <handle>` | Register a competitor for breakout monitoring |
 | `watch list` / `watch remove <id>` | Manage watches |
@@ -87,6 +94,25 @@ This prevents noise on day-1 ingestion. See [src/lib/breakout.ts](src/lib/breako
 ## Why
 
 Brand SMMs already pay $300-1000/mo for Trendpop, Pentos, Sprout, Dash. None of them solve "type a competitor handle, get their ranked organic UGC + extracted hooks + alerts on breakouts." The crowded space is full of platforms; nobody ships a BigSpy-shaped product (search-first, fast, scriptable, agent-native).
+
+## Troubleshooting
+
+**"TikTok returned an empty response. They are detecting you're a bot."**
+Update to the latest version (`git pull && bun install`). The `tiktok-oss` provider already uses `chromium + headless=False` to bypass detection — you'll see a brief Chromium window flash open during scrapes, that's intentional. If you still get blocked:
+
+```bash
+# Grab an MS token from your own browser, then:
+export MS_TOKEN="<paste-token-from-tiktok.com-cookies>"
+ugcspy search @glossier
+```
+
+To get the token: open tiktok.com in Chrome, DevTools → Application → Cookies → `https://www.tiktok.com` → copy the `msToken` value.
+
+**"TikTokApi not installed."** You haven't run `ugcspy install-deps` yet, or the install failed silently. Re-run it.
+
+**Chromium window keeps flashing.** That's how `tiktok-oss` works — pure headless mode is blocked by TikTok. If this is a dealbreaker (e.g. running on a server with no display), use `scrapecreators` (paid, headless-friendly) instead.
+
+**Engagement rate ranks tiny videos above huge ones.** Known issue with engagement-rate sort on short-form video — small denominators inflate the rate. Use `--sort recency` if you want absolute reach instead.
 
 ## Design
 

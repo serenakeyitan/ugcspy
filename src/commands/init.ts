@@ -66,7 +66,18 @@ export async function runInit(): Promise<void> {
 
   saveConfig(next);
   console.log(chalk.green(`\n✓ Config saved.`));
-  console.log(`Run ${chalk.cyan("ugcspy search @glossier")} to try a search.`);
+
+  if (next.scraper_provider === "tiktok-oss") {
+    console.log(
+      chalk.yellow(
+        "\nThe tiktok-oss provider needs Python + TikTokApi + Chromium installed locally.",
+      ),
+    );
+    console.log(`Run ${chalk.cyan("ugcspy install-deps")} now (one-time, ~30s + ~150MB download).`);
+    console.log(`Then: ${chalk.cyan("ugcspy search @glossier --platform tiktok")}`);
+  } else {
+    console.log(`Run ${chalk.cyan("ugcspy search @glossier")} to try a search.`);
+  }
 }
 
 function providerInitialIndex(p: string | undefined): number {
