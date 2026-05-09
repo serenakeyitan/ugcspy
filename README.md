@@ -45,6 +45,17 @@ bun run src/cli.ts fork 42
 | `daemon` | Poll all watches, post Slack alerts on threshold breach |
 | `fork <id-or-url>` | Sonnet 4.6 turns a video into a creator brief |
 
+## Claude Code plugin
+
+ugcspy ships as a Claude Code plugin. Inside Claude Code, the CLI is exposed as four slash commands plus an intent-triggered skill:
+
+- `/ugcspy-search @glossier`
+- `/ugcspy-watch add @glossier --slack-webhook ...`
+- `/ugcspy-daemon --once`
+- `/ugcspy-fork <video-url>`
+
+The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcspy/SKILL.md)) also triggers on intent ("track @rarebeauty's organic UGC") so you don't always need the slash form.
+
 Every command supports `--help`. `search` supports `--json` for programmatic use.
 
 ## How alerts work
