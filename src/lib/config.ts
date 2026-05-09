@@ -30,14 +30,6 @@ export function saveConfig(config: Config, path: string = CONFIG_PATH): void {
   }
 }
 
-export function effectiveAnthropicKey(config: Config): string | undefined {
-  return process.env.ANTHROPIC_API_KEY ?? config.anthropic_api_key;
-}
-
-export function effectiveOpenAIKey(config: Config): string | undefined {
-  return process.env.OPENAI_API_KEY ?? config.openai_api_key;
-}
-
 export function effectiveScraperKey(config: Config): string | undefined {
   return process.env.UGCSPY_SCRAPER_API_KEY ?? config.scraper_api_key;
 }

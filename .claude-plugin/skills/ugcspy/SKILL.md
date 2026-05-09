@@ -52,14 +52,17 @@ Cold-start gate: alerts stay in `warming_up` for 7 days AND until ≥5 videos ex
 
 ## First-run
 
-If the user has not run `ugcspy init`, suggest it. The wizard writes `~/.ugcspy/config.json` (chmod 0600) with their data-provider choice, scraper API key, Anthropic API key, and optional default Slack webhook. With no keys configured, the `mock` provider returns deterministic synthetic data — useful for trying the CLI shape, not real research.
+If the user has not run `ugcspy init`, suggest it. The wizard writes `~/.ugcspy/config.json` (chmod 0600) with just two things: their scraper choice (default `tiktok-oss`, free) and an optional default Slack webhook. **No Anthropic API key needed** — brief generation runs in this Claude Code chat using the user's existing subscription, and caption-based hooks come straight from the scraper output.
+
+If they pick `tiktok-oss` and haven't run `ugcspy install-deps`, suggest that next.
 
 ## Tips
 
 - The `--json` flag on `search` is the right tool when the user wants a list of URLs to feed into another action.
+- After a search, the user can `/ugcspy-fork <id>` on any video — that prompt generates the brief in this chat directly, no API key, no per-brief cost.
 - `watch list` is cheap; run it before adding a watch to avoid duplicates.
 - If a `daemon --once` run shows `warming_up`, that is expected behavior, not a bug.
-- Anthropic API calls happen for hook extraction, format tagging, and brief generation. With no Anthropic key, hooks fall back to caption-only and format tags are `null`.
+- Hooks in `search` output are caption-derived (free, deterministic). Format tags are NOT auto-classified by the standalone CLI — if the user wants format tagging, classify in this chat after the search returns.
 
 ## Repo
 

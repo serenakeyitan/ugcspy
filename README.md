@@ -1,6 +1,8 @@
 # ugcspy
 
-BigSpy for organic UGC. A CLI for spying on competitor short-form video on TikTok and Instagram Reels — type a handle, get the videos that are actually getting views.
+BigSpy for organic UGC. A Claude Code plugin (and standalone CLI) for spying on competitor short-form video on TikTok and Instagram Reels — type a handle, get the videos that are actually getting views, then turn any video into a creator brief without leaving your chat.
+
+**No API key needed.** Brief generation runs in your existing Claude Code subscription. Scraping is free via the OSS TikTok provider.
 
 ## Install
 
@@ -19,16 +21,14 @@ After publishing to npm: `npm install -g ugcspy`.
 # 1. Set up config — pick `tiktok-oss` (free) when prompted
 bun run src/cli.ts init
 
-# 2. Install Python deps (TikTokApi + Chromium) — one-time, ~150MB
+# 2. Install Python deps for the OSS scraper — one-time, ~150MB
 bun run src/cli.ts install-deps
 
-# 3. Spy on a competitor — top videos by reach, the BigSpy way
+# 3. Spy on a competitor — top videos by reach, BigSpy-style
 bun run src/cli.ts search @glossier --platform tiktok --limit 10
-
-# 4. (Optional) Pick a video id from `search --json` and turn it into a creator brief
-#    Needs an Anthropic API key from step 1
-bun run src/cli.ts fork 1
 ```
+
+That's it. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.
 
 Skip step 2 if you only want to try the CLI shape — the `mock` provider serves deterministic synthetic data with zero setup.
 
@@ -44,41 +44,39 @@ ugcspy search @glossier --sort recency
 # JSON for piping into other tools
 ugcspy search @glossier --json | jq '.[] | {views: .view_count, hook: .hook_text}'
 
-# Filter by format
-ugcspy search @glossier --format POV,GRWM
-
 # Force a refresh (bypass the SQLite cache)
 ugcspy search @glossier --refresh
 ```
 
-The default sort is **views descending** — same as BigSpy ranks ads by impressions. If you want the like-to-view ratio instead, you can compute it from `--json` output; it's not a built-in sort.
+The default sort is **views descending** — same as BigSpy ranks ads by impressions.
 
-## Commands
+## Claude Code plugin
+
+The plugin is the recommended way to use ugcspy. Inside Claude Code:
+
+- `/ugcspy-search @glossier` — runs the search, renders the table inline
+- `/ugcspy-fork <video-id-or-url>` — generates a creator brief in chat using your Claude Code subscription. **No API key.**
+- `/ugcspy-watch add @glossier --slack-webhook ...` — (optional) register a competitor for breakout alerts
+- `/ugcspy-daemon --once` — (optional) tick the watch poller
+
+The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcspy/SKILL.md)) also triggers on intent — say "track @rarebeauty's organic UGC" and Claude picks the skill itself.
+
+## Commands (standalone CLI)
 
 | Command | What it does |
 |---|---|
 | `init` | Interactive setup — writes `~/.ugcspy/config.json` (chmod 0600) |
 | `install-deps` | Install Python deps for the `tiktok-oss` provider (one-time) |
 | `search <handle>` | Top videos by reach (default) or recency. The thing you came for. |
-| `fork <id-or-url>` | Sonnet 4.6 turns a video into a structured creator brief |
 | `watch add <handle>` | (Optional) Register a competitor for breakout alerts — see below |
 | `watch list` / `watch remove <id>` | Manage watches |
 | `daemon` | (Optional) Poll watches, post Slack alerts on threshold breach |
 
-## Claude Code plugin
-
-ugcspy ships as a Claude Code plugin. Inside Claude Code, type:
-
-- `/ugcspy-search @glossier`
-- `/ugcspy-fork <video-url>`
-
-The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcspy/SKILL.md)) also triggers on intent ("track @rarebeauty's organic UGC") so you don't always need the slash form.
-
-Every command supports `--help`. `search` supports `--json` for programmatic use.
+**Brief generation lives in the Claude Code plugin, not the standalone CLI.** This is intentional — it means no Anthropic API key, no per-brief cost, no extra setup. If you want briefs without Claude Code, use `search --json` and pipe the output to your LLM of choice.
 
 ## Optional: breakout alerts
 
-If you want to be Slack-pinged when a competitor video crosses a view threshold, set up a watch + daemon. This is **not part of the core flow** — most users just live in `search`. The alert pipeline exists for power users who want passive monitoring.
+If you want to be Slack-pinged when a competitor video crosses a view threshold, set up a watch + daemon. **Not part of the core flow** — most users live in `search`. The alert pipeline exists for power users who want passive monitoring.
 
 ```bash
 # 1. Watch a competitor — Slack pings when a video posted in the last 24h
@@ -99,26 +97,26 @@ bun run src/cli.ts watch remove 1
 
 | Provider | Cost | Coverage | Setup |
 |---|---|---|---|
-| `tiktok-oss` | **Free** | TikTok only | `pip install -r scripts/requirements.txt && python3 -m playwright install chromium` |
+| `tiktok-oss` | **Free** | TikTok only | `ugcspy install-deps` (one-time) |
 | `scrapecreators` | Paid | TikTok + Instagram Reels | API key from scrapecreators.com |
 | `mock` | Free | Synthetic | None — useful for trying the CLI shape |
 | `apify`, `bright_data` | — | — | Stubs for future drop-in providers |
 
 **Recommended path:**
 - Try `mock` first to see how the CLI works.
-- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. It wraps [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, actively maintained — v7.3.3 shipped April 2026) via a Python subprocess.
-- Add `scrapecreators` later if you need Instagram Reels coverage or hit rate limits on the OSS path.
+- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. It wraps [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, v7.3.3 shipped April 2026) via a Python subprocess.
+- Add `scrapecreators` if you need Instagram Reels coverage or hit rate limits on the OSS path.
 
 **Why no free Instagram option?** No production-grade free Instagram Reels scraper is currently maintained. Meta is more aggressive than TikTok about killing scrapers, and the leading repos either require login (ban risk for the user's account) or have been abandoned. ScrapeCreators is the honest answer for IG until that changes.
 
 ## Why
 
-Brand SMMs already pay $300-1000/mo for Trendpop, Pentos, Sprout, Dash. None of them solve "type a competitor handle, get their ranked organic UGC + extracted hooks + alerts on breakouts." The crowded space is full of platforms; nobody ships a BigSpy-shaped product (search-first, fast, scriptable, agent-native).
+Brand SMMs already pay $300-1000/mo for Trendpop, Pentos, Sprout, Dash. None of them solve "type a competitor handle, get their ranked organic UGC, then turn any video into a creator brief — all in the agent I already use." The crowded space is full of platforms; nobody ships a BigSpy-shaped product that's free, scriptable, and agent-native.
 
 ## Troubleshooting
 
 **"TikTok returned an empty response. They are detecting you're a bot."**
-Update to the latest version (`git pull && bun install`). The `tiktok-oss` provider already uses `chromium + headless=False` to bypass detection — you'll see a brief Chromium window flash open during scrapes, that's intentional. If you still get blocked:
+The `tiktok-oss` provider already uses `chromium + headless=False` to bypass detection — you'll see a brief Chromium window flash open during scrapes, that's intentional. If you still get blocked:
 
 ```bash
 # Grab an MS token from your own browser, then:

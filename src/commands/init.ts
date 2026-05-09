@@ -33,19 +33,9 @@ export async function runInit(): Promise<void> {
         message: "ScrapeCreators API key (or leave blank to skip)",
       },
       {
-        type: "password",
-        name: "anthropic_api_key",
-        message: "Anthropic API key (used for hook + format + brief; blank to skip)",
-      },
-      {
-        type: "password",
-        name: "openai_api_key",
-        message: "OpenAI API key (Whisper fallback only; blank to skip)",
-      },
-      {
         type: "text",
         name: "default_slack_webhook",
-        message: "Default Slack webhook URL for alerts (blank to skip)",
+        message: "Default Slack webhook URL for optional alerts (blank to skip)",
       },
     ],
     {
@@ -59,8 +49,6 @@ export async function runInit(): Promise<void> {
   const next: Config = {
     scraper_provider: answers.scraper_provider,
     scraper_api_key: answers.scraper_api_key || existing.scraper_api_key,
-    anthropic_api_key: answers.anthropic_api_key || existing.anthropic_api_key,
-    openai_api_key: answers.openai_api_key || existing.openai_api_key,
     default_slack_webhook: answers.default_slack_webhook || existing.default_slack_webhook,
   };
 

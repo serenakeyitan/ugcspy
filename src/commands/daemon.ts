@@ -1,18 +1,25 @@
 import chalk from "chalk";
 import ora from "ora";
 import { openDb } from "../db/index.ts";
-import { effectiveAnthropicKey, loadConfig } from "../lib/config.ts";
+import { loadConfig } from "../lib/config.ts";
 import { detectBreakouts, evaluateWatchState, filterRecent24h } from "../lib/breakout.ts";
 import { postBreakoutAlert } from "../lib/slack.ts";
-import { extractHook } from "../extractors/hook.ts";
-import { classifyFormat } from "../extractors/format.ts";
 import { getProvider } from "../providers/index.ts";
-import type { Competitor, FormatTag, Platform, RawVideo, VideoRecord, Watch } from "../types.ts";
+import type { Competitor, Platform, RawVideo, VideoRecord, Watch } from "../types.ts";
 
 export interface DaemonOptions {
   once: boolean;
   intervalMs: number;
   windowDays: number;
+}
+
+// Caption-only hook (same logic as search.ts). Free, deterministic, no API key.
+function captionHook(caption: string): { text: string; source: string } {
+  const trimmed = caption.trim();
+  if (!trimmed) return { text: "", source: "none" };
+  const match = trimmed.match(/^[^.!?\n]{1,120}/);
+  const text = match ? match[0]!.trim() : trimmed.slice(0, 120);
+  return { text, source: "caption" };
 }
 
 export async function runDaemon(opts: DaemonOptions): Promise<void> {
@@ -37,8 +44,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       const spinner = ora(`Polling ${w.handle} (${w.platform})...`).start();
       try {
         const fresh = await provider.fetchRecentVideos(w.handle, w.platform as Platform, opts.windowDays);
-        const enriched = await enrichVideos(fresh, effectiveAnthropicKey(config));
-        upsertVideos(db, w.competitor_id, enriched);
+        upsertVideos(db, w.competitor_id, fresh);
 
         const trailing = readTrailingWindow(db, w.competitor_id, opts.windowDays);
         const status = evaluateWatchState(w.created_at, trailing.length);
@@ -95,41 +101,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-interface EnrichedVideo extends RawVideo {
-  hook_source: string;
-  hook_text: string;
-  hook_confidence: number;
-  format_tag: FormatTag | null;
-}
-
-async function enrichVideos(
-  videos: RawVideo[],
-  anthropicKey: string | undefined,
-): Promise<EnrichedVideo[]> {
-  const out: EnrichedVideo[] = [];
-  for (const v of videos) {
-    const hook = await extractHook(v, anthropicKey);
-    let format_tag: FormatTag | null = null;
-    try {
-      format_tag = await classifyFormat(v, anthropicKey);
-    } catch {
-      /* ignore */
-    }
-    out.push({
-      ...v,
-      hook_source: hook.source,
-      hook_text: hook.text,
-      hook_confidence: hook.confidence,
-      format_tag,
-    });
-  }
-  return out;
-}
-
 function upsertVideos(
   db: ReturnType<typeof openDb>,
   competitorId: number,
-  videos: EnrichedVideo[],
+  videos: RawVideo[],
 ): void {
   const stmt = db.prepare(`
     INSERT INTO videos (
@@ -144,8 +119,9 @@ function upsertVideos(
       share_count = excluded.share_count,
       fetched_at = datetime('now')
   `);
-  const tx = db.transaction((rows: EnrichedVideo[]) => {
+  const tx = db.transaction((rows: RawVideo[]) => {
     for (const v of rows) {
+      const hook = captionHook(v.caption);
       stmt.run(
         competitorId,
         v.platform,
@@ -158,10 +134,10 @@ function upsertVideos(
         v.like_count,
         v.comment_count,
         v.share_count,
-        v.hook_source,
-        v.hook_text,
-        v.hook_confidence,
-        v.format_tag,
+        hook.source,
+        hook.text,
+        hook.text ? 1.0 : 0,
+        null,
         JSON.stringify({}),
       );
     }

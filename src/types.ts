@@ -1,19 +1,10 @@
 export type Platform = "tiktok" | "instagram";
 
-export const FORMAT_TAGS = [
-  "GRWM",
-  "POV",
-  "talking_head",
-  "product_demo",
-  "unboxing",
-  "tutorial",
-  "before_after",
-  "voiceover_broll",
-  "duet_stitch",
-  "other",
-] as const;
-
-export type FormatTag = (typeof FORMAT_TAGS)[number];
+// Format tags are no longer auto-classified by the standalone CLI (that needed
+// an Anthropic key). The Claude Code plugin classifies on demand using the
+// user's existing subscription. The DB column stays for schema compat and
+// future import paths; values come from the plugin or are null.
+export type FormatTag = string;
 
 export type HookSource = "caption" | "overlay" | "whisper" | "none";
 
@@ -65,9 +56,7 @@ export interface AlertFired {
 }
 
 export interface Config {
-  anthropic_api_key?: string;
   scraper_provider: "tiktok-oss" | "scrapecreators" | "apify" | "bright_data" | "mock";
   scraper_api_key?: string;
-  openai_api_key?: string;
   default_slack_webhook?: string;
 }

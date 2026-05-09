@@ -2,22 +2,30 @@ import chalk from "chalk";
 import Table from "cli-table3";
 import ora from "ora";
 import { openDb } from "../db/index.ts";
-import { effectiveAnthropicKey, loadConfig } from "../lib/config.ts";
-import { extractHook } from "../extractors/hook.ts";
-import { classifyFormat } from "../extractors/format.ts";
+import { loadConfig } from "../lib/config.ts";
 import { getProvider } from "../providers/index.ts";
-import type { FormatTag, Platform, RawVideo, VideoRecord } from "../types.ts";
+import type { Platform, RawVideo, VideoRecord } from "../types.ts";
 
 export type SearchSort = "views" | "recency";
 
 export interface SearchOptions {
   limit: number;
   sort: SearchSort;
-  format?: string;
   platform?: Platform | "all";
   json: boolean;
   refresh: boolean;
   days: number;
+}
+
+// Hook = first sentence-ish chunk of the caption, capped at 120 chars.
+// Free, deterministic, no API key. The Claude Code plugin handles richer
+// extraction (overlay text via vision, format classification) on demand.
+function captionHook(caption: string): { text: string; source: string } {
+  const trimmed = caption.trim();
+  if (!trimmed) return { text: "", source: "none" };
+  const match = trimmed.match(/^[^.!?\n]{1,120}/);
+  const text = match ? match[0]!.trim() : trimmed.slice(0, 120);
+  return { text, source: "caption" };
 }
 
 export async function runSearch(handleRaw: string, opts: SearchOptions): Promise<void> {
@@ -42,8 +50,7 @@ export async function runSearch(handleRaw: string, opts: SearchOptions): Promise
         : ora(`Fetching ${chalk.cyan(handle)} on ${platform}...`).start();
       try {
         const fresh = await provider.fetchRecentVideos(handle, platform, opts.days);
-        const enriched = await enrichVideos(fresh, effectiveAnthropicKey(config));
-        upsertVideos(db, competitorId, enriched);
+        upsertVideos(db, competitorId, fresh);
         videos = readCachedVideos(db, competitorId, platform);
         spinner?.succeed(`${platform}: ${chalk.cyan(videos.length)} videos`);
       } catch (err) {
@@ -55,13 +62,8 @@ export async function runSearch(handleRaw: string, opts: SearchOptions): Promise
   }
 
   let rows = allVideos;
-  if (opts.format) {
-    const wanted = opts.format.split(",").map((s) => s.trim());
-    rows = rows.filter((v) => v.format_tag && wanted.includes(v.format_tag));
-  }
   // BigSpy-style ranking: highest reach first by default. SMMs want to see which
   // competitor video got the most views, not which had the best like/view ratio.
-  // (Rate-based ranking would put a 2K-view video above a 1.8M-view video — wrong.)
   rows.sort((a, b) =>
     opts.sort === "recency"
       ? new Date(b.posted_at).getTime() - new Date(a.posted_at).getTime()
@@ -91,47 +93,10 @@ function upsertCompetitor(db: ReturnType<typeof openDb>, handle: string, platfor
   return row.id;
 }
 
-interface EnrichedVideo extends RawVideo {
-  hook_source: string;
-  hook_text: string;
-  hook_confidence: number;
-  format_tag: FormatTag | null;
-}
-
-async function enrichVideos(
-  videos: RawVideo[],
-  anthropicKey: string | undefined,
-): Promise<EnrichedVideo[]> {
-  const enriched: EnrichedVideo[] = [];
-  for (const v of videos) {
-    const hook = await extractHook(v, anthropicKey);
-    const format_tag = await safeClassify(v, anthropicKey);
-    enriched.push({
-      ...v,
-      hook_source: hook.source,
-      hook_text: hook.text,
-      hook_confidence: hook.confidence,
-      format_tag,
-    });
-  }
-  return enriched;
-}
-
-async function safeClassify(
-  video: RawVideo,
-  anthropicKey: string | undefined,
-): Promise<FormatTag | null> {
-  try {
-    return await classifyFormat(video, anthropicKey);
-  } catch {
-    return null;
-  }
-}
-
 function upsertVideos(
   db: ReturnType<typeof openDb>,
   competitorId: number,
-  videos: EnrichedVideo[],
+  videos: RawVideo[],
 ): void {
   const stmt = db.prepare(`
     INSERT INTO videos (
@@ -145,13 +110,12 @@ function upsertVideos(
       comment_count = excluded.comment_count,
       share_count = excluded.share_count,
       fetched_at = datetime('now'),
-      hook_source = excluded.hook_source,
       hook_text = excluded.hook_text,
-      hook_confidence = excluded.hook_confidence,
-      format_tag = excluded.format_tag
+      hook_source = excluded.hook_source
   `);
-  const tx = db.transaction((rows: EnrichedVideo[]) => {
+  const tx = db.transaction((rows: RawVideo[]) => {
     for (const v of rows) {
+      const hook = captionHook(v.caption);
       stmt.run(
         competitorId,
         v.platform,
@@ -164,10 +128,10 @@ function upsertVideos(
         v.like_count,
         v.comment_count,
         v.share_count,
-        v.hook_source,
-        v.hook_text,
-        v.hook_confidence,
-        v.format_tag,
+        hook.source,
+        hook.text,
+        hook.text ? 1.0 : 0,
+        null,
         JSON.stringify({}),
       );
     }
@@ -191,9 +155,9 @@ function printTable(handle: string, rows: VideoRecord[]): void {
     return;
   }
   const table = new Table({
-    head: ["#", "Platform", "Posted", "Views", "Likes", "Format", "Hook"],
+    head: ["#", "Platform", "Posted", "Views", "Likes", "Hook"],
     style: { head: ["cyan"], border: ["gray"] },
-    colWidths: [4, 10, 12, 12, 10, 16, 57],
+    colWidths: [4, 10, 12, 12, 10, 65],
     wordWrap: true,
   });
   rows.forEach((v, i) => {
@@ -203,7 +167,6 @@ function printTable(handle: string, rows: VideoRecord[]): void {
       v.posted_at.slice(0, 10),
       v.view_count.toLocaleString(),
       v.like_count.toLocaleString(),
-      v.format_tag ?? chalk.dim("—"),
       v.hook_text || chalk.dim(`(${v.hook_source})`),
     ]);
   });

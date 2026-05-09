@@ -5,7 +5,6 @@ import { runInstallDeps } from "./commands/install-deps.ts";
 import { runSearch, type SearchOptions } from "./commands/search.ts";
 import { runWatchAdd, runWatchList, runWatchRemove } from "./commands/watch.ts";
 import { runDaemon } from "./commands/daemon.ts";
-import { runFork } from "./commands/fork.ts";
 import type { Platform } from "./types.ts";
 
 const program = new Command();
@@ -34,7 +33,6 @@ program
   .description("Rank a competitor's recent organic videos by reach (default) or recency")
   .option("-l, --limit <n>", "max rows", (v) => parseInt(v, 10), 20)
   .option("-s, --sort <mode>", "views | recency", "views")
-  .option("-f, --format <tags>", "comma-separated format tags to filter by")
   .option("-p, --platform <name>", "tiktok | instagram | all", "all")
   .option("-d, --days <n>", "trailing window in days", (v) => parseInt(v, 10), 30)
   .option("--refresh", "force refetch even if cached")
@@ -45,7 +43,6 @@ program
     const opts: SearchOptions = {
       limit: raw.limit,
       sort,
-      format: raw.format,
       platform: raw.platform,
       json: Boolean(raw.json),
       refresh: Boolean(raw.refresh),
@@ -95,15 +92,6 @@ program
       intervalMs: raw.interval,
       windowDays: raw.days,
     });
-  });
-
-program
-  .command("fork <id-or-url>")
-  .description("Generate a creator brief from a video (id from search --json or a video URL)")
-  .option("-o, --out <path>", "output path (default: ~/.ugcspy/briefs/)")
-  .option("--copy", "copy to clipboard instead of writing a file")
-  .action(async (idOrUrl: string, raw) => {
-    await runFork(idOrUrl, { out: raw.out, copy: Boolean(raw.copy) });
   });
 
 program.parseAsync(process.argv).catch((err) => {
