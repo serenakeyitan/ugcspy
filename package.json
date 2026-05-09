@@ -1,0 +1,55 @@
+{
+  "name": "ugcspy",
+  "version": "0.1.0",
+  "description": "BigSpy for organic UGC. CLI for tracking competitor TikTok + IG Reels — search, alert, and fork videos into creator briefs.",
+  "type": "module",
+  "license": "MIT",
+  "author": "serenakeyitan",
+  "homepage": "https://github.com/serenakeyitan/ugcspy",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/serenakeyitan/ugcspy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/serenakeyitan/ugcspy/issues"
+  },
+  "keywords": [
+    "tiktok",
+    "instagram",
+    "reels",
+    "ugc",
+    "competitor-analysis",
+    "social-media",
+    "cli",
+    "claude-code"
+  ],
+  "bin": {
+    "ugcspy": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "build": "bun build src/cli.ts --target=bun --outfile=dist/cli.js",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.0",
+    "chalk": "^5.6.0",
+    "cli-table3": "^0.6.5",
+    "commander": "^14.0.0",
+    "ora": "^9.0.0",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/prompts": "^2.4.9"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  }
+}

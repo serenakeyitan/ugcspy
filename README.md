@@ -2,19 +2,68 @@
 
 BigSpy for organic UGC. A CLI for tracking competitor short-form video on TikTok and Instagram Reels — search, alert, and turn winning videos into creator briefs.
 
-**Status:** design-only. No code yet. See [docs/DESIGN.md](docs/DESIGN.md) for the full V1 spec.
+**Status:** V0 scaffold. Three commands wired end-to-end against a mock data provider; real-provider integration is the Day 0 spike per [docs/DESIGN.md](docs/DESIGN.md).
 
-## What it does (V1)
-
-Three commands. That's the whole product.
+## Install
 
 ```bash
-ugcspy search @glossier              # ranked feed of last 30 days, with extracted hooks
-ugcspy watch @glossier --slack ...   # Slack alert when a video crosses 2x median in 24h
-ugcspy fork <video-url>              # generates a creator brief from any video
+git clone https://github.com/serenakeyitan/ugcspy.git
+cd ugcspy
+bun install
+bun run src/cli.ts --help
 ```
 
-Plus a Claude Code plugin so the same commands work as `/ugcspy-search` etc. inside agentic workflows.
+After publishing to npm: `npm install -g ugcspy`.
+
+## Quick start
+
+```bash
+# 1. One-time setup (paste API keys, choose provider)
+bun run src/cli.ts init
+
+# 2. Search a competitor — works against mock data with no keys
+bun run src/cli.ts search @glossier --platform tiktok --limit 10
+
+# 3. Watch a competitor and Slack-alert on breakouts (≥ 2x trailing median)
+bun run src/cli.ts watch add @glossier --slack-webhook https://hooks.slack.com/...
+
+# 4. Tick the daemon once (or `bun run src/cli.ts daemon` to loop every 6h)
+bun run src/cli.ts daemon --once
+
+# 5. Pick a video id from `search --json` and fork it into a creator brief
+bun run src/cli.ts fork 42
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `init` | Interactive setup — writes `~/.ugcspy/config.json` (chmod 0600) |
+| `search <handle>` | Ranked feed of recent organic videos with extracted hooks |
+| `watch add <handle>` | Register a competitor for breakout monitoring |
+| `watch list` / `watch remove <id>` | Manage watches |
+| `daemon` | Poll all watches, post Slack alerts on threshold breach |
+| `fork <id-or-url>` | Sonnet 4.6 turns a video into a creator brief |
+
+Every command supports `--help`. `search` supports `--json` for programmatic use.
+
+## How alerts work
+
+A watch fires when a competitor's video crosses `threshold × trailing-median-views` (default 2x, configurable via `--threshold`).
+
+**Cold-start gate:** alerts stay in `warming_up` state until both:
+- 7 days have elapsed since the watch was created, AND
+- ≥5 videos exist in the trailing 30-day window.
+
+This prevents noise on day-1 ingestion. See [src/lib/breakout.ts](src/lib/breakout.ts) and the test suite in [test/breakout.test.ts](test/breakout.test.ts).
+
+## Data providers
+
+| Provider | Status | Use |
+|---|---|---|
+| `mock` | ✅ ready | Synthetic deterministic data — no API key needed, perfect for development |
+| `scrapecreators` | 🚧 Day 0 | Real TikTok + IG Reels — implementation lands after the Day 0 spike |
+| `apify` / `bright_data` | 📋 stub | Drop-in alternates if ScrapeCreators fails the spike |
 
 ## Why
 
@@ -22,8 +71,18 @@ Brand SMMs already pay $300-1000/mo for Trendpop, Pentos, Sprout, Dash. None of 
 
 ## Design
 
-Read [docs/DESIGN.md](docs/DESIGN.md). It went through three rounds of adversarial review and one Codex cold-read; the spec is locked at V1 scope.
+Read [docs/DESIGN.md](docs/DESIGN.md). It went through three rounds of adversarial review and one Codex cold-read; the V1 spec is locked.
+
+## Development
+
+```bash
+bun install              # install deps
+bun run typecheck        # tsc --noEmit
+bun test                 # bun's native test runner
+bun run dev -- search @glossier   # run CLI from source
+bun run build            # produce dist/cli.js (single-file binary, ~670KB)
+```
 
 ## License
 
-MIT (planned, on first code commit).
+MIT — see [LICENSE](LICENSE).
