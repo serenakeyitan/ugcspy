@@ -16,12 +16,12 @@ Run `ugcspy search --json` against the cached DB and find the matching video. Tw
 
 Use Bash:
 ```bash
-# If you don't already know the handle, the user's most-recent search had a handle in scope —
-# ask them which handle this video is from, OR query the local SQLite directly:
-sqlite3 ~/.ugcspy/db.sqlite "SELECT json_object('id', id, 'platform', platform, 'video_url', video_url, 'caption', caption, 'view_count', view_count, 'like_count', like_count, 'posted_at', posted_at, 'hook_text', hook_text) FROM videos WHERE id = $ARGUMENTS OR video_url = '$ARGUMENTS' LIMIT 1;"
+sqlite3 ~/.ugcspy/db.sqlite "SELECT json_object('id', id, 'platform', platform, 'video_url', video_url, 'caption', caption, 'view_count', view_count, 'like_count', like_count, 'posted_at', posted_at, 'hook_text', hook_text, 'author_handle', author_handle) FROM videos WHERE id = $ARGUMENTS OR video_url = '$ARGUMENTS' LIMIT 1;"
 ```
 
-Parse the JSON. If empty, tell the user to run `/ugcspy-search <handle>` first so the video is in cache.
+Parse the JSON. If empty, tell the user to run `/ugcspy-search <brand>` first so the video is in cache.
+
+Note: `author_handle` may be set (the actual creator who posted the video, varies per row in hashtag-mode results) or null (legacy data). Use it in the brief: a third-party UGC video by `@growwithnomes` with `#befreed` is a different storytelling reference than the brand's own post.
 
 ## Step 2 — Generate the brief in this chat
 

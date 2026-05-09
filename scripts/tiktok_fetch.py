@@ -146,17 +146,25 @@ async def run_hashtag(tag: str, days: int) -> None:
     try:
         api = await _create_api()
         hashtag = api.hashtag(name=tag)
-        async for video in hashtag.videos(count=60):
-            d = video.as_dict
-            raw = _video_to_raw(d)
-            if raw is None or raw["external_id"] in seen_ids:
-                continue
-            posted_at = datetime.fromisoformat(raw["posted_at"])
-            if posted_at < cutoff:
-                continue
-            seen_ids.add(raw["external_id"])
-            # Keep _author so the caller can show "@creator: caption" in the UI.
-            videos.append(raw)
+        try:
+            async for video in hashtag.videos(count=60):
+                d = video.as_dict
+                raw = _video_to_raw(d)
+                if raw is None or raw["external_id"] in seen_ids:
+                    continue
+                posted_at = datetime.fromisoformat(raw["posted_at"])
+                if posted_at < cutoff:
+                    continue
+                seen_ids.add(raw["external_id"])
+                videos.append(raw)
+        except AttributeError as e:
+            # TikTokApi raises this when the hashtag doesn't exist on TikTok
+            # (the internal `_get_id()` call fails to find an `id` field).
+            if "'Hashtag' object has no attribute 'id'" in str(e):
+                # Treat as empty result — no videos found for this hashtag.
+                pass
+            else:
+                raise
     except Exception as e:
         fail(f"TikTokApi error (hashtag): {e}", code=2)
     finally:

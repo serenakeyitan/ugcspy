@@ -147,6 +147,10 @@ To get the token: open tiktok.com in Chrome, DevTools → Application → Cookie
 
 **Chromium window keeps flashing.** That's how `tiktok-oss` works — pure headless mode is blocked by TikTok. If this is a dealbreaker (e.g. running on a server with no display), use `scrapecreators` (paid, headless-friendly) instead.
 
+**The brand name is ambiguous (e.g. `#headway` matches a book-summary app AND a therapy platform AND a dance studio).** The hashtag itself doesn't disambiguate — the precision filter only confirms each result has `#headway`, not which Headway. Use a more specific hashtag if the brand has one (e.g. `headwayapp`, `liquiddeath` is unambiguous, `notion` collides with the unrelated word but is mostly safe), or pipe `--json` and filter on related hashtags (`booksummary`, `microlearning`) yourself.
+
+**Search returned 0 videos for a real hashtag.** If the bridge throws `'Hashtag' object has no attribute 'id'` and we caught it as an empty result, that's because TikTok doesn't have an indexed hashtag page for it (very small brand or new tag). Try the brand's own account: `ugcspy search @brand` (user mode).
+
 ## Design
 
 Read [docs/DESIGN.md](docs/DESIGN.md). It went through three rounds of adversarial review and one Codex cold-read; the V1 spec is locked.
