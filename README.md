@@ -70,11 +70,19 @@ This prevents noise on day-1 ingestion. See [src/lib/breakout.ts](src/lib/breako
 
 ## Data providers
 
-| Provider | Status | Use |
-|---|---|---|
-| `mock` | ✅ ready | Synthetic deterministic data — no API key needed, perfect for development |
-| `scrapecreators` | 🚧 Day 0 | Real TikTok + IG Reels — implementation lands after the Day 0 spike |
-| `apify` / `bright_data` | 📋 stub | Drop-in alternates if ScrapeCreators fails the spike |
+| Provider | Cost | Coverage | Setup |
+|---|---|---|---|
+| `tiktok-oss` | **Free** | TikTok only | `pip install -r scripts/requirements.txt && python3 -m playwright install chromium` |
+| `scrapecreators` | Paid | TikTok + Instagram Reels | API key from scrapecreators.com |
+| `mock` | Free | Synthetic | None — useful for trying the CLI shape |
+| `apify`, `bright_data` | — | — | Stubs for future drop-in providers |
+
+**Recommended path:**
+- Try `mock` first to see how the CLI works.
+- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. It wraps [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, actively maintained — v7.3.3 shipped April 2026) via a Python subprocess.
+- Add `scrapecreators` later if you need Instagram Reels coverage or hit rate limits on the OSS path.
+
+**Why no free Instagram option?** No production-grade free Instagram Reels scraper is currently maintained. Meta is more aggressive than TikTok about killing scrapers, and the leading repos either require login (ban risk for the user's account) or have been abandoned. ScrapeCreators is the honest answer for IG until that changes.
 
 ## Why
 

@@ -66,7 +66,7 @@ export interface AlertFired {
 
 export interface Config {
   anthropic_api_key?: string;
-  scraper_provider: "scrapecreators" | "apify" | "bright_data" | "mock";
+  scraper_provider: "tiktok-oss" | "scrapecreators" | "apify" | "bright_data" | "mock";
   scraper_api_key?: string;
   openai_api_key?: string;
   default_slack_webhook?: string;

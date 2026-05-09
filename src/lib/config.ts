@@ -5,6 +5,9 @@ import type { Config } from "../types.ts";
 
 export const CONFIG_PATH = join(homedir(), ".ugcspy", "config.json");
 
+// Default to mock so a fresh clone runs end-to-end with zero setup. The `init` wizard
+// recommends `tiktok-oss` (free, TikTok-only) as the real-data option — it just needs
+// a one-time `pip install -r scripts/requirements.txt`.
 const DEFAULT_CONFIG: Config = {
   scraper_provider: "mock",
 };

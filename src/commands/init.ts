@@ -14,19 +14,23 @@ export async function runInit(): Promise<void> {
       {
         type: "select",
         name: "scraper_provider",
-        message: "Data provider for TikTok / Instagram",
+        message: "Data provider",
         choices: [
-          { title: "mock (no key — synthetic data for development)", value: "mock" },
-          { title: "scrapecreators (recommended for real data — Day 0 spike)", value: "scrapecreators" },
+          {
+            title: "tiktok-oss — free, TikTok only (davidteather/TikTok-Api via Python)",
+            value: "tiktok-oss",
+          },
+          { title: "scrapecreators — paid, TikTok + Instagram Reels", value: "scrapecreators" },
+          { title: "mock — synthetic data, no setup needed", value: "mock" },
           { title: "apify (stub)", value: "apify", disabled: true },
           { title: "bright_data (stub)", value: "bright_data", disabled: true },
         ],
         initial: providerInitialIndex(existing.scraper_provider),
       },
       {
-        type: (prev: string) => (prev === "mock" ? null : "password"),
+        type: (prev: string) => (prev === "scrapecreators" ? "password" : null),
         name: "scraper_api_key",
-        message: "Scraper API key (or leave blank to skip)",
+        message: "ScrapeCreators API key (or leave blank to skip)",
       },
       {
         type: "password",
@@ -67,10 +71,12 @@ export async function runInit(): Promise<void> {
 
 function providerInitialIndex(p: string | undefined): number {
   switch (p) {
-    case "mock":
+    case "tiktok-oss":
       return 0;
     case "scrapecreators":
       return 1;
+    case "mock":
+      return 2;
     default:
       return 0;
   }
