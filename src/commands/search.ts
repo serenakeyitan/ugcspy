@@ -122,18 +122,25 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
           ).start();
       try {
         const raw = await fetchByMode(provider, query, platform, opts.days);
-        // Hashtag mode returns over-broad results from TikTok. Filter to keep
-        // only videos whose caption actually carries the brand hashtag/mention.
-        const filtered =
-          query.mode === "hashtag"
-            ? raw.filter((v) => isHashtagMatch(v.caption, query.value))
-            : raw;
+        let filtered = raw;
+        if (query.mode === "hashtag") {
+          // 1. Drop videos whose caption doesn't actually carry the brand
+          //    hashtag/mention — TikTok's hashtag endpoint over-matches.
+          filtered = filtered.filter((v) => isHashtagMatch(v.caption, query.value));
+          // 2. Drop the brand's own account from third-party UGC results.
+          //    If a user wants `@brand`'s posts, they pass `@brand`. The
+          //    third-party-UGC view should show CREATORS, not the brand.
+          const brandHandle = query.value.toLowerCase();
+          filtered = filtered.filter(
+            (v) => (v.author_handle ?? "").toLowerCase() !== brandHandle,
+          );
+        }
         const droppedCount = raw.length - filtered.length;
         upsertVideos(db, competitorId, filtered);
         videos = readCachedVideos(db, competitorId, platform);
         const suffix =
           droppedCount > 0
-            ? ` (filtered ${droppedCount} unrelated post${droppedCount === 1 ? "" : "s"})`
+            ? ` (filtered ${droppedCount} unrelated/own-account post${droppedCount === 1 ? "" : "s"})`
             : "";
         spinner?.succeed(`${platform}: ${chalk.cyan(videos.length)} videos${suffix}`);
       } catch (err) {
