@@ -60,6 +60,19 @@ export interface BreakoutCandidate {
   threshold: number;
 }
 
+export const ONE_DAY_MS = 86_400_000;
+
+// "Recent" = posted in the last 24 hours. Spec: "views-at-24h." Extracted as a
+// named helper because an off-by-24x bug here once shipped (filter said 24*ONE_DAY)
+// — keep it tested.
+export function filterRecent24h<T extends { posted_at: string }>(
+  videos: T[],
+  now: Date = new Date(),
+): T[] {
+  const cutoff = now.getTime() - ONE_DAY_MS;
+  return videos.filter((v) => new Date(v.posted_at).getTime() >= cutoff);
+}
+
 // A video breaks out if its view_count exceeds threshold_multiplier × trailing median.
 // Spec: "views-at-24h vs trailing-30-day-median views-at-24h."
 // Real implementation should snapshot views at +24h after posting; mock data uses raw views.

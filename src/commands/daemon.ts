@@ -2,7 +2,7 @@ import chalk from "chalk";
 import ora from "ora";
 import { openDb } from "../db/index.ts";
 import { effectiveAnthropicKey, loadConfig } from "../lib/config.ts";
-import { detectBreakouts, evaluateWatchState } from "../lib/breakout.ts";
+import { detectBreakouts, evaluateWatchState, filterRecent24h } from "../lib/breakout.ts";
 import { postBreakoutAlert } from "../lib/slack.ts";
 import { extractHook } from "../extractors/hook.ts";
 import { classifyFormat } from "../extractors/format.ts";
@@ -51,9 +51,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
 
         if (w.state !== "active") setWatchState(db, w.id, "active");
 
-        const recent = trailing.filter(
-          (v) => Date.now() - new Date(v.posted_at).getTime() < 24 * 86_400_000,
-        );
+        const recent = filterRecent24h(trailing);
         const candidates = detectBreakouts(recent, trailing, w.threshold_multiplier);
         const fresh_candidates = candidates.filter((c) => !alreadyFired(db, c.video.id, w.id));
 

@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   detectBreakouts,
   evaluateWatchState,
+  filterRecent24h,
+  ONE_DAY_MS,
   trailingMedianViews,
 } from "../src/lib/breakout.ts";
 import type { VideoRecord } from "../src/types.ts";
@@ -28,6 +30,32 @@ function v(view_count: number, idOffset = 0): VideoRecord {
     raw_metrics_json: "{}",
   };
 }
+
+describe("filterRecent24h", () => {
+  const NOW = new Date("2026-05-15T12:00:00Z");
+
+  test("includes videos posted in the last 24h", () => {
+    const items = [
+      { posted_at: new Date(NOW.getTime() - 1 * 3600_000).toISOString() }, // 1h ago
+      { posted_at: new Date(NOW.getTime() - 23 * 3600_000).toISOString() }, // 23h ago
+    ];
+    expect(filterRecent24h(items, NOW)).toHaveLength(2);
+  });
+
+  test("excludes videos at 25h, 7 days, 24 days", () => {
+    const items = [
+      { posted_at: new Date(NOW.getTime() - 25 * 3600_000).toISOString() },
+      { posted_at: new Date(NOW.getTime() - 7 * ONE_DAY_MS).toISOString() },
+      { posted_at: new Date(NOW.getTime() - 24 * ONE_DAY_MS).toISOString() }, // regression: must NOT include
+    ];
+    expect(filterRecent24h(items, NOW)).toHaveLength(0);
+  });
+
+  test("boundary at exactly 24h is included", () => {
+    const items = [{ posted_at: new Date(NOW.getTime() - ONE_DAY_MS).toISOString() }];
+    expect(filterRecent24h(items, NOW)).toHaveLength(1);
+  });
+});
 
 describe("evaluateWatchState (cold-start gate)", () => {
   const NOW = new Date("2026-05-15T12:00:00Z");

@@ -48,9 +48,25 @@ async def run(handle: str, days: int) -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     videos: list[dict] = []
 
+    # Bot-detection bypass: TikTok blocks headless and even webkit non-headless,
+    # but `chromium` with `headless=False` works (verified empirically May 2026).
+    # This means the user sees a brief Chromium window flash open during scrapes.
+    # If MS_TOKEN env var is set, we use it for higher reliability — grab from
+    # your browser's tiktok.com cookies (DevTools → Application → Cookies).
+    import os as _os
+    ms_token = _os.environ.get("MS_TOKEN")
+    session_kwargs = {
+        "num_sessions": 1,
+        "sleep_after": 3,
+        "browser": "chromium",
+        "headless": False,
+    }
+    if ms_token:
+        session_kwargs["ms_tokens"] = [ms_token]
+
     try:
         async with TikTokApi() as api:
-            await api.create_sessions(num_sessions=1, sleep_after=3, headless=True)
+            await api.create_sessions(**session_kwargs)
             user = api.user(handle)
             async for video in user.videos(count=60):
                 d = video.as_dict

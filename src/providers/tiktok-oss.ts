@@ -27,10 +27,15 @@ export class TikTokOssProvider implements DataProvider {
     }
 
     const scriptPath = resolveScript();
+    // Inherit the parent env so user-site Python packages
+    // (`pip install --user`) and PATH are visible to the subprocess.
+    // Without this, Bun.spawn runs with a stripped env and Python misses
+    // ~/Library/Python/.../site-packages on macOS.
     const proc = Bun.spawn(["python3", scriptPath], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
+      env: { ...process.env },
     });
 
     proc.stdin.write(JSON.stringify({ handle, days }));
