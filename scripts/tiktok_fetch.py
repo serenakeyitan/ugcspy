@@ -138,33 +138,39 @@ async def run_user(handle: str, days: int) -> None:
 async def run_hashtag(tag: str, days: int) -> None:
     """Fetch videos tagged with #tag posted by any creator. This is the
     third-party-UGC discovery path — finds creators promoting a brand, not
-    the brand's own posts."""
+    the brand's own posts.
+
+    Coverage strategy (two-pass): TikTok's hashtag endpoint is capped at
+    ~200 results per tag, ranked by an opaque algo that often misses real
+    UGC for big brands. We do TWO passes:
+
+      Pass 1: pull the primary tag + brand-app variant.
+      Pass 2: extract campaign codes from pass-1 captions (#brand_NNNN
+              patterns) and query the ones we discovered. This is much
+              cheaper than blind-sweeping a code range, and finds the
+              actual codes the brand is currently running.
+
+    Result: a 60-result single-tag query becomes a ~300-500 result
+    multi-variant merge in roughly 3x the wall time, with measurably
+    better coverage of brand-niche UGC."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     videos: list[dict] = []
     seen_ids: set[str] = set()
+
     api = None
     try:
         api = await _create_api()
-        hashtag = api.hashtag(name=tag)
-        try:
-            async for video in hashtag.videos(count=60):
-                d = video.as_dict
-                raw = _video_to_raw(d)
-                if raw is None or raw["external_id"] in seen_ids:
-                    continue
-                posted_at = datetime.fromisoformat(raw["posted_at"])
-                if posted_at < cutoff:
-                    continue
-                seen_ids.add(raw["external_id"])
-                videos.append(raw)
-        except AttributeError as e:
-            # TikTokApi raises this when the hashtag doesn't exist on TikTok
-            # (the internal `_get_id()` call fails to find an `id` field).
-            if "'Hashtag' object has no attribute 'id'" in str(e):
-                # Treat as empty result — no videos found for this hashtag.
-                pass
-            else:
-                raise
+
+        # Pass 1: primary tag + brand-app variant
+        pass_1_tags = [tag, f"{tag}app"]
+        for variant in pass_1_tags:
+            await _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff)
+
+        # Pass 2: discover campaign codes from pass-1 captions, query each
+        codes = _discover_campaign_codes(videos, tag)
+        for code in codes:
+            variant = f"{tag}_{code}"
+            await _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff)
     except Exception as e:
         fail(f"TikTokApi error (hashtag): {e}", code=2)
     finally:
@@ -175,6 +181,47 @@ async def run_hashtag(tag: str, days: int) -> None:
                 pass
 
     print(json.dumps(videos))
+
+
+async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff):
+    """Fetch one hashtag's videos and merge into shared lists. Failures
+    are swallowed per-variant — a missing tag or transient bot-detection
+    blip shouldn't kill the whole search."""
+    try:
+        hashtag = api.hashtag(name=variant)
+        async for video in hashtag.videos(count=200):
+            d = video.as_dict
+            raw = _video_to_raw(d)
+            if raw is None or raw["external_id"] in seen_ids:
+                continue
+            posted_at = datetime.fromisoformat(raw["posted_at"])
+            if posted_at < cutoff:
+                continue
+            seen_ids.add(raw["external_id"])
+            videos.append(raw)
+    except AttributeError as e:
+        if "'Hashtag' object has no attribute 'id'" in str(e):
+            return  # tag doesn't exist
+        raise
+    except Exception:
+        return  # rate-limit, bot-detection, etc — skip this variant
+
+
+def _discover_campaign_codes(videos, tag):
+    """Extract campaign-code variants from caption text. If we see
+    `#befreed_0117` mentioned in the captions of pass-1 results, that's
+    a live campaign code worth querying directly for more coverage.
+
+    Returns a sorted list of unique 4-digit codes (max 12 to bound runtime)."""
+    import re
+    code_pattern = re.compile(r"#" + re.escape(tag) + r"_(\d{2,4})\b", re.IGNORECASE)
+    seen_codes = set()
+    for v in videos:
+        for match in code_pattern.finditer(v.get("caption") or ""):
+            code = match.group(1).zfill(4)
+            seen_codes.add(code)
+    # Cap at 12 to bound wall time (each adds ~3-8s scrape)
+    return sorted(seen_codes)[:12]
 
 
 if __name__ == "__main__":
