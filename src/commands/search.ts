@@ -8,9 +8,11 @@ import { classifyFormat } from "../extractors/format.ts";
 import { getProvider } from "../providers/index.ts";
 import type { FormatTag, Platform, RawVideo, VideoRecord } from "../types.ts";
 
+export type SearchSort = "views" | "recency";
+
 export interface SearchOptions {
   limit: number;
-  sort: "engagement" | "recency";
+  sort: SearchSort;
   format?: string;
   platform?: Platform | "all";
   json: boolean;
@@ -57,10 +59,13 @@ export async function runSearch(handleRaw: string, opts: SearchOptions): Promise
     const wanted = opts.format.split(",").map((s) => s.trim());
     rows = rows.filter((v) => v.format_tag && wanted.includes(v.format_tag));
   }
+  // BigSpy-style ranking: highest reach first by default. SMMs want to see which
+  // competitor video got the most views, not which had the best like/view ratio.
+  // (Rate-based ranking would put a 2K-view video above a 1.8M-view video — wrong.)
   rows.sort((a, b) =>
-    opts.sort === "engagement"
-      ? engagement(b) - engagement(a)
-      : new Date(b.posted_at).getTime() - new Date(a.posted_at).getTime(),
+    opts.sort === "recency"
+      ? new Date(b.posted_at).getTime() - new Date(a.posted_at).getTime()
+      : b.view_count - a.view_count,
   );
   rows = rows.slice(0, opts.limit);
 
@@ -180,20 +185,15 @@ function readCachedVideos(
     .all(competitorId, platform) as VideoRecord[];
 }
 
-function engagement(v: VideoRecord): number {
-  if (v.view_count === 0) return 0;
-  return (v.like_count + v.comment_count * 2 + v.share_count * 3) / v.view_count;
-}
-
 function printTable(handle: string, rows: VideoRecord[]): void {
   if (rows.length === 0) {
     console.log(chalk.yellow(`\nNo videos found for ${handle}.`));
     return;
   }
   const table = new Table({
-    head: ["#", "Platform", "Posted", "Views", "Eng%", "Format", "Hook"],
+    head: ["#", "Platform", "Posted", "Views", "Likes", "Format", "Hook"],
     style: { head: ["cyan"], border: ["gray"] },
-    colWidths: [4, 10, 12, 12, 7, 16, 60],
+    colWidths: [4, 10, 12, 12, 10, 16, 57],
     wordWrap: true,
   });
   rows.forEach((v, i) => {
@@ -202,7 +202,7 @@ function printTable(handle: string, rows: VideoRecord[]): void {
       v.platform,
       v.posted_at.slice(0, 10),
       v.view_count.toLocaleString(),
-      `${(engagement(v) * 100).toFixed(1)}%`,
+      v.like_count.toLocaleString(),
       v.format_tag ?? chalk.dim("—"),
       v.hook_text || chalk.dim(`(${v.hook_source})`),
     ]);

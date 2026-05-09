@@ -31,18 +31,20 @@ program
 
 program
   .command("search <handle>")
-  .description("Rank a competitor's recent organic videos")
+  .description("Rank a competitor's recent organic videos by reach (default) or recency")
   .option("-l, --limit <n>", "max rows", (v) => parseInt(v, 10), 20)
-  .option("-s, --sort <mode>", "engagement | recency", "engagement")
+  .option("-s, --sort <mode>", "views | recency", "views")
   .option("-f, --format <tags>", "comma-separated format tags to filter by")
   .option("-p, --platform <name>", "tiktok | instagram | all", "all")
   .option("-d, --days <n>", "trailing window in days", (v) => parseInt(v, 10), 30)
   .option("--refresh", "force refetch even if cached")
   .option("--json", "emit JSON instead of a table")
   .action(async (handle: string, raw) => {
+    // Accept legacy "engagement" as an alias for "views" so existing scripts don't break.
+    const sort = raw.sort === "engagement" ? "views" : raw.sort;
     const opts: SearchOptions = {
       limit: raw.limit,
-      sort: raw.sort,
+      sort,
       format: raw.format,
       platform: raw.platform,
       json: Boolean(raw.json),

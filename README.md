@@ -1,8 +1,6 @@
 # ugcspy
 
-BigSpy for organic UGC. A CLI for tracking competitor short-form video on TikTok and Instagram Reels — search, alert, and turn winning videos into creator briefs.
-
-**Status:** V0 scaffold. Three commands wired end-to-end against a mock data provider; real-provider integration is the Day 0 spike per [docs/DESIGN.md](docs/DESIGN.md).
+BigSpy for organic UGC. A CLI for spying on competitor short-form video on TikTok and Instagram Reels — type a handle, get the videos that are actually getting views.
 
 ## Install
 
@@ -15,30 +13,45 @@ bun run src/cli.ts --help
 
 After publishing to npm: `npm install -g ugcspy`.
 
-## Quick start
-
-First-run, free real-data path (TikTok only) takes ~60 seconds:
+## Quick start (~60 seconds)
 
 ```bash
-# 1. Set up config (pick `tiktok-oss` provider when prompted)
+# 1. Set up config — pick `tiktok-oss` (free) when prompted
 bun run src/cli.ts init
 
 # 2. Install Python deps (TikTokApi + Chromium) — one-time, ~150MB
 bun run src/cli.ts install-deps
 
-# 3. Search real Glossier TikToks
+# 3. Spy on a competitor — top videos by reach, the BigSpy way
 bun run src/cli.ts search @glossier --platform tiktok --limit 10
 
-# 4. Watch and Slack-alert on breakouts (≥ 2x trailing median)
-bun run src/cli.ts watch add @glossier --slack-webhook https://hooks.slack.com/...
-bun run src/cli.ts daemon --once
-
-# 5. Pick a video id from `search --json` and fork it into a creator brief
-#    (needs an Anthropic API key in `init`)
-bun run src/cli.ts fork 42
+# 4. (Optional) Pick a video id from `search --json` and turn it into a creator brief
+#    Needs an Anthropic API key from step 1
+bun run src/cli.ts fork 1
 ```
 
-Skip step 2 entirely if you only want to try the CLI shape — the default `mock` provider serves deterministic synthetic data with zero setup.
+Skip step 2 if you only want to try the CLI shape — the `mock` provider serves deterministic synthetic data with zero setup.
+
+## The core flow
+
+```bash
+# Highest-reach videos first (BigSpy-style — default sort)
+ugcspy search @glossier --platform tiktok
+
+# Newest first instead
+ugcspy search @glossier --sort recency
+
+# JSON for piping into other tools
+ugcspy search @glossier --json | jq '.[] | {views: .view_count, hook: .hook_text}'
+
+# Filter by format
+ugcspy search @glossier --format POV,GRWM
+
+# Force a refresh (bypass the SQLite cache)
+ugcspy search @glossier --refresh
+```
+
+The default sort is **views descending** — same as BigSpy ranks ads by impressions. If you want the like-to-view ratio instead, you can compute it from `--json` output; it's not a built-in sort.
 
 ## Commands
 
@@ -46,34 +59,41 @@ Skip step 2 entirely if you only want to try the CLI shape — the default `mock
 |---|---|
 | `init` | Interactive setup — writes `~/.ugcspy/config.json` (chmod 0600) |
 | `install-deps` | Install Python deps for the `tiktok-oss` provider (one-time) |
-| `search <handle>` | Ranked feed of recent organic videos with extracted hooks |
-| `watch add <handle>` | Register a competitor for breakout monitoring |
+| `search <handle>` | Top videos by reach (default) or recency. The thing you came for. |
+| `fork <id-or-url>` | Sonnet 4.6 turns a video into a structured creator brief |
+| `watch add <handle>` | (Optional) Register a competitor for breakout alerts — see below |
 | `watch list` / `watch remove <id>` | Manage watches |
-| `daemon` | Poll all watches, post Slack alerts on threshold breach |
-| `fork <id-or-url>` | Sonnet 4.6 turns a video into a creator brief |
+| `daemon` | (Optional) Poll watches, post Slack alerts on threshold breach |
 
 ## Claude Code plugin
 
-ugcspy ships as a Claude Code plugin. Inside Claude Code, the CLI is exposed as four slash commands plus an intent-triggered skill:
+ugcspy ships as a Claude Code plugin. Inside Claude Code, type:
 
 - `/ugcspy-search @glossier`
-- `/ugcspy-watch add @glossier --slack-webhook ...`
-- `/ugcspy-daemon --once`
 - `/ugcspy-fork <video-url>`
 
 The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcspy/SKILL.md)) also triggers on intent ("track @rarebeauty's organic UGC") so you don't always need the slash form.
 
 Every command supports `--help`. `search` supports `--json` for programmatic use.
 
-## How alerts work
+## Optional: breakout alerts
 
-A watch fires when a competitor's video crosses `threshold × trailing-median-views` (default 2x, configurable via `--threshold`).
+If you want to be Slack-pinged when a competitor video crosses a view threshold, set up a watch + daemon. This is **not part of the core flow** — most users just live in `search`. The alert pipeline exists for power users who want passive monitoring.
 
-**Cold-start gate:** alerts stay in `warming_up` state until both:
-- 7 days have elapsed since the watch was created, AND
-- ≥5 videos exist in the trailing 30-day window.
+```bash
+# 1. Watch a competitor — Slack pings when a video posted in the last 24h
+#    crosses 2x the trailing-30-day median views
+bun run src/cli.ts watch add @glossier --slack-webhook https://hooks.slack.com/services/... --threshold 2
 
-This prevents noise on day-1 ingestion. See [src/lib/breakout.ts](src/lib/breakout.ts) and the test suite in [test/breakout.test.ts](test/breakout.test.ts).
+# 2. Tick the daemon manually, or set it up as a cron / GitHub Actions schedule
+bun run src/cli.ts daemon --once
+
+# 3. List or remove watches
+bun run src/cli.ts watch list
+bun run src/cli.ts watch remove 1
+```
+
+**Cold-start gate:** alerts stay in `warming_up` state until both 7 days have elapsed AND ≥5 videos exist in the trailing window. Prevents noise on day-1 ingestion. See [src/lib/breakout.ts](src/lib/breakout.ts) for the math and [test/breakout.test.ts](test/breakout.test.ts) for the tests.
 
 ## Data providers
 
@@ -111,8 +131,6 @@ To get the token: open tiktok.com in Chrome, DevTools → Application → Cookie
 **"TikTokApi not installed."** You haven't run `ugcspy install-deps` yet, or the install failed silently. Re-run it.
 
 **Chromium window keeps flashing.** That's how `tiktok-oss` works — pure headless mode is blocked by TikTok. If this is a dealbreaker (e.g. running on a server with no display), use `scrapecreators` (paid, headless-friendly) instead.
-
-**Engagement rate ranks tiny videos above huge ones.** Known issue with engagement-rate sort on short-form video — small denominators inflate the rate. Use `--sort recency` if you want absolute reach instead.
 
 ## Design
 
