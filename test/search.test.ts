@@ -72,7 +72,6 @@ describe("isHashtagMatch (precision filter for hashtag results)", () => {
   });
 
   test("hashtag boundary: #befreedish is NOT a match for befreed", () => {
-    // Pathological case: hashtag prefix collision with a longer word.
     expect(isHashtagMatch("Just #befreedish learning vibes", "befreed")).toBe(false);
   });
 
@@ -83,5 +82,24 @@ describe("isHashtagMatch (precision filter for hashtag results)", () => {
   test("strips @ and # from query before matching", () => {
     expect(isHashtagMatch("#befreed is great", "@befreed")).toBe(true);
     expect(isHashtagMatch("#befreed is great", "#befreed")).toBe(true);
+  });
+
+  test("#brandapp variant — keeps real UGC that uses the app-suffix tag", () => {
+    // Real false-negative we caught in production: @apluslisa's 53.8K-view
+    // post used #BeFreedApp instead of #befreed. Was being dropped before fix.
+    expect(
+      isHashtagMatch(
+        "The easiest way to get more knowledge 🤭 #BeFreedApp #studytok #booktok",
+        "befreed",
+      ),
+    ).toBe(true);
+  });
+
+  test("#brandapp boundary — #brandapp2 is NOT a match (same boundary discipline)", () => {
+    expect(isHashtagMatch("Look at this #befreedapp2 thing", "befreed")).toBe(false);
+  });
+
+  test("@brandfoo is NOT a mention match (boundary applies to mentions too)", () => {
+    expect(isHashtagMatch("Talking about @befreedom", "befreed")).toBe(false);
   });
 });

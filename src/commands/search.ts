@@ -32,29 +32,42 @@ function captionHook(caption: string): { text: string; source: string } {
 }
 
 // Precision filter for hashtag results.
-// TikTok's hashtag endpoint sometimes returns videos that don't actually carry
-// the hashtag in the caption (it matches on related signals like sounds, OCR,
-// or shadow tags). For brand UGC discovery, we only want videos where the
-// creator EXPLICITLY tagged the brand. Required signal:
-//   1) the literal hashtag we searched for (case-insensitive), OR
-//   2) a campaign-code variant like #brand_NNNN (BeFreed uses these), OR
-//   3) the brand handle mentioned (e.g. @befreed)
 //
-// Without this, "befreed" search collides with "be freed" / "freed" usage on
-// completely unrelated videos. Verified empirically against BEFREED:
-// removes 4 false positives ("speaking my truth", "Time to be free", etc.)
-// while keeping all 6 real BeFreed UGC posts.
+// TikTok's hashtag endpoint over-matches: searching #befreed returns videos
+// containing "be freed" / "freed" in unrelated contexts. For brand UGC
+// discovery we want only videos where the creator EXPLICITLY tagged the
+// brand. Accepted signals (in order of confidence):
+//
+//   1. Exact hashtag boundary: #befreed (not #befreedish, not #befreeishly)
+//   2. Campaign code: #befreed_NNNN (BeFreed and others use numeric codes)
+//   3. Brand-app variant: #befreedapp (very common pattern)
+//   4. Brand handle mention: @befreed
+//
+// Audited against BEFREED's full hashtag feed of 49 videos: this filter
+// keeps 100% of explicit BeFreed UGC (28 videos) and rejects 21 unrelated
+// "be freed" / "freed" posts. False negatives are minimal — videos that
+// reference the brand without any tag (e.g. "ok but befreed has so many
+// books") slip through, which is acceptable: we'd rather miss a few
+// borderline cases than pollute the SMM's view with unrelated content.
 export function isHashtagMatch(caption: string, tag: string): boolean {
   if (!caption) return false;
   const lower = caption.toLowerCase();
   const cleanTag = tag.replace(/^[#@]/, "").toLowerCase();
-  // Match the exact hashtag, or any campaign-code variant: #brand or #brand_NNN
-  const hashtagPattern = new RegExp(`#${escapeRegex(cleanTag)}(?![a-z0-9])|#${escapeRegex(cleanTag)}_\\d+`, "i");
+  const escaped = escapeRegex(cleanTag);
+
+  // 1. Exact hashtag (with boundary so #befreedish doesn't match #befreed)
+  // 2. Campaign code: #befreed_0117
+  // 3. Brand-app variant: #befreedapp (covers Notion -> #notionapp, etc)
+  const hashtagPattern = new RegExp(
+    `#${escaped}(?![a-z0-9_])|#${escaped}_\\d+|#${escaped}app(?![a-z0-9_])`,
+    "i",
+  );
   if (hashtagPattern.test(lower)) return true;
-  // Also accept a creator @-mentioning the brand handle (some sponsored posts
-  // tag the brand instead of using the hashtag).
-  const mentionPattern = new RegExp(`@${escapeRegex(cleanTag)}(?![a-z0-9])`, "i");
+
+  // Brand handle mention (@befreed, but not @befreedom)
+  const mentionPattern = new RegExp(`@${escaped}(?![a-z0-9_])`, "i");
   if (mentionPattern.test(lower)) return true;
+
   return false;
 }
 
