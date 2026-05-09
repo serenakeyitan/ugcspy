@@ -100,7 +100,21 @@ async function run(cmd: string, args: string[]): Promise<RunResult> {
 }
 
 function resolveRequirements(): string {
+  // Same multi-path strategy as src/providers/tiktok-oss.ts resolveScript():
+  // dev runs from src/commands/, bundled runs from dist/, npm-installed runs
+  // from node_modules/ugcspy/dist/.
   const here = dirname(fileURLToPath(import.meta.url));
-  // src/commands/ -> ../../scripts/requirements.txt
-  return resolve(here, "..", "..", "scripts", "requirements.txt");
+  const candidates = [
+    resolve(here, "..", "..", "scripts", "requirements.txt"),
+    resolve(here, "..", "scripts", "requirements.txt"),
+  ];
+  for (const path of candidates) {
+    try {
+      const f = Bun.file(path);
+      if (f.size > 0) return path;
+    } catch {
+      // try next
+    }
+  }
+  return candidates[0]!;
 }

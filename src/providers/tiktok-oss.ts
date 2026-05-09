@@ -106,6 +106,29 @@ function parseErrorBody(stdout: string): string | null {
 }
 
 function resolveScript(): string {
+  // The Python bridge lives in scripts/tiktok_fetch.py at the repo root.
+  // This file may be running from one of three locations depending on how
+  // ugcspy was invoked, so we walk up from import.meta.url and try each
+  // candidate path until we find the script:
+  //
+  //   - dev:   src/providers/tiktok-oss.ts -> ../../scripts/
+  //   - dist:  dist/cli.js                  -> ../scripts/
+  //   - npm:   node_modules/ugcspy/dist/cli.js -> ../scripts/
   const here = dirname(fileURLToPath(import.meta.url));
-  return resolve(here, "..", "..", "scripts", "tiktok_fetch.py");
+  const candidates = [
+    resolve(here, "..", "..", "scripts", "tiktok_fetch.py"),
+    resolve(here, "..", "scripts", "tiktok_fetch.py"),
+  ];
+  for (const path of candidates) {
+    try {
+      // Bun.file is sync metadata; existsSync would be cheaper but Bun.file
+      // works without an extra import.
+      const f = Bun.file(path);
+      if (f.size > 0) return path;
+    } catch {
+      // file doesn't exist; try next
+    }
+  }
+  // Fall back to the dev path so the error is human-readable.
+  return candidates[0]!;
 }
