@@ -19,6 +19,11 @@ export interface RawVideo {
   like_count: number;
   comment_count: number;
   share_count: number;
+  // Author handle of the actual poster. For handle searches, this matches the
+  // queried handle. For hashtag searches, this is the third-party creator
+  // promoting the brand — different per row. Optional/nullable so legacy data
+  // and SQLite NULLs both load cleanly.
+  author_handle?: string | null;
 }
 
 export interface VideoRecord extends RawVideo {
@@ -30,6 +35,9 @@ export interface VideoRecord extends RawVideo {
   hook_confidence: number;
   format_tag: FormatTag | null;
   raw_metrics_json: string;
+  // For hashtag results, this is the third-party creator. For handle results,
+  // this matches the queried handle (or null if pre-migration data).
+  author_handle?: string | null;
 }
 
 export interface Competitor {

@@ -11,6 +11,10 @@ import { type DataProvider, ProviderError } from "./types.ts";
 // Setup (one-time):
 //   pip install -r scripts/requirements.txt
 //   python3 -m playwright install chromium
+//
+// Two modes via the Python bridge:
+//   - user mode:    fetch a handle's own posts
+//   - hashtag mode: fetch posts tagged with #X by ANY creator (third-party UGC)
 export class TikTokOssProvider implements DataProvider {
   readonly name = "tiktok-oss";
 
@@ -25,12 +29,25 @@ export class TikTokOssProvider implements DataProvider {
         this.name,
       );
     }
+    return this.runBridge({ mode: "user", handle, days });
+  }
 
+  async fetchHashtagVideos(
+    tag: string,
+    platform: Platform,
+    days: number,
+  ): Promise<RawVideo[]> {
+    if (platform !== "tiktok") {
+      throw new ProviderError(
+        `Provider 'tiktok-oss' only supports tiktok. For Instagram Reels use 'scrapecreators'.`,
+        this.name,
+      );
+    }
+    return this.runBridge({ mode: "hashtag", tag, days });
+  }
+
+  private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
     const scriptPath = resolveScript();
-    // Inherit the parent env so user-site Python packages
-    // (`pip install --user`) and PATH are visible to the subprocess.
-    // Without this, Bun.spawn runs with a stripped env and Python misses
-    // ~/Library/Python/.../site-packages on macOS.
     const proc = Bun.spawn(["python3", scriptPath], {
       stdin: "pipe",
       stdout: "pipe",
@@ -38,7 +55,7 @@ export class TikTokOssProvider implements DataProvider {
       env: { ...process.env },
     });
 
-    proc.stdin.write(JSON.stringify({ handle, days }));
+    proc.stdin.write(JSON.stringify(payload));
     await proc.stdin.end();
 
     const [stdout, stderr] = await Promise.all([
@@ -62,9 +79,19 @@ export class TikTokOssProvider implements DataProvider {
       );
     }
     if (!Array.isArray(parsed)) {
-      throw new ProviderError(`tiktok-oss: bridge returned non-array: ${stdout.slice(0, 300)}`, this.name);
+      throw new ProviderError(
+        `tiktok-oss: bridge returned non-array: ${stdout.slice(0, 300)}`,
+        this.name,
+      );
     }
-    return parsed as RawVideo[];
+    // Map the Python bridge's `_author` field onto our typed `author_handle`.
+    return (parsed as Array<RawVideo & { _author?: string }>).map((v) => {
+      const author = v._author;
+      const out: RawVideo = { ...v };
+      delete (out as { _author?: string })._author;
+      if (author) out.author_handle = author;
+      return out;
+    });
   }
 }
 
@@ -79,9 +106,6 @@ function parseErrorBody(stdout: string): string | null {
 }
 
 function resolveScript(): string {
-  // Resolve scripts/tiktok_fetch.py relative to this file. Works in dev (src/) and after
-  // `bun build` because we keep scripts/ alongside the published package.
   const here = dirname(fileURLToPath(import.meta.url));
-  // src/providers/ -> ../../scripts/
   return resolve(here, "..", "..", "scripts", "tiktok_fetch.py");
 }

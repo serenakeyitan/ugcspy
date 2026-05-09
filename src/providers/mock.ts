@@ -2,9 +2,20 @@ import type { Platform, RawVideo } from "../types.ts";
 import type { DataProvider } from "./types.ts";
 
 // Deterministic mock: same handle → same videos. Lets the CLI run end-to-end without API keys.
-// Day 0 spike will replace this with ScrapeCreatorsProvider for real data.
 export class MockProvider implements DataProvider {
   readonly name = "mock";
+
+  async fetchHashtagVideos(tag: string, platform: Platform, days: number): Promise<RawVideo[]> {
+    // Reuse the same generator but stamp a different author per row, so the
+    // result looks like third-party UGC. Deterministic per (tag, platform).
+    const baseline = await this.fetchRecentVideos(`#${tag}`, platform, days);
+    const creators = ["growthwithmya7", "apluslisa", "yapswithalicia", "diegodayy", "ask_julia"];
+    return baseline.map((v, i) => ({
+      ...v,
+      author_handle: creators[i % creators.length],
+      video_url: `https://www.tiktok.com/@${creators[i % creators.length]}/video/${v.external_id}`,
+    }));
+  }
 
   async fetchRecentVideos(handle: string, platform: Platform, days: number): Promise<RawVideo[]> {
     const seed = hashString(`${handle}:${platform}`);

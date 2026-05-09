@@ -29,17 +29,24 @@ program
   });
 
 program
-  .command("search <handle>")
-  .description("Rank a competitor's recent organic videos by reach (default) or recency")
+  .command("search <query>")
+  .description(
+    "Find competitor UGC. `@handle` searches one account; plain word or `#tag` searches third-party creators promoting that brand.",
+  )
   .option("-l, --limit <n>", "max rows", (v) => parseInt(v, 10), 20)
   .option("-s, --sort <mode>", "views | recency", "views")
   .option("-p, --platform <name>", "tiktok | instagram | all", "all")
   .option("-d, --days <n>", "trailing window in days", (v) => parseInt(v, 10), 30)
+  .option(
+    "-m, --mode <mode>",
+    "user | hashtag — override auto-detection from query prefix",
+  )
   .option("--refresh", "force refetch even if cached")
   .option("--json", "emit JSON instead of a table")
-  .action(async (handle: string, raw) => {
+  .action(async (query: string, raw) => {
     // Accept legacy "engagement" as an alias for "views" so existing scripts don't break.
     const sort = raw.sort === "engagement" ? "views" : raw.sort;
+    const mode = raw.mode === "user" || raw.mode === "hashtag" ? raw.mode : undefined;
     const opts: SearchOptions = {
       limit: raw.limit,
       sort,
@@ -47,8 +54,9 @@ program
       json: Boolean(raw.json),
       refresh: Boolean(raw.refresh),
       days: raw.days,
+      mode,
     };
-    await runSearch(handle, opts);
+    await runSearch(query, opts);
   });
 
 const watch = program.command("watch").description("Manage breakout-alert watches");

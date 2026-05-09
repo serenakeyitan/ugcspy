@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 
 export function migrate(db: Database): void {
+  // 1. Create tables (no-op if they exist)
   db.exec(`
     CREATE TABLE IF NOT EXISTS competitors (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -28,6 +29,7 @@ export function migrate(db: Database): void {
       hook_text TEXT NOT NULL DEFAULT '',
       hook_confidence REAL NOT NULL DEFAULT 0,
       format_tag TEXT,
+      author_handle TEXT,
       raw_metrics_json TEXT NOT NULL DEFAULT '{}',
       UNIQUE(platform, external_id)
     );
@@ -52,4 +54,18 @@ export function migrate(db: Database): void {
       UNIQUE(video_id, watch_id)
     );
   `);
+
+  // 2. Forward migrations: add new columns to existing rows. SQLite has no
+  // IF NOT EXISTS for columns; attempt the ALTER and swallow "duplicate
+  // column" errors. Order matters — older DBs without these columns get
+  // patched to current shape on every open.
+  for (const stmt of [
+    `ALTER TABLE videos ADD COLUMN author_handle TEXT`,
+  ]) {
+    try {
+      db.exec(stmt);
+    } catch {
+      // already added
+    }
+  }
 }
