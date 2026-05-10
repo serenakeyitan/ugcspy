@@ -140,19 +140,25 @@ async def run_hashtag(tag: str, days: int) -> None:
     third-party-UGC discovery path — finds creators promoting a brand, not
     the brand's own posts.
 
-    Coverage strategy (two-pass): TikTok's hashtag endpoint is capped at
-    ~200 results per tag, ranked by an opaque algo that often misses real
-    UGC for big brands. We do TWO passes:
+    Coverage strategy (THREE-pass): TikTok's hashtag endpoint is capped
+    at ~200 per tag and ranks by an opaque algo that aggressively
+    DEDUPES per-creator (so a creator with 30 #befreed posts only shows
+    1-2 in the hashtag feed). The fix is to seed creators from hashtags,
+    then pull each seed creator's full feed and re-filter.
 
-      Pass 1: pull the primary tag + brand-app variant.
-      Pass 2: extract campaign codes from pass-1 captions (#brand_NNNN
-              patterns) and query the ones we discovered. This is much
-              cheaper than blind-sweeping a code range, and finds the
-              actual codes the brand is currently running.
+      Pass 1: hashtag fetch — primary tag + brand-app variant.
+      Pass 2: discover campaign codes (#brand_NNNN) from pass-1 captions,
+              fetch each one. (Most BeFreed UGC carries unique campaign
+              codes per video, so this surfaces variety.)
+      Pass 3: enumerate seed creators from passes 1-2 (anyone whose
+              caption matched the precision filter, OR whose handle
+              contains the brand). Fetch each seed creator's full recent
+              feed. Re-apply caption filter.
 
-    Result: a 60-result single-tag query becomes a ~300-500 result
-    multi-variant merge in roughly 3x the wall time, with measurably
-    better coverage of brand-niche UGC."""
+    Result on BeFreed: pass 1+2 gave 71 real UGC posts. Pass 3 surfaces
+    @annaa.learns's 334K-view post (#befreed_0085), @growthwithmya7's
+    157K-view post (#befreed_0124), and ~150-300 more posts from prolific
+    creators that the hashtag feed had de-ranked."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     videos: list[dict] = []
     seen_ids: set[str] = set()
@@ -171,6 +177,13 @@ async def run_hashtag(tag: str, days: int) -> None:
         for code in codes:
             variant = f"{tag}_{code}"
             await _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff)
+
+        # Pass 3: enumerate seed creators, fetch each one's full feed.
+        # We cap at 15 seed creators to bound runtime — sorted by post
+        # count in pass 1+2 so we hit the most-prolific ones first.
+        seed_creators = _discover_seed_creators(videos, tag)
+        for creator in seed_creators[:15]:
+            await _fetch_one_creator(api, creator, videos, seen_ids, cutoff, tag)
     except Exception as e:
         fail(f"TikTokApi error (hashtag): {e}", code=2)
     finally:
@@ -222,6 +235,76 @@ def _discover_campaign_codes(videos, tag):
             seen_codes.add(code)
     # Cap at 12 to bound wall time (each adds ~3-8s scrape)
     return sorted(seen_codes)[:12]
+
+
+def _is_real_ugc_caption(caption, tag):
+    """Mirror of TS isHashtagMatch — does this caption explicitly carry
+    the brand hashtag/mention? Used to qualify seed creators."""
+    import re
+    if not caption:
+        return False
+    escaped = re.escape(tag.lstrip("@#"))
+    pattern = re.compile(
+        r"#" + escaped + r"(?![a-z0-9_])|"
+        r"#" + escaped + r"_\d+|"
+        r"#" + escaped + r"app(?![a-z0-9_])|"
+        r"@" + escaped + r"(?![a-z0-9_])",
+        re.IGNORECASE,
+    )
+    return bool(pattern.search(caption))
+
+
+def _discover_seed_creators(videos, tag):
+    """Identify creators worth pulling full feeds from. Two signals:
+      1. Their handle contains the brand name (e.g. @laura.befreed,
+         @eilisa.befreed) — these are dedicated UGC creators.
+      2. They've posted at least 1 video that passes the precision
+         filter — they've actually tagged this brand at least once.
+
+    Returns creators sorted by post-count desc, deduped."""
+    counts = {}
+    handle_lower_brand = tag.lstrip("@#").lower()
+    for v in videos:
+        author = v.get("_author") or ""
+        if not author:
+            continue
+        # Signal 1: handle contains brand name
+        handle_signal = handle_lower_brand in author.lower()
+        # Signal 2: caption passes the filter
+        caption_signal = _is_real_ugc_caption(v.get("caption") or "", tag)
+        if handle_signal or caption_signal:
+            counts[author] = counts.get(author, 0) + 1
+    # Sort by post count desc — we want to spend our 15-creator budget on
+    # the prolific ones, not one-off matches
+    return sorted(counts.keys(), key=lambda h: -counts[h])
+
+
+async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
+    """Pull a creator's recent feed and merge any posts that pass the
+    precision filter. Per-creator failures are swallowed — one bad
+    handle shouldn't kill the whole pass."""
+    try:
+        user = api.user(handle)
+        async for video in user.videos(count=50):
+            d = video.as_dict
+            raw = _video_to_raw(d, fallback_handle=handle)
+            if raw is None or raw["external_id"] in seen_ids:
+                continue
+            posted_at = datetime.fromisoformat(raw["posted_at"])
+            if posted_at < cutoff:
+                continue
+            # Apply precision filter at fetch time so we don't pollute
+            # videos[] with off-brand posts the creator made.
+            if not _is_real_ugc_caption(raw.get("caption") or "", tag):
+                continue
+            seen_ids.add(raw["external_id"])
+            videos.append(raw)
+    except AttributeError as e:
+        if "no attribute 'id'" in str(e):
+            return
+        raise
+    except Exception:
+        return
 
 
 if __name__ == "__main__":
