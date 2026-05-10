@@ -45,6 +45,8 @@ Returns videos ranked by **views descending** (default — BigSpy-style highest-
 
 Precision filter: hashtag results only keep videos whose caption explicitly carries `#brand`, `#brand_NNNN` (campaign codes), or `@brand`. This rejects unrelated videos that TikTok's hashtag endpoint over-matches.
 
+**First-run wall time is ~90 seconds for an active brand.** The CLI runs four discovery passes (user search → hashtags → campaign codes → seed-creator walk) to work around TikTok's per-hashtag result cap of ~150-200. Tell the user this is expected before running, especially if they're impatient. Subsequent searches on the same brand serve from cache instantly. Use `--refresh` to force a re-fetch (also takes ~90s).
+
 ### Fork (video → creator brief)
 
 ```bash
