@@ -140,25 +140,29 @@ async def run_hashtag(tag: str, days: int) -> None:
     third-party-UGC discovery path — finds creators promoting a brand, not
     the brand's own posts.
 
-    Coverage strategy (THREE-pass): TikTok's hashtag endpoint is capped
-    at ~200 per tag and ranks by an opaque algo that aggressively
-    DEDUPES per-creator (so a creator with 30 #befreed posts only shows
-    1-2 in the hashtag feed). The fix is to seed creators from hashtags,
-    then pull each seed creator's full feed and re-filter.
+    Coverage strategy (FOUR-pass): TikTok's hashtag endpoint is hard-capped
+    at ~150-200 per tag (verified empirically — asking for count=400 yields
+    159) and ranks by an opaque algo that aggressively DEDUPES per-creator
+    (so a creator with 30 #befreed posts only shows 1-2 in the hashtag feed).
 
+    The fix is to use the hashtag feed as a SEED, not the full corpus, then
+    walk each seed creator's individual feed and re-filter:
+
+      Pass 0: user-search for handles matching the brand (`Search.users`).
+              Surfaces dedicated UGC creators like @laura.befreed and the
+              official account @befreedapp. Most candidates are noise
+              (palestine_willbefreed, befreedwinefarm) — the per-caption
+              filter in pass 3 sorts them out.
       Pass 1: hashtag fetch — primary tag + brand-app variant.
       Pass 2: discover campaign codes (#brand_NNNN) from pass-1 captions,
-              fetch each one. (Most BeFreed UGC carries unique campaign
-              codes per video, so this surfaces variety.)
-      Pass 3: enumerate seed creators from passes 1-2 (anyone whose
-              caption matched the precision filter, OR whose handle
-              contains the brand). Fetch each seed creator's full recent
-              feed. Re-apply caption filter.
+              fetch each one. BeFreed and similar brands use these heavily.
+      Pass 3: enumerate seed creators from passes 0-2 + pull each one's
+              full recent feed. Re-apply caption filter so off-brand posts
+              from a creator don't sneak in.
 
-    Result on BeFreed: pass 1+2 gave 71 real UGC posts. Pass 3 surfaces
-    @annaa.learns's 334K-view post (#befreed_0085), @growthwithmya7's
-    157K-view post (#befreed_0124), and ~150-300 more posts from prolific
-    creators that the hashtag feed had de-ranked."""
+    Result on BeFreed: 1-pass gave 60 results (max 41K views). 4-pass gives
+    180+ results (max 334K views) — 6x the corpus, 8x the view ceiling.
+    Wall time: ~95s (single-pass was ~15s)."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     videos: list[dict] = []
     seen_ids: set[str] = set()
@@ -166,6 +170,12 @@ async def run_hashtag(tag: str, days: int) -> None:
     api = None
     try:
         api = await _create_api()
+
+        # Pass 0: user-search seeding — anyone with the brand in their
+        # handle is a UGC-creator candidate. Many will turn out to be
+        # noise (filtered later); the cheap user-search query surfaces
+        # the real ones cheaply.
+        user_search_seeds = await _user_search_seeds(api, tag)
 
         # Pass 1: primary tag + brand-app variant
         pass_1_tags = [tag, f"{tag}app"]
@@ -178,11 +188,11 @@ async def run_hashtag(tag: str, days: int) -> None:
             variant = f"{tag}_{code}"
             await _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff)
 
-        # Pass 3: enumerate seed creators, fetch each one's full feed.
-        # We cap at 15 seed creators to bound runtime — sorted by post
-        # count in pass 1+2 so we hit the most-prolific ones first.
-        seed_creators = _discover_seed_creators(videos, tag)
-        for creator in seed_creators[:15]:
+        # Pass 3: enumerate seed creators (union of user-search seeds,
+        # caption-passing creators, and brand-named handles), fetch
+        # each. Cap at 25 to bound runtime; sorted by signal strength.
+        seed_creators = _merge_seed_creators(videos, tag, user_search_seeds)
+        for creator in seed_creators[:25]:
             await _fetch_one_creator(api, creator, videos, seen_ids, cutoff, tag)
     except Exception as e:
         fail(f"TikTokApi error (hashtag): {e}", code=2)
@@ -194,6 +204,67 @@ async def run_hashtag(tag: str, days: int) -> None:
                 pass
 
     print(json.dumps(videos))
+
+
+async def _user_search_seeds(api, tag):
+    """Use TikTok's user-search endpoint to find handles containing the
+    brand name. Returns a list of usernames (no @). These are CANDIDATES
+    — many will be noise (palestine_willbefreed, befreedwinefarm, etc.)
+    that get filtered out in pass 3 when their captions don't match.
+
+    We pull from two queries: `tag` and `tagapp`, since the official
+    account often uses the latter (e.g. @befreedapp)."""
+    seen = []
+    seen_set = set()
+    for query in [tag, f"{tag}app"]:
+        try:
+            count = 0
+            async for u in api.search.users(query, count=30):
+                username = getattr(u, "username", None)
+                if username and username not in seen_set:
+                    seen.append(username)
+                    seen_set.add(username)
+                count += 1
+                if count >= 25:
+                    break
+        except Exception:
+            continue
+    return seen
+
+
+def _merge_seed_creators(videos, tag, user_search_seeds):
+    """Combine seed signals from all passes:
+      A. Creators whose handle contains the brand name (strongest signal —
+         these are dedicated UGC accounts like @laura.befreed)
+      B. Creators who already have a caption that passed the filter (proven
+         UGC for this brand)
+      C. Usernames from pass-0 user search (may be noise but cheap to add)
+
+    Returns deduped creators sorted: A+B first (strong signals), then C."""
+    handle_lower_brand = tag.lstrip("@#").lower()
+
+    counts = {}
+    handle_match = set()
+    for v in videos:
+        author = (v.get("_author") or "").lower()
+        if not author:
+            continue
+        if handle_lower_brand in author:
+            handle_match.add(author)
+        if _is_real_ugc_caption(v.get("caption") or "", tag):
+            counts[author] = counts.get(author, 0) + 1
+
+    # Strong signals: handle-name match OR caption-filter pass
+    strong = sorted(
+        set(list(handle_match) + list(counts.keys())),
+        key=lambda h: -counts.get(h, 0),
+    )
+    strong_set = set(strong)
+    # Pass-0 user-search candidates that aren't already strong signals
+    weak = [u.lower() for u in user_search_seeds if u.lower() not in strong_set]
+
+    # Strong first (proven), weak second (worth probing)
+    return strong + weak
 
 
 async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff):
@@ -252,31 +323,6 @@ def _is_real_ugc_caption(caption, tag):
         re.IGNORECASE,
     )
     return bool(pattern.search(caption))
-
-
-def _discover_seed_creators(videos, tag):
-    """Identify creators worth pulling full feeds from. Two signals:
-      1. Their handle contains the brand name (e.g. @laura.befreed,
-         @eilisa.befreed) — these are dedicated UGC creators.
-      2. They've posted at least 1 video that passes the precision
-         filter — they've actually tagged this brand at least once.
-
-    Returns creators sorted by post-count desc, deduped."""
-    counts = {}
-    handle_lower_brand = tag.lstrip("@#").lower()
-    for v in videos:
-        author = v.get("_author") or ""
-        if not author:
-            continue
-        # Signal 1: handle contains brand name
-        handle_signal = handle_lower_brand in author.lower()
-        # Signal 2: caption passes the filter
-        caption_signal = _is_real_ugc_caption(v.get("caption") or "", tag)
-        if handle_signal or caption_signal:
-            counts[author] = counts.get(author, 0) + 1
-    # Sort by post count desc — we want to spend our 15-creator budget on
-    # the prolific ones, not one-off matches
-    return sorted(counts.keys(), key=lambda h: -counts[h])
 
 
 async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
