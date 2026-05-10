@@ -267,28 +267,47 @@ def _merge_seed_creators(videos, tag, user_search_seeds):
     return strong + weak
 
 
-async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff):
-    """Fetch one hashtag's videos and merge into shared lists. Failures
-    are swallowed per-variant — a missing tag or transient bot-detection
-    blip shouldn't kill the whole search."""
-    try:
-        hashtag = api.hashtag(name=variant)
-        async for video in hashtag.videos(count=200):
-            d = video.as_dict
-            raw = _video_to_raw(d)
-            if raw is None or raw["external_id"] in seen_ids:
-                continue
-            posted_at = datetime.fromisoformat(raw["posted_at"])
-            if posted_at < cutoff:
-                continue
-            seen_ids.add(raw["external_id"])
-            videos.append(raw)
-    except AttributeError as e:
-        if "'Hashtag' object has no attribute 'id'" in str(e):
-            return  # tag doesn't exist
-        raise
-    except Exception:
-        return  # rate-limit, bot-detection, etc — skip this variant
+async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff, max_rounds=3, saturation_threshold=5):
+    """Fetch one hashtag's videos and merge into shared lists.
+
+    Repeat-querying gain (verified empirically May 2026): TikTok's hashtag
+    feed rotates slightly between calls. A single round of `#befreed`
+    returns ~140 videos; 5 rounds returns ~200 unique. The first 2-3 rounds
+    capture most of the gain (round 1: +142, round 2: +24, round 3: +4).
+    We loop until a round adds fewer than `saturation_threshold` new
+    videos (default 5), bounded by `max_rounds` (default 3) to cap wall
+    time. Each round costs ~5-10s.
+
+    Failures are swallowed per-round — a missing tag or transient bot-
+    detection blip shouldn't kill the whole search."""
+    saturated = False
+    for round_num in range(max_rounds):
+        if saturated:
+            break
+        new_this_round = 0
+        try:
+            hashtag = api.hashtag(name=variant)
+            async for video in hashtag.videos(count=200):
+                d = video.as_dict
+                raw = _video_to_raw(d)
+                if raw is None or raw["external_id"] in seen_ids:
+                    continue
+                posted_at = datetime.fromisoformat(raw["posted_at"])
+                if posted_at < cutoff:
+                    continue
+                seen_ids.add(raw["external_id"])
+                videos.append(raw)
+                new_this_round += 1
+        except AttributeError as e:
+            if "'Hashtag' object has no attribute 'id'" in str(e):
+                return  # tag doesn't exist — no point retrying
+            raise
+        except Exception:
+            return  # transient error — skip this variant entirely
+
+        # Saturation: if this round added almost nothing, stop early
+        if round_num > 0 and new_this_round < saturation_threshold:
+            saturated = True
 
 
 def _discover_campaign_codes(videos, tag):
