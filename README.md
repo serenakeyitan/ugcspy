@@ -82,9 +82,18 @@ To compensate, hashtag-mode search runs four passes plus repeat-querying within 
 
 **Repeat-querying within passes 1-2.** TikTok rotates the hashtag feed slightly between calls — same query gives different videos each round. Each hashtag is queried up to 3 times, breaking early when a round adds fewer than 5 new videos. Empirical gain: `#befreed` returns 142 unique videos in round 1, 198 unique after 5 rounds (+39%). Smaller campaign-code feeds gain more (`#befreed_0085`: 55 → 80, +45%).
 
-**Bounded parallelism (concurrency=8).** Hashtag and creator fetches inside each pass run concurrently. Tested empirically: 4 sequential fetches took 21s; 4 parallel took 7s; 8 parallel took 7.2s with zero rate-limit errors. Going beyond 8 reliably trips bot detection after a few searches and DEGRADES coverage (once rate-limited, even single-call fetches return empty for ~10-20 minutes).
+**Bounded parallelism (concurrency=12).** Hashtag and creator fetches inside each pass run concurrently. Tested empirically across multiple fresh-IP runs:
 
-If you have an `MS_TOKEN` cookie set (see Troubleshooting), your session has a much higher rate-limit ceiling and you can crank concurrency up:
+| Concurrency | Probe (16 hashtags) | Pipeline E2E | Errors |
+|---|---:|---:|---:|
+| 4 | 6.8s | n/a | 0 |
+| 8 | 11.4s | ~67s | 0 |
+| **12** | **7.0s** | **~68s** | **0** |
+| 16 | 7.0s | ~62s | 0 |
+
+Past 12 the per-request latency dominates, so 16 is only ~10% faster end-to-end. We pick 12 as the default — conservative enough to be safe on slower IPs, fast enough to capture the meaningful gain.
+
+If you have an `MS_TOKEN` cookie set (see Troubleshooting), your session has a higher rate-limit ceiling and you can crank concurrency up via env var:
 
 ```bash
 export MS_TOKEN="<your-token>"
@@ -92,7 +101,7 @@ export UGCSPY_CONCURRENCY=16    # or 24 if your token is fresh
 ugcspy search befreed
 ```
 
-Without MS_TOKEN, leave it at the default 8. Asymmetric downside: best case +30% speed, worst case 10x slower and 0 results.
+Cautionary note: pushing concurrency aggressively after an IP gets throttled returns ZERO videos for 10-20 minutes — not just "slower". See [commit 2610607](https://github.com/serenakeyitan/ugcspy/commit/2610607) for the post-mortem.
 
 Result for BeFreed: 60 videos via single-hashtag → 410-440 videos via four-pass + repeat-query + parallel. Ceiling went from 41K views to 335K views. Wall time: ~15s single-pass → ~160s four-pass sequential → **~67s four-pass parallel**.
 

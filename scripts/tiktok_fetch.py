@@ -213,19 +213,32 @@ async def run_hashtag(tag: str, days: int) -> None:
 def _concurrency_limit():
     """Concurrency cap for parallel hashtag/creator fetches.
 
-    Default is 8 — empirically validated to work without tripping
-    TikTok's bot detection (probed May 2026: 4 sequential = 21s,
-    4 parallel = 7s, 8 parallel = 7.2s with zero errors).
+    Default is 12 — empirically validated against fresh-IP probes:
 
-    Users with MS_TOKEN set (browser-cookie-authed sessions) typically
-    have a much higher rate-limit ceiling and may want to go higher.
+      Probe (16 hashtags, fresh IP, May 2026):
+        c=4  -> 6.8s,  387 videos, 0 errors
+        c=8  -> 11.4s, 1186 videos, 0 errors  <-- old default
+        c=12 -> 7.0s,  1172 videos, 0 errors  <-- new default
+        c=16 -> 7.0s,  1207 videos, 0 errors
+
+      Full pipeline E2E:
+        c=8  -> 67s, 410-440 videos
+        c=12 -> 68s, 444 videos
+        c=16 -> 62s, 444 videos
+
+    The probe gain from 8 -> 12 is real (1.6x faster, same coverage).
+    Past 12 the per-request latency dominates, so 16 is only ~10%
+    faster end-to-end. We pick 12 as conservative enough to not risk
+    rate-limiting on slower IPs while capturing the meaningful gain.
+
+    Users with MS_TOKEN set (browser-cookie-authed sessions) have a
+    higher rate-limit ceiling and may safely go to 16 or 24.
     Override via env: `UGCSPY_CONCURRENCY=16 ugcspy search ...`
 
-    Pushing past 8 without MS_TOKEN reliably trips bot detection
-    after a few searches and DEGRADES coverage on subsequent passes —
-    once rate-limited, even single-call fetches return empty. See
-    commit 2610607 for the post-mortem on aggressive scraping.
-    Don't raise the default unless you have data showing it's safe."""
+    Cautionary tale (commit 2610607): pushing scraping aggressively
+    AFTER an IP is already throttled returns ZERO videos for ~10-20
+    minutes — not just "less, but slower". The 12 default has measured
+    safety margin; don't bump it without fresh-IP probe data."""
     raw = os.environ.get("UGCSPY_CONCURRENCY", "")
     try:
         n = int(raw)
@@ -233,7 +246,7 @@ def _concurrency_limit():
             return n
     except (ValueError, TypeError):
         pass
-    return 8
+    return 12
 
 
 async def _gather_with_concurrency(limit, coros):
