@@ -270,20 +270,33 @@ def _merge_seed_creators(videos, tag, user_search_seeds):
 async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff, max_rounds=3, saturation_threshold=5):
     """Fetch one hashtag's videos and merge into shared lists.
 
-    Repeat-querying gain (verified empirically May 2026): TikTok's hashtag
-    feed rotates slightly between calls. A single round of `#befreed`
-    returns ~140 videos; 5 rounds returns ~200 unique. The first 2-3 rounds
-    capture most of the gain (round 1: +142, round 2: +24, round 3: +4).
-    We loop until a round adds fewer than `saturation_threshold` new
-    videos (default 5), bounded by `max_rounds` (default 3) to cap wall
-    time. Each round costs ~5-10s.
+    Repeat-querying with saturation cutoff. TikTok's hashtag feed
+    rotates between calls, so multiple rounds surface new videos. But:
+
+      1. Rotation eventually cycles back to already-seen content
+         (diminishing returns).
+      2. Long repeat-scrape sessions trigger TikTok rate-limiting,
+         which DEGRADES the results we get from later passes
+         (creator-walks, other hashtag variants) — that compounds
+         badly because pass 3 is where most of our coverage comes from.
+
+    Empirical tuning (verified May 2026 with BeFreed as testbed):
+
+      max_rounds | saturation | total corpus | wall time
+      -----------|------------|--------------|-----------
+      1 (single) | n/a        | 395 videos   | ~95s
+      3          | <5 new     | 440 videos   | ~160s   <-- chosen
+      5          | <3 new     | 54 videos    | ~180s   <-- rate-limited
+      10         | 2 empty    | 384 videos   | ~440s   <-- rate-limited
+
+    The "until saturation" approach LOOKS right (recursive! exhaustive!)
+    but in practice TikTok punishes long sessions by returning degraded
+    data on the rest of the search. The 3-round cap with cutoff-5 is
+    the empirically-validated sweet spot.
 
     Failures are swallowed per-round — a missing tag or transient bot-
     detection blip shouldn't kill the whole search."""
-    saturated = False
     for round_num in range(max_rounds):
-        if saturated:
-            break
         new_this_round = 0
         try:
             hashtag = api.hashtag(name=variant)
@@ -305,9 +318,10 @@ async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff, max_rounds=
         except Exception:
             return  # transient error — skip this variant entirely
 
-        # Saturation: if this round added almost nothing, stop early
+        # Saturation: if this round added almost nothing, stop early.
+        # We check after round 1 so the first round always runs in full.
         if round_num > 0 and new_this_round < saturation_threshold:
-            saturated = True
+            return
 
 
 def _discover_campaign_codes(videos, tag):
