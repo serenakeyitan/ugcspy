@@ -30,7 +30,7 @@ bun run src/cli.ts search befreed --platform tiktok --limit 10
 
 That's it. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.
 
-**Heads up on wall time.** A first-run hashtag search (`ugcspy search befreed`) takes ~150 seconds for an active UGC brand because we run four discovery passes (user search → hashtags → campaign codes → seed-creator walk) and repeat-query each hashtag until saturation, to work around TikTok's per-hashtag result cap. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh fetch. See [Why hashtag mode is the default](#why-hashtag-mode-is-the-default) for the architecture.
+**Heads up on wall time.** A first-run hashtag search (`ugcspy search befreed`) takes ~60-90 seconds for an active UGC brand. We run four discovery passes (user search → hashtags → campaign codes → seed-creator walk) with up to 8 concurrent fetches per pass, plus repeat-query within each hashtag until saturation. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh fetch. See [Why hashtag mode is the default](#why-hashtag-mode-is-the-default) for the architecture.
 
 Skip step 2 if you only want to try the CLI shape — the `mock` provider serves deterministic synthetic data with zero setup.
 
@@ -82,7 +82,9 @@ To compensate, hashtag-mode search runs four passes plus repeat-querying within 
 
 **Repeat-querying within passes 1-2.** TikTok rotates the hashtag feed slightly between calls — same query gives different videos each round. Each hashtag is queried up to 3 times, breaking early when a round adds fewer than 5 new videos. Empirical gain: `#befreed` returns 142 unique videos in round 1, 198 unique after 5 rounds (+39%). Smaller campaign-code feeds gain more (`#befreed_0085`: 55 → 80, +45%).
 
-Result for BeFreed: 60 videos via single-hashtag → 440 videos via four-pass + repeat-query. Ceiling went from 41K views to 334K views.
+**Bounded parallelism (concurrency=8).** Hashtag and creator fetches inside each pass run concurrently. Tested empirically: 4 sequential fetches took 21s; 4 parallel took 7s; 8 parallel took 7.2s with zero rate-limit errors. Going beyond 8 is untested; we cap to stay within TikTok's session goodwill (long aggressive scraping degrades downstream passes — see [commit 2610607](https://github.com/serenakeyitan/ugcspy/commit/2610607) for the post-mortem on attempting "until empty" saturation).
+
+Result for BeFreed: 60 videos via single-hashtag → 410-440 videos via four-pass + repeat-query + parallel. Ceiling went from 41K views to 335K views. Wall time: ~15s single-pass → ~160s four-pass sequential → **~67s four-pass parallel**.
 
 **What we cannot do (free path limits):**
 - **Pull a brand's "following" list.** TikTok gates this behind auth; TikTokApi doesn't expose it. If `@befreedapp` follows 30 UGC creators we don't surface another way, we miss them.
