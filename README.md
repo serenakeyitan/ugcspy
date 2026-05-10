@@ -82,7 +82,17 @@ To compensate, hashtag-mode search runs four passes plus repeat-querying within 
 
 **Repeat-querying within passes 1-2.** TikTok rotates the hashtag feed slightly between calls — same query gives different videos each round. Each hashtag is queried up to 3 times, breaking early when a round adds fewer than 5 new videos. Empirical gain: `#befreed` returns 142 unique videos in round 1, 198 unique after 5 rounds (+39%). Smaller campaign-code feeds gain more (`#befreed_0085`: 55 → 80, +45%).
 
-**Bounded parallelism (concurrency=8).** Hashtag and creator fetches inside each pass run concurrently. Tested empirically: 4 sequential fetches took 21s; 4 parallel took 7s; 8 parallel took 7.2s with zero rate-limit errors. Going beyond 8 is untested; we cap to stay within TikTok's session goodwill (long aggressive scraping degrades downstream passes — see [commit 2610607](https://github.com/serenakeyitan/ugcspy/commit/2610607) for the post-mortem on attempting "until empty" saturation).
+**Bounded parallelism (concurrency=8).** Hashtag and creator fetches inside each pass run concurrently. Tested empirically: 4 sequential fetches took 21s; 4 parallel took 7s; 8 parallel took 7.2s with zero rate-limit errors. Going beyond 8 reliably trips bot detection after a few searches and DEGRADES coverage (once rate-limited, even single-call fetches return empty for ~10-20 minutes).
+
+If you have an `MS_TOKEN` cookie set (see Troubleshooting), your session has a much higher rate-limit ceiling and you can crank concurrency up:
+
+```bash
+export MS_TOKEN="<your-token>"
+export UGCSPY_CONCURRENCY=16    # or 24 if your token is fresh
+ugcspy search befreed
+```
+
+Without MS_TOKEN, leave it at the default 8. Asymmetric downside: best case +30% speed, worst case 10x slower and 0 results.
 
 Result for BeFreed: 60 videos via single-hashtag → 410-440 videos via four-pass + repeat-query + parallel. Ceiling went from 41K views to 335K views. Wall time: ~15s single-pass → ~160s four-pass sequential → **~67s four-pass parallel**.
 

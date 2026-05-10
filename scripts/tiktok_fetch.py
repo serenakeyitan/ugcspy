@@ -179,7 +179,7 @@ async def run_hashtag(tag: str, days: int) -> None:
         # Each call returns its own list; merged serially below.
         pass_1_tags = [tag, f"{tag}app"]
         pass_1_results = await _gather_with_concurrency(
-            8, [_fetch_hashtag_isolated(api, v, cutoff) for v in pass_1_tags]
+            _concurrency_limit(), [_fetch_hashtag_isolated(api, v, cutoff) for v in pass_1_tags]
         )
         _merge_into_videos(pass_1_results, videos, seen_ids)
 
@@ -208,6 +208,32 @@ async def run_hashtag(tag: str, days: int) -> None:
                 pass
 
     print(json.dumps(videos))
+
+
+def _concurrency_limit():
+    """Concurrency cap for parallel hashtag/creator fetches.
+
+    Default is 8 — empirically validated to work without tripping
+    TikTok's bot detection (probed May 2026: 4 sequential = 21s,
+    4 parallel = 7s, 8 parallel = 7.2s with zero errors).
+
+    Users with MS_TOKEN set (browser-cookie-authed sessions) typically
+    have a much higher rate-limit ceiling and may want to go higher.
+    Override via env: `UGCSPY_CONCURRENCY=16 ugcspy search ...`
+
+    Pushing past 8 without MS_TOKEN reliably trips bot detection
+    after a few searches and DEGRADES coverage on subsequent passes —
+    once rate-limited, even single-call fetches return empty. See
+    commit 2610607 for the post-mortem on aggressive scraping.
+    Don't raise the default unless you have data showing it's safe."""
+    raw = os.environ.get("UGCSPY_CONCURRENCY", "")
+    try:
+        n = int(raw)
+        if n >= 1:
+            return n
+    except (ValueError, TypeError):
+        pass
+    return 8
 
 
 async def _gather_with_concurrency(limit, coros):
