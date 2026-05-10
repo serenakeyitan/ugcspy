@@ -140,29 +140,30 @@ async def run_hashtag(tag: str, days: int) -> None:
     third-party-UGC discovery path — finds creators promoting a brand, not
     the brand's own posts.
 
-    Coverage strategy (FOUR-pass): TikTok's hashtag endpoint is hard-capped
-    at ~150-200 per tag (verified empirically — asking for count=400 yields
-    159) and ranks by an opaque algo that aggressively DEDUPES per-creator
-    (so a creator with 30 #befreed posts only shows 1-2 in the hashtag feed).
-
-    The fix is to use the hashtag feed as a SEED, not the full corpus, then
-    walk each seed creator's individual feed and re-filter:
+    Coverage strategy (FOUR-pass with bounded parallelism): TikTok's
+    hashtag endpoint returns ~140-200 per call and dedupes aggressively
+    per-creator. Single-hashtag is wildly incomplete; we work around it
+    via four passes:
 
       Pass 0: user-search for handles matching the brand (`Search.users`).
               Surfaces dedicated UGC creators like @laura.befreed and the
-              official account @befreedapp. Most candidates are noise
-              (palestine_willbefreed, befreedwinefarm) — the per-caption
-              filter in pass 3 sorts them out.
-      Pass 1: hashtag fetch — primary tag + brand-app variant.
+              official account @befreedapp.
+      Pass 1: hashtag fetch — primary tag + brand-app variant (parallel).
       Pass 2: discover campaign codes (#brand_NNNN) from pass-1 captions,
-              fetch each one. BeFreed and similar brands use these heavily.
+              fetch each one (parallel).
       Pass 3: enumerate seed creators from passes 0-2 + pull each one's
-              full recent feed. Re-apply caption filter so off-brand posts
-              from a creator don't sneak in.
+              full recent feed (parallel). Re-apply caption filter.
 
-    Result on BeFreed: 1-pass gave 60 results (max 41K views). 4-pass gives
-    180+ results (max 334K views) — 6x the corpus, 8x the view ceiling.
-    Wall time: ~95s (single-pass was ~15s)."""
+    Parallelization cap: 8 concurrent fetches. Verified empirically — 4
+    sequential fetches took 21s, 4 parallel took 7s (~3x speedup); 8
+    parallel took 7.2s with zero rate-limit errors. Going beyond 8 is
+    untested and risks tripping TikTok's anti-abuse rules.
+
+    Each task returns its own video list; merging happens serially after
+    asyncio.gather to avoid race conditions on shared state.
+
+    Result on BeFreed: ~440 videos, max 334K views. Wall time:
+    ~95s sequential -> ~45s parallel (estimated)."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     videos: list[dict] = []
     seen_ids: set[str] = set()
@@ -171,29 +172,32 @@ async def run_hashtag(tag: str, days: int) -> None:
     try:
         api = await _create_api()
 
-        # Pass 0: user-search seeding — anyone with the brand in their
-        # handle is a UGC-creator candidate. Many will turn out to be
-        # noise (filtered later); the cheap user-search query surfaces
-        # the real ones cheaply.
+        # Pass 0: user-search seeding (sequential — single fast call)
         user_search_seeds = await _user_search_seeds(api, tag)
 
-        # Pass 1: primary tag + brand-app variant
+        # Pass 1: primary tag + brand-app variant — fetched in parallel.
+        # Each call returns its own list; merged serially below.
         pass_1_tags = [tag, f"{tag}app"]
-        for variant in pass_1_tags:
-            await _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff)
+        pass_1_results = await _gather_with_concurrency(
+            8, [_fetch_hashtag_isolated(api, v, cutoff) for v in pass_1_tags]
+        )
+        _merge_into_videos(pass_1_results, videos, seen_ids)
 
-        # Pass 2: discover campaign codes from pass-1 captions, query each
+        # Pass 2: discover campaign codes, fetch all in parallel
         codes = _discover_campaign_codes(videos, tag)
-        for code in codes:
-            variant = f"{tag}_{code}"
-            await _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff)
+        if codes:
+            pass_2_results = await _gather_with_concurrency(
+                8, [_fetch_hashtag_isolated(api, f"{tag}_{c}", cutoff) for c in codes]
+            )
+            _merge_into_videos(pass_2_results, videos, seen_ids)
 
-        # Pass 3: enumerate seed creators (union of user-search seeds,
-        # caption-passing creators, and brand-named handles), fetch
-        # each. Cap at 25 to bound runtime; sorted by signal strength.
+        # Pass 3: seed creators in parallel
         seed_creators = _merge_seed_creators(videos, tag, user_search_seeds)
-        for creator in seed_creators[:25]:
-            await _fetch_one_creator(api, creator, videos, seen_ids, cutoff, tag)
+        if seed_creators:
+            pass_3_results = await _gather_with_concurrency(
+                8, [_fetch_creator_isolated(api, c, cutoff, tag) for c in seed_creators[:25]]
+            )
+            _merge_into_videos(pass_3_results, videos, seen_ids)
     except Exception as e:
         fail(f"TikTokApi error (hashtag): {e}", code=2)
     finally:
@@ -204,6 +208,32 @@ async def run_hashtag(tag: str, days: int) -> None:
                 pass
 
     print(json.dumps(videos))
+
+
+async def _gather_with_concurrency(limit, coros):
+    """asyncio.gather but bounded — at most `limit` coroutines run
+    concurrently. Prevents overwhelming TikTok with 25 parallel
+    requests when seed_creators is full."""
+    semaphore = asyncio.Semaphore(limit)
+    async def bounded(coro):
+        async with semaphore:
+            return await coro
+    return await asyncio.gather(*(bounded(c) for c in coros))
+
+
+def _merge_into_videos(per_task_results, videos, seen_ids):
+    """Serial merge of per-task results into the shared videos list,
+    deduplicating by external_id. Runs after all parallel fetches
+    complete, so no race conditions."""
+    for task_videos in per_task_results:
+        if not task_videos:
+            continue
+        for v in task_videos:
+            ext = v.get("external_id")
+            if not ext or ext in seen_ids:
+                continue
+            seen_ids.add(ext)
+            videos.append(v)
 
 
 async def _user_search_seeds(api, tag):
@@ -265,6 +295,28 @@ def _merge_seed_creators(videos, tag, user_search_seeds):
 
     # Strong first (proven), weak second (worth probing)
     return strong + weak
+
+
+async def _fetch_hashtag_isolated(api, variant, cutoff, max_rounds=3, saturation_threshold=5):
+    """Parallel-safe wrapper around _fetch_one_hashtag. Each call has
+    its own local seen_ids and videos list; results are merged later
+    by _merge_into_videos. Same repeat-query semantics as the
+    sequential version."""
+    local_videos = []
+    local_seen = set()
+    await _fetch_one_hashtag(api, variant, local_videos, local_seen, cutoff,
+                             max_rounds=max_rounds,
+                             saturation_threshold=saturation_threshold)
+    return local_videos
+
+
+async def _fetch_creator_isolated(api, handle, cutoff, tag):
+    """Parallel-safe wrapper around _fetch_one_creator. Returns a
+    per-creator video list to be merged serially after gather."""
+    local_videos = []
+    local_seen = set()
+    await _fetch_one_creator(api, handle, local_videos, local_seen, cutoff, tag)
+    return local_videos
 
 
 async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff, max_rounds=3, saturation_threshold=5):
