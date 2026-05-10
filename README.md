@@ -30,7 +30,7 @@ bun run src/cli.ts search befreed --platform tiktok --limit 10
 
 That's it. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.
 
-**Heads up on wall time.** A first-run hashtag search (`ugcspy search befreed`) takes ~90 seconds for an active UGC brand because we run four discovery passes (user search → hashtags → campaign codes → seed-creator walk) to work around TikTok's per-hashtag result cap. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh fetch. See [Why hashtag mode is the default](#why-hashtag-mode-is-the-default) for the architecture.
+**Heads up on wall time.** A first-run hashtag search (`ugcspy search befreed`) takes ~150 seconds for an active UGC brand because we run four discovery passes (user search → hashtags → campaign codes → seed-creator walk) and repeat-query each hashtag until saturation, to work around TikTok's per-hashtag result cap. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh fetch. See [Why hashtag mode is the default](#why-hashtag-mode-is-the-default) for the architecture.
 
 Skip step 2 if you only want to try the CLI shape — the `mock` provider serves deterministic synthetic data with zero setup.
 
@@ -69,23 +69,25 @@ The BigSpy-for-UGC question is "who's posting about this brand?", not "what is t
 
 A precision filter rejects videos that TikTok's hashtag endpoint over-matches (e.g. "be freed" / "freed" appearing in unrelated contexts collide with `#befreed`). Only videos with an explicit `#brand`, `#brand_NNNN` campaign code, or `@brand` mention are kept.
 
-### How hashtag search actually works (four-pass discovery)
+### How hashtag search actually works (four-pass discovery + repeat-querying)
 
-Single-hashtag scraping has a hard ceiling: TikTok caps `#brand` at ~150-200 results and ranks them with an opaque algo that aggressively dedupes per-creator. A creator with 30 `#befreed` posts will only show 1-2 in the hashtag feed. So the hashtag feed alone is **wildly incomplete** for any active UGC brand.
+Single-hashtag scraping has a soft ceiling: TikTok returns ~140-200 results per call and ranks them with an opaque algo that aggressively dedupes per-creator. A creator with 30 `#befreed` posts will only show 1-2 in any single hashtag feed call. So one hashtag query is **wildly incomplete** for any active UGC brand.
 
-To compensate, hashtag-mode search runs four passes (typically ~90 seconds for an active brand):
+To compensate, hashtag-mode search runs four passes plus repeat-querying within each pass (typically ~150 seconds for an active brand):
 
 1. **Pass 0 — user search.** Query TikTok's `Search.users` endpoint for handles matching the brand (e.g. `@laura.befreed`, `@befreedapp`). Most candidates are noise (`@palestine_willbefreed`, `@befreedwinefarm`); pass 3's caption filter sorts them out for free.
 2. **Pass 1 — hashtag fetch.** Pull `#brand` + `#brandapp` (the common SaaS pattern: `#notionapp`, `#befreedapp`).
 3. **Pass 2 — campaign codes.** Extract `#brand_NNNN` patterns from pass-1 captions and fetch each. Brand-controlled campaign codes are the strongest UGC signal (only paid creators use them).
 4. **Pass 3 — seed creators.** Union all creators from passes 0-2 (handle-name match + caption-filter-pass + user-search seeds), then pull each one's full recent feed (count=50). Re-apply the caption filter so off-brand posts don't sneak in.
 
-Result for BeFreed: 60 videos via single-hashtag → 395 videos via four-pass. Ceiling went from 41K views to 334K views.
+**Repeat-querying within passes 1-2.** TikTok rotates the hashtag feed slightly between calls — same query gives different videos each round. Each hashtag is queried up to 3 times, breaking early when a round adds fewer than 5 new videos. Empirical gain: `#befreed` returns 142 unique videos in round 1, 198 unique after 5 rounds (+39%). Smaller campaign-code feeds gain more (`#befreed_0085`: 55 → 80, +45%).
+
+Result for BeFreed: 60 videos via single-hashtag → 440 videos via four-pass + repeat-query. Ceiling went from 41K views to 334K views.
 
 **What we cannot do (free path limits):**
 - **Pull a brand's "following" list.** TikTok gates this behind auth; TikTokApi doesn't expose it. If `@befreedapp` follows 30 UGC creators we don't surface another way, we miss them.
-- **Paginate past ~150 results in a single hashtag.** TikTok caps unauthenticated hashtag feeds.
 - **Pull a brand's "liked" list.** TikTok hides likes by default for most accounts.
+- **Use `Search.videos` for keyword matching** — TikTokApi v7 only exposes `Search.users`.
 
 For these, you'd need paid ScrapeCreators (handles auth-required endpoints).
 

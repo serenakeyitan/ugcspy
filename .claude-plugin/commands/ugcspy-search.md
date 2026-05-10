@@ -36,7 +36,7 @@ If they passed `--json`, parse the array and summarize the top 5 in a markdown t
 
 ## Wall time
 
-Hashtag-mode first-run on an active brand takes ~90 seconds (four discovery passes to work around TikTok's per-hashtag result cap). Tell the user this BEFORE invoking — they should know what they're waiting for. User-mode (`@brand`) is much faster (~10-20s, single fetch).
+Hashtag-mode first-run on an active brand takes ~150 seconds (four discovery passes + repeat-querying within each hashtag, to work around TikTok's per-hashtag result cap). Tell the user this BEFORE invoking — they should know what they're waiting for. User-mode (`@brand`) is much faster (~10-20s, single fetch).
 
 Subsequent searches on the same brand serve from cache instantly. Use `--refresh` for a fresh fetch.
 

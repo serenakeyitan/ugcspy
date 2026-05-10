@@ -15,13 +15,13 @@ The original spec assumed an Anthropic API key for hook extraction + brief gener
 - **Free TikTok-OSS provider as default.** Wraps davidteather/TikTok-Api via a Python subprocess. ScrapeCreators is now an optional upgrade for users who need IG Reels coverage. See commit 5ca3883.
 - **Hashtag-mode search is the default for plain-word queries** (`ugcspy search befreed`). The original spec only had `@handle` search (the brand's own posts). Real BigSpy-for-UGC use case is *finding third-party creators promoting a brand*, which requires hashtag search. See commit 5ed4073.
 - **Ranking is by views (reach), not engagement rate.** Engagement-rate ranking inflated tiny videos above genuinely viral ones. Now matches BigSpy's actual behavior. See commit f0284a5.
-- **Four-pass coverage strategy for hashtag search.** Single-hashtag is hard-capped at ~150-200 results. The shipped CLI runs (0) user-search seeding, (1) hashtag fetch, (2) campaign-code discovery, (3) seed-creator walk. Wall time ~90s for an active brand; corpus expands from ~60 to ~400+ videos, max view ceiling jumps ~8x. See commits 2093f7e, 64e492a, 8a7cd90.
+- **Four-pass coverage strategy + repeat-querying for hashtag search.** Single-hashtag returns ~140-200 per call. The shipped CLI runs (0) user-search seeding, (1) hashtag fetch, (2) campaign-code discovery, (3) seed-creator walk; each hashtag is also repeat-queried up to 3 times until a round adds fewer than 5 new videos (TikTok rotates the feed slightly between calls). Wall time ~150s for an active brand; corpus expands from ~60 to ~440 videos, max view ceiling jumps ~8x. See commits 2093f7e, 64e492a, 8a7cd90, 85c0cc2.
 - **Watch + daemon (alerts) shipped but moved to "Optional" in the docs** — not part of the demo flow. Search + fork is the core. See commit f0284a5.
 
 ## Known limits of the free path (documented honestly)
 
 - `User.following` is not exposed by TikTokApi v7 — TikTok gates following lists behind auth. If `@befreedapp` follows their UGC creators, we can't directly enumerate them. Workaround: pass-0 user-search surfaces handles containing the brand name, which catches most dedicated UGC creators.
-- Hashtag pagination caps at ~150-200 in TikTok itself, regardless of `count` parameter.
+- Single-hashtag responses cap at ~140-200 per call. TikTok rotates the feed slightly between calls, so repeat-querying works (~+39% unique videos after 5 rounds), with diminishing returns by round 3-4. The CLI now repeat-queries up to 3 rounds per hashtag with a saturation cutoff.
 - `User.liked` returns 0 for most accounts — TikTok hides likes by default.
 - `Search.videos` is not exposed (only `Search.users` works in v7).
 
