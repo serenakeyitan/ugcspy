@@ -53,21 +53,17 @@ src/
   commands/
     init.ts                  # interactive config wizard
     install-deps.ts          # one-shot Python dep installer
-    search.ts                # `ugcspy search`
-    watch.ts                 # `ugcspy watch add/list/remove`
-    daemon.ts                # `ugcspy daemon` poll loop
-    fork.ts                  # `ugcspy fork` -> Sonnet 4.6 brief
+    search.ts                # `ugcspy search` (hashtag + user modes)
+    watch.ts                 # `ugcspy watch add/list/remove` (optional alerts)
+    daemon.ts                # `ugcspy daemon` poll loop (optional alerts)
   providers/
     types.ts                 # DataProvider interface
     mock.ts                  # deterministic synthetic data
     tiktok-oss.ts            # Bun -> Python bridge to davidteather/TikTok-Api
-    scrapecreators.ts        # paid TikTok + IG provider (stub for now)
+    scrapecreators.ts        # paid TikTok + IG provider (stub)
     index.ts                 # provider switch
-  extractors/
-    hook.ts                  # caption -> Sonnet vision -> Whisper fallback
-    format.ts                # 10-tag closed-list classifier (Haiku)
   lib/
-    breakout.ts              # detection math (medians, thresholds, 24h window)
+    breakout.ts              # alert math (medians, thresholds, 24h window)
     config.ts                # ~/.ugcspy/config.json
     slack.ts                 # webhook formatter + poster
   db/
@@ -76,12 +72,17 @@ src/
   types.ts                   # platform-wide types
 
 scripts/
-  tiktok_fetch.py            # Python bridge (TikTokApi wrapper)
-  requirements.txt           # pip deps
+  tiktok_fetch.py            # Python bridge — 4-pass hashtag discovery
+  requirements.txt           # pip deps (TikTokApi + playwright)
 
 test/                        # bun:test suites
-.claude-plugin/              # Claude Code plugin (slash commands + skill)
+.claude-plugin/              # Claude Code plugin
+  plugin.json                # plugin manifest
+  commands/                  # slash commands: setup, search, fork, watch, daemon
+  skills/ugcspy/SKILL.md     # intent-triggered skill
 ```
+
+Note: brief generation (`/ugcspy-fork`) is implemented inside the Claude Code plugin command file, not as a standalone CLI subcommand — it uses the user's Claude Code subscription instead of an Anthropic API key.
 
 ## Adding a new data provider
 

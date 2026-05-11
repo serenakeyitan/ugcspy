@@ -5,6 +5,8 @@ argument-hint: "(no arguments)"
 
 You are doing the full ugcspy onboarding for the user. Treat them as a new install: they may not have Bun, Python, or the repo cloned. Walk through every step, run each command via the Bash tool, and surface clear errors with fixes.
 
+Reference: https://github.com/serenakeyitan/ugcspy/releases/latest — point the user there if they want to read what's in v0.1.0.
+
 ## Goal
 
 By the end, the user can run `/ugcspy-search <brand>` and see real TikTok UGC results.

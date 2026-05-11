@@ -1,24 +1,30 @@
 # ugcspy
 
-BigSpy for organic UGC. A Claude Code plugin (and standalone CLI) for spying on competitor short-form video on TikTok and Instagram Reels — type a handle, get the videos that are actually getting views, then turn any video into a creator brief without leaving your chat.
+[![release](https://img.shields.io/github/v/release/serenakeyitan/ugcspy)](https://github.com/serenakeyitan/ugcspy/releases/latest)
+[![ci](https://github.com/serenakeyitan/ugcspy/actions/workflows/ci.yml/badge.svg)](https://github.com/serenakeyitan/ugcspy/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+BigSpy for organic UGC. A Claude Code plugin (and standalone CLI) for spying on competitor short-form video on TikTok and Instagram Reels — type a brand name, get the third-party creators promoting it ranked by reach, then turn any video into a creator brief without leaving your chat.
 
 **No API key needed.** Brief generation runs in your existing Claude Code subscription. Scraping is free via the OSS TikTok provider.
 
-## Install
+---
 
-### Recommended: one prompt inside Claude Code
+## 🚀 Onboarding — one prompt
 
-If you use Claude Code, install the plugin and run:
+If you use **Claude Code** (recommended):
 
-```
-/ugcspy-setup
-```
+1. Clone this repo into your Claude Code plugins directory (or wherever the plugin manifest gets read).
+2. Inside Claude Code, type:
+   ```
+   /ugcspy-setup
+   ```
 
-That's it. Claude walks through cloning, dependencies, config, the verification search, and the `MS_TOKEN` fallback if TikTok's bot detection trips. ~5 minutes, mostly waiting for downloads.
+That single slash command does everything — checks `bun` / `python3` / `git`, clones the repo if needed, installs JS + Python deps (~150MB Chromium download), runs the config wizard with sensible defaults, links the binary globally, runs a verification search on BeFreed, and walks through the `MS_TOKEN` browser-cookie fix if TikTok's bot detection trips. ~5 minutes mostly waiting for downloads.
 
-### Manual install
+**Latest release:** [v0.1.0](https://github.com/serenakeyitan/ugcspy/releases/latest) — see release notes for what's in V1 and what's planned.
 
-If you don't use Claude Code, or prefer running setup yourself:
+### Manual install (if you don't use Claude Code)
 
 ```bash
 git clone https://github.com/serenakeyitan/ugcspy.git
@@ -32,6 +38,8 @@ ugcspy search befreed --platform tiktok --limit 10
 
 After publishing to npm: `npm install -g ugcspy`.
 
+---
+
 ## Quick start (~60 seconds, after install)
 
 ```bash
@@ -40,9 +48,9 @@ ugcspy search befreed --platform tiktok --limit 10
 
 That's it. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.
 
-**Heads up on wall time.** A first-run hashtag search (`ugcspy search befreed`) takes ~60-90 seconds for an active UGC brand. We run four discovery passes (user search → hashtags → campaign codes → seed-creator walk) with up to 8 concurrent fetches per pass, plus repeat-query within each hashtag until saturation. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh fetch. See [Why hashtag mode is the default](#why-hashtag-mode-is-the-default) for the architecture.
+**Heads up on wall time.** A first-run hashtag search (`ugcspy search befreed`) takes ~60-90 seconds for an active UGC brand. We run four discovery passes (user search → hashtags → campaign codes → seed-creator walk) with up to 12 concurrent fetches per pass, plus repeat-query within each hashtag until saturation. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh fetch. See [Why hashtag mode is the default](#why-hashtag-mode-is-the-default) for the architecture.
 
-Skip step 2 if you only want to try the CLI shape — the `mock` provider serves deterministic synthetic data with zero setup.
+If you only want to try the CLI shape without setting up the scraper, pick `mock` in `ugcspy init` instead of `tiktok-oss` — it serves deterministic synthetic data with zero setup.
 
 ## The core flow
 
