@@ -10,19 +10,59 @@ BigSpy for organic UGC. A Claude Code plugin (and standalone CLI) for spying on 
 
 ---
 
-## 🚀 Onboarding — one prompt
+## 🚀 Onboarding — paste this into Claude Code
 
-If you use **Claude Code** (recommended):
+Open Claude Code (any project, doesn't matter which) and paste this entire message into the chat:
 
-1. Clone this repo into your Claude Code plugins directory (or wherever the plugin manifest gets read).
-2. Inside Claude Code, type:
-   ```
-   /ugcspy-setup
-   ```
+```
+Install ugcspy from https://github.com/serenakeyitan/ugcspy/releases/latest for me.
 
-That single slash command does everything — checks `bun` / `python3` / `git`, clones the repo if needed, installs JS + Python deps (~150MB Chromium download), runs the config wizard with sensible defaults, links the binary globally, runs a verification search on BeFreed, and walks through the `MS_TOKEN` browser-cookie fix if TikTok's bot detection trips. ~5 minutes mostly waiting for downloads.
+Do the following end-to-end, running every command via Bash, and surface errors with fixes:
 
-**Latest release:** [v0.1.0](https://github.com/serenakeyitan/ugcspy/releases/latest) — see release notes for what's in V1 and what's planned.
+1. Check prerequisites: `bun --version`, `python3 --version`, `git --version`. If bun is missing,
+   tell me to run `curl -fsSL https://bun.sh/install | bash` and restart my terminal. If python3
+   or git is missing, tell me the right install command for my OS and stop.
+
+2. Clone the repo to `~/code/ugcspy` if it's not already there:
+   `mkdir -p ~/code && cd ~/code && git clone https://github.com/serenakeyitan/ugcspy.git`
+
+3. cd into the repo and run `bun install`.
+
+4. Run `bun run src/cli.ts install-deps`. Tell me upfront this downloads a Chromium binary
+   (~150MB) used to bypass TikTok bot detection. One-time, ~30 seconds.
+
+5. Run `bun run src/cli.ts init`. Recommend these answers when the wizard prompts:
+   - Data provider: tiktok-oss (free, default)
+   - ScrapeCreators API key: blank (only needed for Instagram, paid)
+   - Default Slack webhook: blank (only for optional alerts)
+
+6. Run `bun link` so `ugcspy` is on my PATH. Verify with `which ugcspy`.
+
+7. Run a verification search: `ugcspy search befreed --platform tiktok --limit 10`. Tell me
+   upfront this takes ~60-90s (four-pass discovery) and a Chromium window will briefly flash
+   open — that's normal.
+
+8. If the search returns 0 videos with a "TikTok returned an empty response" error, my IP got
+   bot-flagged. Walk me through getting an MS_TOKEN cookie:
+   a. Open tiktok.com in Chrome
+   b. DevTools → Application → Cookies → tiktok.com
+   c. Copy the value of the `msToken` cookie
+   d. Add `export MS_TOKEN="<value>"` to my ~/.zshrc (or ~/.bashrc)
+   e. Run `source ~/.zshrc` and retry the search
+
+9. Once the search works, show me the top results and tell me what I can do next:
+   - `ugcspy search <brand>` for any brand
+   - `/ugcspy-search <brand>` and `/ugcspy-fork <video-url>` inside Claude Code
+     (after I install this repo as a Claude Code plugin)
+
+Reference for the full feature surface: https://github.com/serenakeyitan/ugcspy/blob/main/README.md
+```
+
+Claude will run through all 9 steps, ask for confirmation where it matters, and stop with a working `ugcspy` on your machine. ~5 minutes mostly waiting for downloads.
+
+**After this works,** if you want the slash-command surface (`/ugcspy-search`, `/ugcspy-fork`, etc.) directly inside Claude Code, install the cloned repo as a Claude Code plugin per [the plugin docs](https://docs.claude.com/en/docs/claude-code/plugins). The plugin reads the `.claude-plugin/` directory inside the repo.
+
+**Latest release:** [v0.1.0](https://github.com/serenakeyitan/ugcspy/releases/latest)
 
 ### Manual install (if you don't use Claude Code)
 
