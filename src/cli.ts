@@ -12,7 +12,7 @@ const program = new Command();
 program
   .name("ugcspy")
   .description("BigSpy for organic UGC. Search, watch, and fork competitor TikTok + IG Reels.")
-  .version("0.1.0");
+  .version("0.2.0");
 
 program
   .command("init")

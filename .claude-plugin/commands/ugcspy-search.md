@@ -26,7 +26,19 @@ When a user says "what's working for [brand] on TikTok" or "find creators promot
 
 If the user did not pass `--json`, the CLI prints a formatted table with brand hashtags highlighted, plus a summary of the most prolific creators when in hashtag mode. Relay the table as-is (it's already formatted).
 
-If they passed `--json`, parse the array and summarize the top 5 in a markdown table. Each row has an `id` field; the user can pass any id to `/ugcspy-fork` to generate a creator brief in this chat.
+If they passed `--json`, parse the array and summarize the top 5 in a markdown table. Each row has an `id` field.
+
+## After showing results — offer the natural next steps
+
+Once results are visible, ask the user a one-liner like:
+
+> Want me to:
+> - **Fork** one of these into a quick creator brief (hook + beat sheet)? → `/ugcspy-fork <id>`
+> - **Recipe** one of these — reverse-engineer it into a reproducible structure with per-clip prompts, cuts, hook pattern, voiceover (heavier, takes a few minutes, useful if it's an AI-generated video you want to replicate)? → `/ugcspy-recipe <id>`
+
+Don't force the question if the user clearly only wanted the list. But if they showed interest in one specific row ("this one looks interesting", "wow #1 has 335K views"), proactively offer both options for that row.
+
+`/ugcspy-fork` is the right answer for a human-shot creator video (lighter, brief-shaped output). `/ugcspy-recipe` is the right answer for AI-generated videos (heavier, recipe.json + per-clip generation prompts).
 
 ## Defaults
 

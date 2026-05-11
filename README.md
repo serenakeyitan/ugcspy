@@ -50,19 +50,45 @@ Do the following end-to-end, running every command via Bash, and surface errors 
    d. Add `export MS_TOKEN="<value>"` to my ~/.zshrc (or ~/.bashrc)
    e. Run `source ~/.zshrc` and retry the search
 
-9. Once the search works, show me the top results and tell me what I can do next:
-   - `ugcspy search <brand>` for any brand
-   - `/ugcspy-search <brand>` and `/ugcspy-fork <video-url>` inside Claude Code
-     (after I install this repo as a Claude Code plugin)
+9. Once the search works, ask me if I want to install the bundled `video-recipe` agent
+   too (lives at vendor/video-recipe/). It reverse-engineers any video URL into a
+   reproducible recipe with cuts, per-clip generation prompts, hook pattern,
+   voiceover transcript, and likely models. Useful when I find an AI-generated UGC
+   video in search results and want to recreate it.
+
+   If I say yes, install: `brew install ffmpeg tesseract` (macOS) or
+   `sudo apt install ffmpeg tesseract-ocr` (Linux), then
+   `cd vendor/video-recipe && pip install -e ".[dev]"` (~2-5 min for whisper + torch).
+   Verify with `python -m scripts.doctor`.
+
+   If I skip, that's fine — `/ugcspy-recipe` will surface a clear install error
+   the first time I call it.
+
+10. Show me the top search results and tell me what I can do next:
+    - `ugcspy search <brand>` for any brand
+    - Inside Claude Code (after I install this repo as a Claude Code plugin):
+      - `/ugcspy-search <brand>` — ranked third-party UGC creators
+      - `/ugcspy-fork <id>` — quick creator brief (hook + beat sheet)
+      - `/ugcspy-recipe <id>` — full reverse-engineered recipe (cuts, per-clip
+        prompts, hook pattern, voiceover — uses bundled video-recipe agent)
 
 Reference for the full feature surface: https://github.com/serenakeyitan/ugcspy/blob/main/README.md
 ```
 
-Claude will run through all 9 steps, ask for confirmation where it matters, and stop with a working `ugcspy` on your machine. ~5 minutes mostly waiting for downloads.
+Claude will run through all 10 steps, ask for confirmation where it matters, and stop with a working `ugcspy` on your machine. ~5 minutes mostly waiting for downloads.
 
-**After this works,** if you want the slash-command surface (`/ugcspy-search`, `/ugcspy-fork`, etc.) directly inside Claude Code, install the cloned repo as a Claude Code plugin per [the plugin docs](https://docs.claude.com/en/docs/claude-code/plugins). The plugin reads the `.claude-plugin/` directory inside the repo.
+**After this works,** if you want the slash-command surface (`/ugcspy-search`, `/ugcspy-fork`, `/ugcspy-recipe`, etc.) directly inside Claude Code, install the cloned repo as a Claude Code plugin per [the plugin docs](https://docs.claude.com/en/docs/claude-code/plugins). The plugin reads the `.claude-plugin/` directory inside the repo.
 
-**Latest release:** [v0.1.0](https://github.com/serenakeyitan/ugcspy/releases/latest)
+**Latest release:** [v0.2.0](https://github.com/serenakeyitan/ugcspy/releases/latest)
+
+## What's in this repo
+
+| Path | What it is |
+|---|---|
+| `src/`, `scripts/`, `.claude-plugin/` | **ugcspy core** — the BigSpy-for-UGC search engine, alerts, plugin commands. |
+| `vendor/video-recipe/` | **Bundled video-recipe agent** — reverse-engineers any video URL into a `recipe.json` with cuts, per-clip prompts, hook pattern, voiceover. Maintained as its own repo at [github.com/serenakeyitan/video-recipe](https://github.com/serenakeyitan/video-recipe); imported here as a git subtree so the two stay loosely coupled. Updated via `git subtree pull --prefix=vendor/video-recipe ...`. |
+
+The two products share a natural workflow: ugcspy finds the top UGC videos for a brand; video-recipe explains how each one was made. Inside Claude Code, `/ugcspy-recipe <video-id>` chains them automatically.
 
 ### Manual install (if you don't use Claude Code)
 

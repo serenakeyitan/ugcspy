@@ -110,22 +110,48 @@ Walk them through:
 
 If the search succeeds, they're done.
 
-## Step 9 — Show them what they can do next
+## Step 9 — (Optional) Install video-recipe deps for deep video reverse-engineering
+
+ugcspy bundles `video-recipe` at `vendor/video-recipe/` — given any video URL, it produces a `recipe.json` describing cuts, per-clip generation prompts, hook pattern, voiceover, and likely models. Useful when the user finds an AI-generated UGC video in `/ugcspy-search` results and wants to know exactly how to recreate it.
+
+Ask the user: "Want to install video-recipe too? It needs ffmpeg + tesseract + a few Python packages (~2-5 min, downloads whisper + torch). You can skip and install later when you first run `/ugcspy-recipe`."
+
+If they want it now:
+
+```bash
+# System deps
+# macOS:
+brew install ffmpeg tesseract
+# Linux:
+# sudo apt install ffmpeg tesseract-ocr
+
+# Python deps (whisper + torch — heavy)
+cd <repo-path>/vendor/video-recipe && pip install -e ".[dev]"
+
+# Verify
+cd <repo-path>/vendor/video-recipe && python -m scripts.doctor
+```
+
+If they skip: their `/ugcspy-recipe` call will surface a clear "install these first" error, no harm done.
+
+## Step 10 — Show them what they can do next
 
 Print this summary inline in the chat:
 
 ```
 ✓ ugcspy is set up and working.
 
-Next searches:
+Search commands:
   ugcspy search <brand>                  # find creators promoting a brand
   ugcspy search @<handle>                # brand's own account posts
   ugcspy search <brand> --sort recency   # newest first instead of highest-reach
   ugcspy search <brand> --json | jq ...  # pipe results
 
-Or inside Claude Code:
-  /ugcspy-search befreed
-  /ugcspy-fork <video-url>               # turn a competitor video into a creator brief
+Inside Claude Code:
+  /ugcspy-search befreed                 # ranked third-party UGC creators
+  /ugcspy-fork <id>                      # quick creator brief (hook + beat sheet)
+  /ugcspy-recipe <id>                    # full reverse-engineered recipe (cuts,
+                                         #   per-clip prompts, hook pattern, voiceover)
 
 Optional (alerts on breakout videos via Slack):
   ugcspy watch add <brand> --slack-webhook <url>

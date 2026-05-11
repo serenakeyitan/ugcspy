@@ -1,7 +1,7 @@
 {
   "name": "ugcspy",
-  "version": "0.1.0",
-  "description": "BigSpy for organic UGC. Track competitor TikTok + IG Reels — search, watch, fork.",
+  "version": "0.2.0",
+  "description": "BigSpy for organic UGC. Search competitor TikTok creators, fork into briefs, recipe AI-generated videos into reproducible recipes.",
   "author": "serenakeyitan",
   "homepage": "https://github.com/serenakeyitan/ugcspy",
   "license": "MIT"

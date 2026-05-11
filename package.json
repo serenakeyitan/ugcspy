@@ -1,6 +1,6 @@
 {
   "name": "ugcspy",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "BigSpy for organic UGC. CLI for tracking competitor TikTok + IG Reels — search, alert, and fork videos into creator briefs.",
   "type": "module",
   "license": "MIT",
