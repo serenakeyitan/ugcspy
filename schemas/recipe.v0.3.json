@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/serenakeyitan/video-recipe/schemas/recipe.v0.3.json",
+  "title": "video-recipe v0.3",
+  "description": "Adds optional audio block and per-cut transcript text. Builds on v0.2 (inferred_kind).",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source_url",
+    "video_id",
+    "duration_sec",
+    "generated_at",
+    "cuts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": "0.3" },
+    "source_url": { "type": "string", "format": "uri" },
+    "video_id": { "type": "string", "minLength": 1 },
+    "duration_sec": { "type": "number", "minimum": 0 },
+    "resolution": { "type": ["string", "null"] },
+    "fps": { "type": ["number", "null"] },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "cuts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "index",
+          "start_sec",
+          "end_sec",
+          "duration_sec",
+          "keyframes",
+          "inferred_kind"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "index": { "type": "integer", "minimum": 0 },
+          "start_sec": { "type": "number", "minimum": 0 },
+          "end_sec": { "type": "number", "minimum": 0 },
+          "duration_sec": { "type": "number", "minimum": 0 },
+          "flagged_short": { "type": "boolean" },
+          "keyframes": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": { "type": "string" }
+          },
+          "inferred_kind": {
+            "type": "string",
+            "enum": [
+              "ai_clip",
+              "title_card",
+              "non_ai_footage",
+              "lumped_cuts",
+              "transition",
+              "unreadable"
+            ]
+          },
+          "inferred": {
+            "oneOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "required": [
+                  "subject",
+                  "action",
+                  "setting",
+                  "style",
+                  "camera",
+                  "lighting",
+                  "duration_sec",
+                  "aspect_ratio",
+                  "prompt"
+                ]
+              }
+            ]
+          },
+          "inferred_error": { "type": ["string", "null"] },
+          "transcript": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "audio": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["language", "transcript_path", "duration_sec"],
+          "additionalProperties": false,
+          "properties": {
+            "language": { "type": ["string", "null"] },
+            "transcript_path": { "type": "string" },
+            "duration_sec": { "type": "number", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "assembly": { "type": ["object", "null"] },
+    "model_attribution": { "type": ["object", "null"] }
+  }
+}
