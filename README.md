@@ -56,10 +56,16 @@ Do the following end-to-end, running every command via Bash, and surface errors 
    voiceover transcript, and likely models. Useful when I find an AI-generated UGC
    video in search results and want to recreate it.
 
-   If I say yes, install: `brew install ffmpeg tesseract` (macOS) or
+   IMPORTANT: video-recipe requires Python >= 3.11 (ugcspy itself only needs 3.9).
+   Before anything else, check my Python version with `python3 --version`. If I'm on
+   3.9 or 3.10, walk me through installing 3.11+ via pyenv or python.org first.
+   Don't try to `pip install` until the right Python is active.
+
+   Once Python 3.11+ is in place, install: `brew install ffmpeg tesseract` (macOS) or
    `sudo apt install ffmpeg tesseract-ocr` (Linux), then
    `cd vendor/video-recipe && pip install -e ".[dev]"` (~2-5 min for whisper + torch).
-   Verify with `python -m scripts.doctor`.
+   Verify with `cd vendor/video-recipe && python -m scripts.doctor` — should show
+   all green checkmarks before considering it set up.
 
    If I skip, that's fine — `/ugcspy-recipe` will surface a clear install error
    the first time I call it.

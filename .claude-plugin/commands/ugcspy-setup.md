@@ -114,9 +114,20 @@ If the search succeeds, they're done.
 
 ugcspy bundles `video-recipe` at `vendor/video-recipe/` — given any video URL, it produces a `recipe.json` describing cuts, per-clip generation prompts, hook pattern, voiceover, and likely models. Useful when the user finds an AI-generated UGC video in `/ugcspy-search` results and wants to know exactly how to recreate it.
 
-Ask the user: "Want to install video-recipe too? It needs ffmpeg + tesseract + a few Python packages (~2-5 min, downloads whisper + torch). You can skip and install later when you first run `/ugcspy-recipe`."
+Ask the user: "Want to install video-recipe too? It needs Python 3.11+, ffmpeg, tesseract, and a few heavy Python packages (~2-5 min, downloads whisper + torch). You can skip and install later when you first run `/ugcspy-recipe`."
 
-If they want it now:
+**Critical check first**: video-recipe's `pyproject.toml` requires Python >= 3.11. ugcspy's own scraper only needs 3.9, so users may have an older Python and a successful ugcspy install but still be unable to install video-recipe.
+
+```bash
+python3 --version
+```
+
+If they're on 3.9 or 3.10, walk them through installing 3.11+ first:
+- **macOS**: `brew install python@3.11` then ensure it's on PATH (`brew link python@3.11`).
+- **Linux**: install via pyenv (`curl https://pyenv.run | bash`) or `apt install python3.11`.
+- After install, use `python3.11` (or whichever they installed) for the next commands instead of `python3`.
+
+If they're on 3.11+ already, continue:
 
 ```bash
 # System deps
@@ -128,11 +139,13 @@ brew install ffmpeg tesseract
 # Python deps (whisper + torch — heavy)
 cd <repo-path>/vendor/video-recipe && pip install -e ".[dev]"
 
-# Verify
+# Verify (should report all green ✓)
 cd <repo-path>/vendor/video-recipe && python -m scripts.doctor
 ```
 
-If they skip: their `/ugcspy-recipe` call will surface a clear "install these first" error, no harm done.
+The doctor output is the source of truth — if it shows any ✗ checks, fix them before declaring done.
+
+If they skip step 9 entirely: their `/ugcspy-recipe` call will surface a clear "install these first" error, no harm done.
 
 ## Step 10 — Show them what they can do next
 
