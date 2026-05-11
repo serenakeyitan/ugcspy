@@ -12,78 +12,12 @@ BigSpy for organic UGC. A Claude Code plugin (and standalone CLI) for spying on 
 
 ## 🚀 Onboarding — paste this into Claude Code
 
-Open Claude Code (any project, doesn't matter which) and paste this entire message into the chat:
-
 ```
-Install ugcspy from https://github.com/serenakeyitan/ugcspy/releases/latest for me.
-
-Do the following end-to-end, running every command via Bash, and surface errors with fixes:
-
-1. Check prerequisites: `bun --version`, `python3 --version`, `git --version`. If bun is missing,
-   tell me to run `curl -fsSL https://bun.sh/install | bash` and restart my terminal. If python3
-   or git is missing, tell me the right install command for my OS and stop.
-
-2. Clone the repo to `~/code/ugcspy` if it's not already there:
-   `mkdir -p ~/code && cd ~/code && git clone https://github.com/serenakeyitan/ugcspy.git`
-
-3. cd into the repo and run `bun install`.
-
-4. Run `bun run src/cli.ts install-deps`. Tell me upfront this downloads a Chromium binary
-   (~150MB) used to bypass TikTok bot detection. One-time, ~30 seconds.
-
-5. Run `bun run src/cli.ts init`. Recommend these answers when the wizard prompts:
-   - Data provider: tiktok-oss (free, default)
-   - ScrapeCreators API key: blank (only needed for Instagram, paid)
-   - Default Slack webhook: blank (only for optional alerts)
-
-6. Run `bun link` so `ugcspy` is on my PATH. Verify with `which ugcspy`.
-
-7. Run a verification search: `ugcspy search befreed --platform tiktok --limit 10`. Tell me
-   upfront this takes ~60-90s (four-pass discovery) and a Chromium window will briefly flash
-   open — that's normal.
-
-8. If the search returns 0 videos with a "TikTok returned an empty response" error, my IP got
-   bot-flagged. Walk me through getting an MS_TOKEN cookie:
-   a. Open tiktok.com in Chrome
-   b. DevTools → Application → Cookies → tiktok.com
-   c. Copy the value of the `msToken` cookie
-   d. Add `export MS_TOKEN="<value>"` to my ~/.zshrc (or ~/.bashrc)
-   e. Run `source ~/.zshrc` and retry the search
-
-9. Once the search works, ask me if I want to install the bundled `video-recipe` agent
-   too (lives at vendor/video-recipe/). It reverse-engineers any video URL into a
-   reproducible recipe with cuts, per-clip generation prompts, hook pattern,
-   voiceover transcript, and likely models. Useful when I find an AI-generated UGC
-   video in search results and want to recreate it.
-
-   IMPORTANT: video-recipe requires Python >= 3.11 (ugcspy itself only needs 3.9).
-   Before anything else, check my Python version with `python3 --version`. If I'm on
-   3.9 or 3.10, walk me through installing 3.11+ via pyenv or python.org first.
-   Don't try to `pip install` until the right Python is active.
-
-   Once Python 3.11+ is in place, install: `brew install ffmpeg tesseract` (macOS) or
-   `sudo apt install ffmpeg tesseract-ocr` (Linux), then
-   `cd vendor/video-recipe && pip install -e ".[dev]"` (~2-5 min for whisper + torch).
-   Verify with `cd vendor/video-recipe && python -m scripts.doctor` — should show
-   all green checkmarks before considering it set up.
-
-   If I skip, that's fine — `/ugcspy-recipe` will surface a clear install error
-   the first time I call it.
-
-10. Show me the top search results and tell me what I can do next:
-    - `ugcspy search <brand>` for any brand
-    - Inside Claude Code (after I install this repo as a Claude Code plugin):
-      - `/ugcspy-search <brand>` — ranked third-party UGC creators
-      - `/ugcspy-fork <id>` — quick creator brief (hook + beat sheet)
-      - `/ugcspy-recipe <id>` — full reverse-engineered recipe (cuts, per-clip
-        prompts, hook pattern, voiceover — uses bundled video-recipe agent)
-
-Reference for the full feature surface: https://github.com/serenakeyitan/ugcspy/blob/main/README.md
+Install the latest ugcspy from https://github.com/serenakeyitan/ugcspy/releases/latest by following
+https://github.com/serenakeyitan/ugcspy/blob/main/ONBOARDING.md end-to-end.
 ```
 
-Claude will run through all 10 steps, ask for confirmation where it matters, and stop with a working `ugcspy` on your machine. ~5 minutes mostly waiting for downloads.
-
-**After this works,** if you want the slash-command surface (`/ugcspy-search`, `/ugcspy-fork`, `/ugcspy-recipe`, etc.) directly inside Claude Code, install the cloned repo as a Claude Code plugin per [the plugin docs](https://docs.claude.com/en/docs/claude-code/plugins). The plugin reads the `.claude-plugin/` directory inside the repo.
+That's the whole prompt. Claude fetches [ONBOARDING.md](ONBOARDING.md), runs the 9 steps via Bash, and stops with a working `ugcspy` plus optionally the bundled `video-recipe` agent. ~5 minutes mostly waiting for downloads.
 
 **Latest release:** [v0.2.0](https://github.com/serenakeyitan/ugcspy/releases/latest)
 
