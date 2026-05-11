@@ -6,26 +6,36 @@ BigSpy for organic UGC. A Claude Code plugin (and standalone CLI) for spying on 
 
 ## Install
 
+### Recommended: one prompt inside Claude Code
+
+If you use Claude Code, install the plugin and run:
+
+```
+/ugcspy-setup
+```
+
+That's it. Claude walks through cloning, dependencies, config, the verification search, and the `MS_TOKEN` fallback if TikTok's bot detection trips. ~5 minutes, mostly waiting for downloads.
+
+### Manual install
+
+If you don't use Claude Code, or prefer running setup yourself:
+
 ```bash
 git clone https://github.com/serenakeyitan/ugcspy.git
 cd ugcspy
 bun install
-bun run src/cli.ts --help
+bun run src/cli.ts install-deps     # ~30s + 150MB Chromium download
+bun run src/cli.ts init              # pick tiktok-oss; skip the API key prompts
+bun link                             # makes `ugcspy` available on PATH
+ugcspy search befreed --platform tiktok --limit 10
 ```
 
 After publishing to npm: `npm install -g ugcspy`.
 
-## Quick start (~60 seconds)
+## Quick start (~60 seconds, after install)
 
 ```bash
-# 1. Set up config — pick `tiktok-oss` (free) when prompted
-bun run src/cli.ts init
-
-# 2. Install Python deps for the OSS scraper — one-time, ~150MB
-bun run src/cli.ts install-deps
-
-# 3. Spy on a competitor — top videos by reach, BigSpy-style
-bun run src/cli.ts search befreed --platform tiktok --limit 10
+ugcspy search befreed --platform tiktok --limit 10
 ```
 
 That's it. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.

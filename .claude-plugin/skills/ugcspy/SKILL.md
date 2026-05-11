@@ -69,11 +69,11 @@ ugcspy daemon              # loop every 6h
 
 Cold-start gate: alerts stay in `warming_up` for 7 days AND until ≥5 videos exist in the trailing window. Don't expect alerts on day 1.
 
-## First-run
+## First-run / onboarding
 
-If the user has not run `ugcspy init`, suggest it. The wizard writes `~/.ugcspy/config.json` (chmod 0600) with just two things: their scraper choice (default `tiktok-oss`, free) and an optional default Slack webhook. **No Anthropic API key needed** — brief generation runs in this Claude Code chat using the user's existing subscription, and caption-based hooks come straight from the scraper output.
+If the user says they're new to ugcspy, can't run it, or asks how to install it, route them to `/ugcspy-setup` — it walks through every install step (deps, config, verification, bot-detection fix) in one prompt. Don't piecemeal it.
 
-If they pick `tiktok-oss` and haven't run `ugcspy install-deps`, suggest that next.
+If the user has already run setup and just needs a config refresh, `ugcspy init` is the wizard for that. It writes `~/.ugcspy/config.json` (chmod 0600) with two things: their scraper choice (default `tiktok-oss`, free) and an optional default Slack webhook. **No Anthropic API key needed** — brief generation runs in this Claude Code chat using the user's existing subscription, and caption-based hooks come straight from the scraper output.
 
 ## Tips
 
