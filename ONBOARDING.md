@@ -61,13 +61,34 @@ bun run src/cli.ts init --yes --provider tiktok-oss --slack-webhook https://hook
 
 Or drop `--yes` for the interactive wizard if the user prefers to walk through the prompts themselves.
 
-## Step 5 — Link the binary
+## Step 5 — Install the binary globally
 
 ```bash
-bun link
+bun run build
+npm install --global .
 ```
 
-Verify: `which ugcspy` should print a path, `ugcspy --version` should print `0.2.0`. If it prints an older version, run `bun run build && bun link` again.
+`bun run build` produces `dist/cli.js`; `npm install --global .` symlinks it onto PATH so the user can run `ugcspy` from any directory.
+
+We use `npm` here rather than `bun install --global .` because the bun version has a known [DependencyLoop bug](https://github.com/oven-sh/bun/issues) when installing a package globally from its own source directory. `npm install --global .` is the standard, reliable way to install a local Node CLI tool globally; it works regardless of which package manager built the project.
+
+Verify:
+
+```bash
+which ugcspy        # should print a path (~/.bun/bin/ugcspy, /usr/local/bin/ugcspy, or similar)
+ugcspy --version    # must print 0.2.0
+```
+
+If `which ugcspy` is empty, the npm global bin dir isn't on PATH:
+
+```bash
+# Find where npm puts globals
+npm prefix -g
+# Then add that prefix's bin to PATH, e.g.:
+echo 'export PATH="$(npm prefix -g)/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
+
+If `--version` prints an older number, the user has a stale install on PATH. Run `npm uninstall -g ugcspy && npm install --global .` from the current repo directory.
 
 ## Step 6 — Verification search
 
@@ -157,7 +178,8 @@ cd ugcspy
 bun install
 bun run src/cli.ts install-deps     # ~30s + 150MB Chromium download
 bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
-bun link                             # makes `ugcspy` available on PATH
+bun run build                        # produces dist/cli.js
+npm install --global .               # symlinks ugcspy onto PATH
 ugcspy search befreed --platform tiktok --limit 10
 
 # Optional: video-recipe deps (needs Python 3.11+)
