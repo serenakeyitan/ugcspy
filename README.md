@@ -37,7 +37,7 @@ git clone https://github.com/serenakeyitan/ugcspy.git
 cd ugcspy
 bun install
 bun run src/cli.ts install-deps     # ~30s + 150MB Chromium download
-bun run src/cli.ts init              # pick tiktok-oss; skip the API key prompts
+bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
 bun link                             # makes `ugcspy` available on PATH
 ugcspy search befreed --platform tiktok --limit 10
 ```

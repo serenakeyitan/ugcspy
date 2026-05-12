@@ -3,12 +3,46 @@ import prompts from "prompts";
 import { CONFIG_PATH, loadConfig, saveConfig } from "../lib/config.ts";
 import type { Config } from "../types.ts";
 
-export async function runInit(): Promise<void> {
+export type Provider = "tiktok-oss" | "scrapecreators" | "mock";
+
+export interface InitOptions {
+  // Non-interactive auto-accept mode for plugin/onboarding use.
+  // When yes=true, runs without prompts using the values below + defaults
+  // (provider=tiktok-oss, no scraper key, no slack webhook).
+  yes?: boolean;
+  provider?: Provider;
+  scraperApiKey?: string;
+  slackWebhook?: string;
+}
+
+export async function runInit(opts: InitOptions = {}): Promise<void> {
   console.log(chalk.bold("\nugcspy setup\n"));
   console.log(`Config will be written to ${chalk.dim(CONFIG_PATH)} (chmod 0600).\n`);
 
   const existing = loadConfig();
 
+  if (opts.yes) {
+    // Non-interactive mode: take everything from flags + sensible defaults.
+    const provider = opts.provider ?? "tiktok-oss";
+    if (provider === "scrapecreators" && !opts.scraperApiKey) {
+      console.log(
+        chalk.yellow(
+          `Provider=scrapecreators selected but no --scraper-api-key passed — saving without a key (you can re-run init later to add one).`,
+        ),
+      );
+    }
+    const next: Config = {
+      scraper_provider: provider,
+      scraper_api_key: opts.scraperApiKey ?? existing.scraper_api_key,
+      default_slack_webhook: opts.slackWebhook ?? existing.default_slack_webhook,
+    };
+    saveConfig(next);
+    console.log(chalk.green(`\n✓ Config saved (non-interactive, provider=${provider}).`));
+    printNextStep(next);
+    return;
+  }
+
+  // Interactive flow (unchanged).
   const answers = await prompts(
     [
       {
@@ -54,17 +88,20 @@ export async function runInit(): Promise<void> {
 
   saveConfig(next);
   console.log(chalk.green(`\n✓ Config saved.`));
+  printNextStep(next);
+}
 
-  if (next.scraper_provider === "tiktok-oss") {
+function printNextStep(config: Config): void {
+  if (config.scraper_provider === "tiktok-oss") {
     console.log(
       chalk.yellow(
         "\nThe tiktok-oss provider needs Python + TikTokApi + Chromium installed locally.",
       ),
     );
     console.log(`Run ${chalk.cyan("ugcspy install-deps")} now (one-time, ~30s + ~150MB download).`);
-    console.log(`Then: ${chalk.cyan("ugcspy search @glossier --platform tiktok")}`);
+    console.log(`Then: ${chalk.cyan("ugcspy search befreed --platform tiktok")}`);
   } else {
-    console.log(`Run ${chalk.cyan("ugcspy search @glossier")} to try a search.`);
+    console.log(`Run ${chalk.cyan("ugcspy search befreed")} to try a search.`);
   }
 }
 

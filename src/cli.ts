@@ -16,9 +16,24 @@ program
 
 program
   .command("init")
-  .description("Interactive setup — writes ~/.ugcspy/config.json")
-  .action(async () => {
-    await runInit();
+  .description("Setup wizard — writes ~/.ugcspy/config.json")
+  .option("-y, --yes", "non-interactive; accept defaults (provider=tiktok-oss)")
+  .option(
+    "--provider <name>",
+    "tiktok-oss | scrapecreators | mock (used with --yes)",
+  )
+  .option(
+    "--scraper-api-key <key>",
+    "ScrapeCreators API key (only relevant for --provider scrapecreators)",
+  )
+  .option("--slack-webhook <url>", "default Slack webhook for optional alerts")
+  .action(async (raw) => {
+    await runInit({
+      yes: Boolean(raw.yes),
+      provider: raw.provider,
+      scraperApiKey: raw.scraperApiKey,
+      slackWebhook: raw.slackWebhook,
+    });
   });
 
 program

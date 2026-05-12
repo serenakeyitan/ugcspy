@@ -47,13 +47,19 @@ The second command downloads a Chromium binary (~150MB, ~30s) used to bypass Tik
 ## Step 4 — Configure
 
 ```bash
-bun run src/cli.ts init
+bun run src/cli.ts init --yes
 ```
 
-Recommended answers:
-- Data provider: **tiktok-oss** (free, default)
-- ScrapeCreators API key: **blank** (only needed for Instagram, paid)
-- Default Slack webhook: **blank** (only for optional alerts)
+Non-interactive — accepts the recommended defaults (provider=tiktok-oss, no scraper key, no Slack webhook).
+
+If the user explicitly wants a different provider or to add an API key now, pass the relevant flag:
+
+```bash
+bun run src/cli.ts init --yes --provider scrapecreators --scraper-api-key <key>
+bun run src/cli.ts init --yes --provider tiktok-oss --slack-webhook https://hooks.slack.com/...
+```
+
+Or drop `--yes` for the interactive wizard if the user prefers to walk through the prompts themselves.
 
 ## Step 5 — Link the binary
 
@@ -150,7 +156,7 @@ git clone https://github.com/serenakeyitan/ugcspy.git
 cd ugcspy
 bun install
 bun run src/cli.ts install-deps     # ~30s + 150MB Chromium download
-bun run src/cli.ts init              # pick tiktok-oss; skip API key prompts
+bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
 bun link                             # makes `ugcspy` available on PATH
 ugcspy search befreed --platform tiktok --limit 10
 
