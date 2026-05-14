@@ -5,6 +5,7 @@ import { runInstallDeps } from "./commands/install-deps.ts";
 import { runSearch, type SearchOptions } from "./commands/search.ts";
 import { runWatchAdd, runWatchList, runWatchRemove } from "./commands/watch.ts";
 import { runDaemon } from "./commands/daemon.ts";
+import { runRender } from "./commands/render.ts";
 import type { Platform } from "./types.ts";
 
 const program = new Command();
@@ -115,6 +116,15 @@ program
       intervalMs: raw.interval,
       windowDays: raw.days,
     });
+  });
+
+program
+  .command("render")
+  .description(
+    "Internal: render one clip or one TTS segment. Stdin = JSON request, stdout = JSON result. Used by the video-recipe composer; users should run `/ugcspy-reproduce` instead.",
+  )
+  .action(async () => {
+    await runRender();
   });
 
 program.parseAsync(process.argv).catch((err) => {
