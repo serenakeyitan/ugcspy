@@ -141,12 +141,27 @@ For these, you'd need paid ScrapeCreators (handles auth-required endpoints).
 
 The plugin is the recommended way to use ugcspy. Inside Claude Code:
 
-- `/ugcspy-search @glossier` — runs the search, renders the table inline
-- `/ugcspy-fork <video-id-or-url>` — generates a creator brief in chat using your Claude Code subscription. **No API key.**
-- `/ugcspy-watch add @glossier --slack-webhook ...` — (optional) register a competitor for breakout alerts
-- `/ugcspy-daemon --once` — (optional) tick the watch poller
+| Slash command | What it does |
+|---|---|
+| `/ugcspy-search <brand>` | Runs the search, renders the table inline |
+| `/ugcspy-fork <id>` | Quick creator brief — hook + beat sheet. Generated in chat using your Claude Code subscription. **No API key.** |
+| `/ugcspy-decode <id>` | Deep production decode — format, OCR'd overlay narrative, brand-pitch placement (soft 软广 vs hard sell), shot list. Writes `decode.json` + `decode.html`. Works on both human-shot AND AI-montage videos. |
+| `/ugcspy-remix <target> <source>` | Cross-video format transfer. Decodes BOTH videos and writes a hand-able brief telling creator B how to shoot their own version of video A's format. |
+| `/ugcspy-recipe <id>` | Reverse-engineer an AI-montage into a reproducible `recipe.json` (cuts, per-clip prompts, voiceover) |
+| `/ugcspy-reproduce <id>` | Render an actual `reproduction.mp4` via Kling + OpenAI TTS. AI-montage only. |
+| `/ugcspy-watch add <brand> --slack-webhook ...` | (Optional) Register a competitor for breakout alerts |
+| `/ugcspy-daemon --once` | (Optional) Tick the watch poller |
 
-The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcspy/SKILL.md)) also triggers on intent — say "track @rarebeauty's organic UGC" and Claude picks the skill itself.
+**Common flow** for "I found a great video, I want to make something like it":
+
+```
+/ugcspy-search befreed                # find ranked third-party UGC
+/ugcspy-decode 4                       # understand HOW the #1 video was made
+/ugcspy-remix 4 12                     # OR: brief creator @12 to shoot their version
+/ugcspy-fork 4                         # OR: just get a quick brief
+```
+
+The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcspy/SKILL.md)) also triggers on intent — say "track @rarebeauty's organic UGC" or "how was this video made" and Claude picks the right command itself.
 
 ## Commands (standalone CLI)
 

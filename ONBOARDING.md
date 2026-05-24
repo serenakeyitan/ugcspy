@@ -151,13 +151,30 @@ Search commands:
 Inside Claude Code:
   /ugcspy-search <brand>               ranked third-party UGC creators
   /ugcspy-fork <id>                    quick creator brief (hook + beat sheet)
-  /ugcspy-recipe <id>                  full reverse-engineered recipe
-                                       (cuts, per-clip prompts, hook pattern,
-                                       voiceover — uses bundled video-recipe)
+  /ugcspy-decode <id>                  deep production decode — format, overlay
+                                       narrative, brand-pitch placement, shot
+                                       list. Writes decode.json + decode.html.
+                                       For human-shot videos AND AI montages.
+  /ugcspy-remix <target> <source>      take video A's format, write a brief for
+                                       creator B to shoot their own version.
+                                       Cross-video format transfer.
+  /ugcspy-recipe <id>                  full reverse-engineered recipe for AI
+                                       reproduction (uses bundled video-recipe)
+  /ugcspy-reproduce <id>               render reproduction.mp4 via paid APIs
+                                       (Kling + OpenAI TTS) — AI-montage only
 
 Optional (Slack alerts on breakout videos):
   ugcspy watch add <brand> --slack-webhook <url>
   ugcspy daemon --once
+```
+
+The most common flow for "I found a great video, I want to make something like it":
+
+```
+/ugcspy-search <brand>           # find ranked UGC
+/ugcspy-decode <id>              # understand HOW that one was made
+/ugcspy-remix <id> <other-id>    # OR brief a different creator to shoot it
+/ugcspy-fork <id>                # OR just get a quick brief
 ```
 
 ## Honest limits to mention if asked
