@@ -42,3 +42,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Bun init artifacts we don't want
 .cursor/
 CLAUDE.md
+.tmp/
+
+# Local debug artifacts from manual decode analysis
