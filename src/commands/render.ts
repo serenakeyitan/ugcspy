@@ -37,11 +37,16 @@ export async function runRender(): Promise<void> {
   // Read keys from env first, then config. Env wins so CI/agents can
   // override without touching files on disk.
   const openaiKey = process.env.OPENAI_API_KEY ?? "";
-  const klingKey = process.env.KLING_API_KEY ?? "";
+  // Kling uses TWO keys: access_key + secret_key, both required for HMAC
+  // signing each request. KLING_API_KEY (the old single-key env var) is
+  // accepted as a fallback alias for KLING_ACCESS_KEY only — secret is
+  // still required separately.
+  const klingAccess = process.env.KLING_ACCESS_KEY ?? process.env.KLING_API_KEY ?? "";
+  const klingSecret = process.env.KLING_SECRET_KEY ?? "";
 
   try {
     if (req.kind === "clip") {
-      const provider = new KlingProvider(klingKey);
+      const provider = new KlingProvider(klingAccess, klingSecret);
       const result = await provider.generateClip({
         prompt: String(req.prompt ?? ""),
         duration_sec: Number(req.duration_sec ?? 5),

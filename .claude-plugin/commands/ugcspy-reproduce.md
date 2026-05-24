@@ -17,14 +17,15 @@ This pipeline costs real money on real APIs. Tell the user upfront before doing 
 - **Default budget cap**: $5 (override with `--budget 10`)
 
 Required API keys (the compose pipeline will fail with a clear error if missing):
-- `KLING_API_KEY` — from kling.ai → API console
-- `OPENAI_API_KEY` — from platform.openai.com → API keys
+- `KLING_ACCESS_KEY` + `KLING_SECRET_KEY` — Kling's API uses HMAC-signed JWTs and needs both halves. Get the pair at https://klingai.com/dev (the developer portal — NOT the same as the web-app account at klingai.com).
+- `OPENAI_API_KEY` — from https://platform.openai.com/api-keys
 
 Tell the user which keys are missing and where to get them BEFORE running the compose. Don't burn 5 minutes of their time before telling them they need a key.
 
 ```bash
 # Check what's set
-[ -n "$KLING_API_KEY" ] && echo "✓ KLING_API_KEY" || echo "✗ KLING_API_KEY missing — get one at https://kling.ai"
+[ -n "$KLING_ACCESS_KEY" ] && echo "✓ KLING_ACCESS_KEY" || echo "✗ KLING_ACCESS_KEY missing — get the access+secret pair at https://klingai.com/dev"
+[ -n "$KLING_SECRET_KEY" ] && echo "✓ KLING_SECRET_KEY" || echo "✗ KLING_SECRET_KEY missing — same place as above"
 [ -n "$OPENAI_API_KEY" ] && echo "✓ OPENAI_API_KEY" || echo "✗ OPENAI_API_KEY missing — get one at https://platform.openai.com/api-keys"
 ```
 
