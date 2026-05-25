@@ -584,15 +584,92 @@ def build_shot_list(
 # ─── Stage 9: HTML viewer for skimming ─────────────────────────────────────
 
 
+# Tiny allowlist for legitimate short tokens that would otherwise fail the
+# ≥3-char + vowel + lowercase heuristics. These are the words that actually
+# appear in real UGC overlays and that we don't want to lose.
+_SHORT_OK = frozenset({
+    "i", "a",
+    "is", "it", "in", "on", "at", "to", "of", "if", "be", "or", "an", "as",
+    "we", "my", "me", "up", "so", "do", "no", "go", "us", "by", "he", "she",
+    "the", "and", "you", "for", "are", "but", "not", "all", "can", "her",
+    "was", "one", "our", "out", "his", "has", "who", "any", "now", "new",
+    "use", "see", "way", "day", "get", "got", "let", "yes", "did", "ai",
+})
+
+
+def _looks_english(tok: str) -> bool:
+    """Cheap noise filter — keep tokens that plausibly look like English
+    words, drop OCR garbage. We're tuning for tesseract's failure modes
+    on heavily-animated kinetic typography: random capitalization runs
+    (SSINGS, EGGS), no-vowel consonant clusters (gf, fl, ny), mid-word
+    case flips (Corgonl, Vettes, Wisaric)."""
+    if not tok:
+        return False
+    low = tok.lower()
+    if low in _SHORT_OK:
+        return True
+    if len(tok) < 3:
+        return False
+    if not any(c in "aeiou" for c in low):
+        return False  # real English words have vowels
+    # All-caps ≥3 chars that aren't common acronyms → noise. Real
+    # all-caps words are rare; common ones can be whitelisted later.
+    # (We deliberately do NOT filter mid-word case flips — that would kill
+    # legitimate camelCase brand names like BeFreed, iPhone, YouTube.)
+    if tok.isupper() and tok not in {"OK", "USA", "DIY", "AI", "UK", "US"}:
+        return False
+    return True
+
+
+def clean_overlay_text(raw: str) -> str:
+    """Strip OCR garbage from a raw overlay-text run, return a readable
+    English-ish version. Keeps the words tesseract got right; drops noise
+    tokens. Order preserved.
+
+    Conservative — if the result is shorter than ~20% of the input, we
+    return an empty string rather than show two readable words from a
+    paragraph of garbage."""
+    if not raw:
+        return ""
+    # Tokenize on whitespace + a few separators. Keep apostrophes inside
+    # words (don't / it's).
+    raw_tokens = re.split(r"[\s\|\\/<>=\[\]\(\)\{\}\*\^~`]+", raw)
+    kept: list[str] = []
+    for tok in raw_tokens:
+        # Strip leading/trailing punctuation but keep internal apostrophes
+        stripped = tok.strip(".,;:!?\"'-—–_")
+        if _looks_english(stripped):
+            kept.append(stripped)
+    if not kept:
+        return ""
+    out = " ".join(kept)
+    # If we dropped >80% of the content, the chunk is mostly noise — don't
+    # pretend we extracted meaning from it.
+    if len(out) < len(raw) * 0.2:
+        return ""
+    return out
+
+
 def render_html(decode: Decode) -> str:
-    """Self-contained HTML — recipe.html style, easy to skim in a browser."""
+    """Self-contained HTML — recipe.html style, easy to skim in a browser.
+
+    Two-layer rendering: the clean column shows OCR-scrubbed text for
+    skimming; the raw OCR stays available behind a <details> toggle so
+    debug info isn't lost."""
     rows = ""
     for s in decode.shot_list:
+        clean = clean_overlay_text(s["overlay_text"])
+        clean_html = f'<em>{html_escape(clean)}</em>' if clean else '<em style="color:#999">(mostly OCR noise)</em>'
+        raw_html = (
+            f'<details><summary style="cursor:pointer;color:#888;font-size:0.85em">show raw OCR</summary>'
+            f'<div style="font-size:0.8em;color:#777;margin-top:0.4em">{html_escape(s["overlay_text"])}</div>'
+            f'</details>'
+        )
         rows += f"""<tr>
   <td>{s['index']}</td>
   <td>{s['start_sec']}s – {s['end_sec']}s ({s['duration_sec']}s)</td>
   <td>{html_escape(s['shot'])}</td>
-  <td>{html_escape(s['overlay_text'])}</td>
+  <td>{clean_html}{raw_html}</td>
 </tr>"""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Decode: {decode.video_id}</title>
@@ -620,7 +697,10 @@ def render_html(decode: Decode) -> str:
 <p>Brand: <strong>{decode.brand_pitch.get('brand') or '(none in overlay)'}</strong> · Placement: {decode.brand_pitch.get('placement','?')}</p>
 
 <h2>Narrative (reconstructed from OCR)</h2>
-<div class="narrative">{html_escape(decode.full_narrative)}</div>
+<div class="narrative">{html_escape(clean_overlay_text(decode.full_narrative)) or '<em style="color:#999">Narrative was mostly OCR noise on this video — see raw OCR below or run /ugcspy-decode for an LLM-cleaned version in chat.</em>'}</div>
+<details style="margin-top:0.5rem"><summary style="cursor:pointer;color:#888;font-size:0.85em">show raw OCR</summary>
+<div style="font-size:0.8em;color:#777;margin-top:0.4em;white-space:pre-wrap">{html_escape(decode.full_narrative)}</div>
+</details>
 
 <h2>Shot list for a new creator</h2>
 <table>
