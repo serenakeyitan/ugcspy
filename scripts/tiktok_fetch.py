@@ -9,9 +9,10 @@ Stdin: JSON
 Stdout (success): JSON array of RawVideo objects (matching src/types.ts).
 Stdout (failure): JSON object { "error": "..." } and non-zero exit.
 
-Requires:
-  pip install -r scripts/requirements.txt
-  python3 -m playwright install chromium
+Requires the managed ugcspy venv. Bootstrap with `ugcspy install-deps` (creates
+~/.ugcspy/venv and installs TikTokApi + Chromium into it). Invoke via that venv's
+python — the TypeScript provider does this; running this script under a different
+interpreter will fail the import check below.
 """
 
 import asyncio
@@ -42,7 +43,7 @@ def main() -> None:
         from TikTokApi import TikTokApi  # noqa: F401
     except ImportError:
         fail(
-            "TikTokApi not installed. Run: pip install TikTokApi && python3 -m playwright install chromium"
+            "TikTokApi not installed in the active interpreter. Run `ugcspy install-deps` (creates a managed venv at ~/.ugcspy/venv)."
         )
 
     if mode == "user":
