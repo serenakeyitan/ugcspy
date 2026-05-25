@@ -3,6 +3,7 @@ import ora from "ora";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { VENV_DIR, venvPython } from "../lib/venv.ts";
 
 const PYTHON_CANDIDATES = ["python3", "python"] as const;
 
@@ -15,13 +16,13 @@ interface RunResult {
 export async function runInstallDeps(): Promise<void> {
   console.log(chalk.bold("\nInstalling tiktok-oss provider dependencies...\n"));
 
-  const python = await findPython();
-  if (!python) {
+  const systemPython = await findPython();
+  if (!systemPython) {
     console.error(chalk.red("✖ Python 3 not found on PATH."));
     console.error(`  Install Python 3.9+ first: ${chalk.cyan("https://www.python.org/downloads/")}`);
     process.exit(1);
   }
-  console.log(chalk.dim(`Using ${python}.\n`));
+  console.log(chalk.dim(`Using ${systemPython} to bootstrap a managed venv at ${VENV_DIR}.\n`));
 
   const requirementsPath = resolveRequirements();
   if (!existsSync(requirementsPath)) {
@@ -29,9 +30,27 @@ export async function runInstallDeps(): Promise<void> {
     process.exit(1);
   }
 
-  // Step 1: pip install --user (avoids sudo, doesn't pollute system Python)
-  const pip = ora("pip install -r scripts/requirements.txt --user").start();
-  const pipResult = await run(python, ["-m", "pip", "install", "--user", "-r", requirementsPath]);
+  // Step 1: create (or reuse) the venv. `python -m venv` is idempotent —
+  // re-running on an existing venv is fine and fast.
+  const venv = ora(`Creating venv at ${VENV_DIR}`).start();
+  const venvResult = await run(systemPython, ["-m", "venv", VENV_DIR]);
+  if (!venvResult.ok) {
+    venv.fail("venv creation failed");
+    console.error(chalk.dim(venvResult.stderr.slice(-2000)));
+    console.error(
+      chalk.dim(
+        "\nOn Debian/Ubuntu this may need `apt install python3-venv`. On macOS this should work out of the box.",
+      ),
+    );
+    process.exit(1);
+  }
+  venv.succeed("Venv ready");
+
+  const py = venvPython();
+
+  // Step 2: pip install into the venv. No --user — we own this interpreter.
+  const pip = ora("pip install -r scripts/requirements.txt (into venv)").start();
+  const pipResult = await run(py, ["-m", "pip", "install", "-r", requirementsPath]);
   if (!pipResult.ok) {
     pip.fail("pip install failed");
     console.error(chalk.dim(pipResult.stderr.slice(-2000)));
@@ -39,9 +58,9 @@ export async function runInstallDeps(): Promise<void> {
   }
   pip.succeed("Python packages installed");
 
-  // Step 2: playwright install chromium
+  // Step 3: playwright install chromium
   const browser = ora("playwright install chromium (one-time, ~150MB)").start();
-  const browserResult = await run(python, ["-m", "playwright", "install", "chromium"]);
+  const browserResult = await run(py, ["-m", "playwright", "install", "chromium"]);
   if (!browserResult.ok) {
     browser.fail("playwright install failed");
     console.error(chalk.dim(browserResult.stderr.slice(-2000)));
@@ -49,9 +68,9 @@ export async function runInstallDeps(): Promise<void> {
   }
   browser.succeed("Chromium downloaded");
 
-  // Step 3: smoke-test the bridge can at least import everything
+  // Step 4: smoke-test the bridge can at least import everything via the venv
   const smoke = ora("Verifying bridge imports").start();
-  const smokeResult = await run(python, [
+  const smokeResult = await run(py, [
     "-c",
     "import asyncio, json; from TikTokApi import TikTokApi; print('ok')",
   ]);

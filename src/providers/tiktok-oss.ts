@@ -2,15 +2,17 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import type { Platform, RawVideo } from "../types.ts";
 import { type DataProvider, ProviderError } from "./types.ts";
+import { venvExists, venvPython } from "../lib/venv.ts";
 
 // Bridge to davidteather/TikTok-Api (Python). Free, OSS, actively maintained
 // (v7.3.3 shipped April 2026). Instagram is intentionally NOT supported by this
 // provider — no production-grade free IG scraper exists right now (see Open Q
 // in DESIGN.md). Use ScrapeCreators for IG when you need it.
 //
-// Setup (one-time):
-//   pip install -r scripts/requirements.txt
-//   python3 -m playwright install chromium
+// Setup (one-time): `ugcspy install-deps` creates a managed venv at
+// ~/.ugcspy/venv and installs TikTokApi + Chromium there. This provider
+// invokes that venv's python so a system-Python upgrade can't silently
+// invalidate the deps.
 //
 // Two modes via the Python bridge:
 //   - user mode:    fetch a handle's own posts
@@ -47,8 +49,14 @@ export class TikTokOssProvider implements DataProvider {
   }
 
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
+    if (!venvExists()) {
+      throw new ProviderError(
+        `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30s + ~150MB Chromium download).`,
+        this.name,
+      );
+    }
     const scriptPath = resolveScript();
-    const proc = Bun.spawn(["python3", scriptPath], {
+    const proc = Bun.spawn([venvPython(), scriptPath], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
