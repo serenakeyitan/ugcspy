@@ -1,6 +1,2 @@
 TikTokApi>=7.0.0
 playwright>=1.48.0
-# openai-whisper for decode.py audio transcription (talking-head 口型 + remix briefs).
-# Pulls in torch (~700MB) — ugcspy install-deps becomes ~3-5min + ~1.7GB total on
-# fresh install. Worth it: spoken transcript is the primary narrative in most UGC.
-openai-whisper>=20231117

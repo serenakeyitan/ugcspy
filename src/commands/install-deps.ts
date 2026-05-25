@@ -13,7 +13,14 @@ interface RunResult {
   stderr: string;
 }
 
-export async function runInstallDeps(): Promise<void> {
+export interface InstallDepsOptions {
+  /** When true, ALSO installs openai-whisper + torch (~1.5GB) into the
+   * venv. Needed by /ugcspy-decode + /ugcspy-remix for spoken-audio
+   * transcription. decode.py degrades gracefully without it.*/
+  withAudio?: boolean;
+}
+
+export async function runInstallDeps(opts: InstallDepsOptions = {}): Promise<void> {
   console.log(chalk.bold("\nInstalling tiktok-oss provider dependencies...\n"));
 
   const systemPython = await findPython();
@@ -81,6 +88,33 @@ export async function runInstallDeps(): Promise<void> {
   }
   smoke.succeed("Bridge ready");
 
+  // Step 5 (opt-in): audio transcription deps. Big — ~1.5GB. Only
+  // installed when the user explicitly asks via --with-audio.
+  if (opts.withAudio) {
+    const audioReqPath = resolveAudioRequirements();
+    if (!existsSync(audioReqPath)) {
+      console.error(chalk.red(`✖ Audio requirements file missing: ${audioReqPath}`));
+      process.exit(1);
+    }
+    const audio = ora("pip install -r scripts/requirements-audio.txt (whisper + torch, ~1.5GB, slow)").start();
+    const audioResult = await run(py, ["-m", "pip", "install", "-r", audioReqPath]);
+    if (!audioResult.ok) {
+      audio.fail("Audio packages install failed");
+      console.error(chalk.dim(audioResult.stderr.slice(-2000)));
+      process.exit(1);
+    }
+    audio.succeed("Audio packages installed (whisper + torch)");
+    // Smoke-test the audio path
+    const audioSmoke = ora("Verifying whisper imports").start();
+    const audioSmokeResult = await run(py, ["-c", "import whisper; print('ok')"]);
+    if (!audioSmokeResult.ok || !audioSmokeResult.stdout.includes("ok")) {
+      audioSmoke.fail("Whisper import check failed");
+      console.error(chalk.dim((audioSmokeResult.stderr || audioSmokeResult.stdout).slice(-2000)));
+      process.exit(1);
+    }
+    audioSmoke.succeed("Whisper ready");
+  }
+
   console.log(chalk.green("\n✓ tiktok-oss is ready.\n"));
   console.log(`Try: ${chalk.cyan("ugcspy search @glossier --platform tiktok")}`);
   console.log(
@@ -88,6 +122,16 @@ export async function runInstallDeps(): Promise<void> {
       "Note: a Chromium window briefly flashes during scrapes — TikTok's bot detection blocks pure headless. See README for MS_TOKEN if you hit rate limits.",
     ),
   );
+  if (opts.withAudio) {
+    console.log(chalk.dim("\nAudio transcription enabled. /ugcspy-decode + /ugcspy-remix will use Whisper for spoken-narrative capture (口型 / lip-sync source)."));
+  } else {
+    console.log(
+      chalk.dim(
+        "\nWithout --with-audio, /ugcspy-decode + /ugcspy-remix work but only see on-screen overlay text. To add spoken-audio capture (~3-5min + ~1.5GB): re-run with " +
+          chalk.cyan("ugcspy install-deps --with-audio"),
+      ),
+    );
+  }
 }
 
 async function findPython(): Promise<string | null> {
@@ -119,13 +163,21 @@ async function run(cmd: string, args: string[]): Promise<RunResult> {
 }
 
 function resolveRequirements(): string {
+  return resolveScriptsFile("requirements.txt");
+}
+
+function resolveAudioRequirements(): string {
+  return resolveScriptsFile("requirements-audio.txt");
+}
+
+function resolveScriptsFile(name: string): string {
   // Same multi-path strategy as src/providers/tiktok-oss.ts resolveScript():
   // dev runs from src/commands/, bundled runs from dist/, npm-installed runs
   // from node_modules/ugcspy/dist/.
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    resolve(here, "..", "..", "scripts", "requirements.txt"),
-    resolve(here, "..", "scripts", "requirements.txt"),
+    resolve(here, "..", "..", "scripts", name),
+    resolve(here, "..", "scripts", name),
   ];
   for (const path of candidates) {
     try {

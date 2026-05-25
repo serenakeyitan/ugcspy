@@ -1,0 +1,9 @@
+# Optional audio-transcription dependencies. Installed via
+# `ugcspy install-deps --with-audio` — opt-in because openai-whisper
+# brings in torch (~700MB). decode.py degrades gracefully if these
+# aren't installed — it just skips the audio stage and tells the user
+# to re-run install-deps with --with-audio.
+#
+# Without these: /ugcspy-decode + /ugcspy-remix work but only see
+# on-screen overlay text, missing the spoken narrative.
+openai-whisper>=20231117
