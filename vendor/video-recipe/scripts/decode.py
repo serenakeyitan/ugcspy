@@ -438,10 +438,93 @@ def classify_format(
 # ─── Stage 7: brand-pitch detection (woven vs hard sell) ───────────────────
 
 
+def _brand_matches(brand: str, haystack: str) -> bool:
+    """Robust brand-name substring match tuned for Whisper output.
+
+    Whisper hears camelCase brand names phonetically and writes them in
+    weird shapes (BeFreed → 'B' + '-FREED,'; the leading 'e' often gets
+    dropped because the speaker says it briefly between two consonants).
+    So we do two things:
+      1. Strip all non-alphanumerics from both sides.
+      2. Use a fuzzy-match (difflib) on the normalized strings with a
+         high threshold (0.85), so 'befreed' (7 chars) matches 'bfreed'
+         (6 chars, one char away) but doesn't match unrelated short words.
+
+    For brands shorter than 5 chars we require an exact normalized
+    substring match — fuzzy matching too-short brands explodes false
+    positives ('ai' would match every 'a-i' phonetic split)."""
+    norm = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+    b = norm(brand)
+    h = norm(haystack)
+    if not b:
+        return False
+    if b in h:
+        return True
+    if len(b) < 5:
+        return False
+    # Fuzzy match: slide a window of length ~b across h, score best ratio
+    from difflib import SequenceMatcher
+    # Try windows of length b-1, b, b+1 (Whisper drops or adds one char)
+    best = 0.0
+    for window_len in (len(b) - 1, len(b), len(b) + 1):
+        if window_len < 4 or window_len > len(h):
+            continue
+        for i in range(len(h) - window_len + 1):
+            r = SequenceMatcher(None, b, h[i : i + window_len]).ratio()
+            if r > best:
+                best = r
+                if best >= 0.85:
+                    return True
+    return False
+
+
+def _collect_brand_positions_audio(
+    brand: str,
+    audio_transcript: dict | None,
+) -> list[float]:
+    """Find timestamps where the brand name is spoken aloud. Uses
+    Whisper's word-level timestamps for precise placement (within
+    ~200ms). Returns [] if no audio_transcript or no spoken mentions.
+
+    Note: Whisper splits camelCase brands across multiple word tokens
+    (BeFreed → 'B-FREED' as one token, or 'B', 'freed' as two). We
+    match against single words first, then 2-word and 3-word sliding
+    windows of the joined word stream — that catches the
+    "B - freed" split case without over-counting longer multi-word
+    accidental matches."""
+    if not audio_transcript:
+        return []
+    words = audio_transcript.get("words") or []
+    if not words:
+        # No word-level timestamps; fall back to full_text presence
+        # with a midpoint estimate.
+        if _brand_matches(brand, audio_transcript.get("full_text") or ""):
+            dur = audio_transcript.get("duration_sec") or 0
+            return [dur / 2] if dur else []
+        return []
+    positions: list[float] = []
+    # Single-word and 2/3-word sliding windows
+    for n in (1, 2, 3):
+        for i in range(len(words) - n + 1):
+            window = words[i : i + n]
+            joined = "".join((w.get("word") or "") for w in window)
+            if _brand_matches(brand, joined):
+                start = window[0].get("start")
+                end = window[-1].get("end")
+                if start is not None and end is not None:
+                    mid = (start + end) / 2
+                    # Dedupe: if a smaller window already matched at the
+                    # same start, skip the larger window
+                    if not any(abs(p - mid) < 0.3 for p in positions):
+                        positions.append(mid)
+    return sorted(positions)
+
+
 def detect_brand_pitch(
     overlays: list[OverlayChunk],
     source_meta: dict,
     duration: float,
+    audio_transcript: dict | None = None,
 ) -> dict:
     """Find which brand the video is plugging, where it lands, and
     whether it's a soft sell (tail-only) or harder sell (throughout).
@@ -449,7 +532,13 @@ def detect_brand_pitch(
     Brand candidates are ranked, not flat-listed — caption-anchored
     signals (@mention, campaign-coded hashtag like #brand_0124) beat
     generic hashtags. This avoids picking 'purple' over 'befreed'
-    just because 'purple' appears more often in the overlay text."""
+    just because 'purple' appears more often in the overlay text.
+
+    Placement classification now considers BOTH overlay-text mentions
+    (OCR'd from frames) AND spoken-audio mentions (Whisper word
+    timestamps), giving a more accurate picture. The brand candidate
+    itself still comes from the caption — that's the strongest signal
+    for *which* brand is being plugged."""
     caption = (source_meta.get("description") or source_meta.get("title") or "").lower()
     handles = set(re.findall(r"@([a-z0-9._]+)", caption))
     raw_tags = re.findall(r"#([a-z0-9_]+)", caption)
@@ -492,20 +581,29 @@ def detect_brand_pitch(
     ranked.sort(key=lambda x: (-x[2], x[0]))
     brand, source_kind, weight = ranked[0]
 
-    # Now find where THIS brand actually appears in the overlay text
-    positions: list[float] = []
+    # Find where THIS brand actually appears in both overlay text and
+    # spoken audio. Each source contributes a list of midpoint timestamps;
+    # we merge them for placement classification but keep the per-source
+    # counts in the output for debugging.
+    overlay_positions: list[float] = []
     for o in overlays:
-        if brand in o.text.lower():
-            positions.append((o.start_sec + o.end_sec) / 2)
+        if _brand_matches(brand, o.text):
+            overlay_positions.append((o.start_sec + o.end_sec) / 2)
+    audio_positions = _collect_brand_positions_audio(brand, audio_transcript)
+
+    positions = sorted(overlay_positions + audio_positions)
 
     if not positions:
+        # No mentions in overlay OR audio — brand exists only in the
+        # caption hashtags. That's still a (very soft) sell.
         return {
             "brand": brand,
             "brand_source": source_kind,
             "overlay_mentions_count": 0,
+            "audio_mentions_count": 0,
             "placement": "caption-only (purest soft sell)",
             "soft_sell": True,
-            "note": "brand named only in caption hashtags — never appears in on-screen overlay text",
+            "note": "brand named only in caption hashtags — never appears in overlay text or spoken audio",
         }
 
     # Two definitions of "soft sell" — both required to call it soft:
@@ -534,10 +632,23 @@ def detect_brand_pitch(
         placement = "throughout (harder sell — brand visible from early on)"
         soft = False
 
+    # Note which source(s) contributed mentions, so consumers can tell
+    # the difference between an overlay-only plug, an audio-only plug,
+    # and a fully-woven mention. Useful for /ugcspy-remix briefs —
+    # if the target audio-mentions the brand but the overlay doesn't,
+    # the new creator needs to SAY the brand, not just display it.
+    mention_sources: list[str] = []
+    if overlay_positions:
+        mention_sources.append("overlay")
+    if audio_positions:
+        mention_sources.append("audio")
+
     return {
         "brand": brand,
         "brand_source": source_kind,
-        "overlay_mentions_count": len(positions),
+        "overlay_mentions_count": len(overlay_positions),
+        "audio_mentions_count": len(audio_positions),
+        "mention_sources": mention_sources,
         "first_mention_at_sec": round(first_mention, 2),
         "last_mention_at_sec": round(last_mention, 2),
         "first_mention_pct_of_duration": round(first_pct, 2),
@@ -802,6 +913,7 @@ def render_html(decode: Decode) -> str:
 
 <h2>Brand pitch</h2>
 <p>Brand: <strong>{decode.brand_pitch.get('brand') or '(none in overlay)'}</strong> · Placement: {decode.brand_pitch.get('placement','?')}</p>
+<p style="color:#666;font-size:0.9em">Mentions — overlay: {decode.brand_pitch.get('overlay_mentions_count', 0)} · audio: {decode.brand_pitch.get('audio_mentions_count', 0)} · sources: {', '.join(decode.brand_pitch.get('mention_sources', [])) or '(caption only)'}</p>
 
 {_spoken_block(decode)}
 <h2>On-screen overlay text (reconstructed from OCR)</h2>
@@ -875,18 +987,20 @@ def run(args: argparse.Namespace) -> None:
             pass
 
     fmt = classify_format(tech, cuts, overlays, tech["duration_sec"])
-    pitch = detect_brand_pitch(overlays, source_meta, tech["duration_sec"])
-    shot_list = build_shot_list(cuts, overlays, tech["duration_sec"], fmt["kind"])
 
     # Audio transcription — runs after the visual stages so a transcription
     # failure doesn't lose the OCR work. Skippable via --no-audio for fast
-    # iteration on overlay-only changes.
+    # iteration on overlay-only changes. Must happen BEFORE detect_brand_pitch
+    # so the brand-placement classifier can score spoken mentions too.
     audio_transcript: dict | None = None
     if not getattr(args, "no_audio", False):
         print(f"[decode] transcribing audio (whisper-{args.whisper_model})...")
         audio_transcript = transcribe_source_audio(mp4, recipe_dir, model_name=args.whisper_model)
         if audio_transcript:
             print(f"[decode] transcribed {len(audio_transcript.get('words') or [])} words ({audio_transcript.get('language')})")
+
+    pitch = detect_brand_pitch(overlays, source_meta, tech["duration_sec"], audio_transcript)
+    shot_list = build_shot_list(cuts, overlays, tech["duration_sec"], fmt["kind"])
 
     decode = Decode(
         schema_version="0.2",
