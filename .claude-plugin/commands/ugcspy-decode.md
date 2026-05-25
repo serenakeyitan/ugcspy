@@ -52,13 +52,26 @@ Read decode.json and present it to the user as a focused breakdown. Don't dump t
 - First mention at: <first_mention_at_sec>s (<first_mention_pct_of_duration * 100>% through the video)
 - Placement: <brand_pitch.placement>
 
-### Narrative (reconstructed from OCR)
+### Spoken narrative (Whisper transcript)
+If `audio_transcript` is present in decode.json, show the spoken transcript FIRST — this is what the creator actually says to camera, the primary content for most UGC formats. Format as a clean italic blockquote of `audio_transcript.full_text`:
+
+> <audio_transcript.full_text — wrap at 80 chars, italic blockquote>
+
+Note the language (`audio_transcript.language`) and word count (`len(audio_transcript.words)`) underneath in dim text.
+
+If `audio_transcript` is missing (older decode.json, or `--no-audio` was passed), skip this block entirely and tell the user "audio transcript not captured — re-run decode without `--no-audio` to get it" instead.
+
+### On-screen overlay text (reconstructed from OCR)
+This is what the creator BURNS INTO the video as visible text — usually a summary or supporting cue, not the full read. Quote the cleaned `full_narrative` (the HTML renderer already scrubs OCR noise; in chat you can quote the cleaned version directly).
+
 > <full_narrative — wrap at 80 chars, italic blockquote>
 
+When both spoken AND overlay narratives exist, briefly note whether they agree or diverge (e.g. "overlay is a 5-bullet summary of the 60-second spoken read"). This relationship matters a LOT for /ugcspy-remix.
+
 ### Shot list for a new creator
-| # | Time | Shot | Overlay |
-|---|---|---|---|
-| ... one row per shot_list entry ...
+| # | Time | Shot | What they SAY (spoken) | What they DISPLAY (overlay) |
+|---|---|---|---|---|
+| ... one row per shot_list entry; for the "say" column, pull the spoken-transcript words whose start_sec falls inside the shot's time window. If no audio_transcript, use "(no audio)" ... |
 
 ### How to shoot this
 <reproduction_notes.format_specific_tooling>
@@ -89,6 +102,7 @@ After the summary, suggest one of these depending on what the user seems to want
 
 ## Honest scope
 
-- The OCR-driven narrative reconstruction is approximate. Heavy kinetic typography loses 20-40% of characters per frame; the chunking algorithm partially compensates but the result is more like "what the narrative roughly says" than verbatim.
+- The OCR-driven overlay reconstruction is approximate. Heavy kinetic typography loses 20-40% of characters per frame; the chunking algorithm partially compensates but the result is more like "what the overlay roughly says" than verbatim.
+- The Whisper-driven spoken transcript is generally accurate for clear English speech but degrades on heavy background music, multiple speakers, or strong accents. Word-timestamps are accurate to ~200ms. Defaults to whisper-base; bump with `--whisper-model small` (or higher) on tricky audio.
 - Format classification is heuristic with ~75% accuracy on common UGC patterns. The `signals[]` array is more trustworthy than the `kind` label for ambiguous videos.
-- Brand-pitch detection prefers caption-anchored signals (@mentions, campaign-coded hashtags like #brand_NNNN) over generic words to avoid false positives like picking "purple" over "befreed".
+- Brand-pitch detection prefers caption-anchored signals (@mentions, campaign-coded hashtags like #brand_NNNN) over generic words to avoid false positives like picking "purple" over "befreed". (Brand detection currently runs against overlay text only — extending it to spoken transcript is a future improvement.)

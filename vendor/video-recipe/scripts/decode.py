@@ -84,6 +84,12 @@ class Decode:
     brand_pitch: dict  # detected brand mention, where it lands, soft vs hard
     shot_list: list[dict]  # one entry per scene segment for the new creator
     reproduction_notes: dict  # technique notes, what to use (CapCut filter, etc)
+    # v0.2: spoken-audio transcript via Whisper. None means transcription was
+    # skipped (--no-audio) or whisper wasn't importable. Schema shape:
+    #   {"language": "en", "full_text": "...", "segments": [...], "words": [...]}
+    # where each word has start/end/word and each segment has start/end/text.
+    # Word-timestamps power /ugcspy-remix briefs and future lip-sync alignment.
+    audio_transcript: dict | None = None
 
 
 # ─── CLI helpers ────────────────────────────────────────────────────────────
@@ -106,6 +112,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Frames-per-second sampled for OCR (default 1.0 = one frame per second). Raise for kinetic typography.",
+    )
+    p.add_argument(
+        "--no-audio",
+        action="store_true",
+        help="Skip Whisper audio transcription. Saves ~10-20s on a 60s video but loses the spoken narrative (which is the primary content for most talking-head + listicle UGC).",
+    )
+    p.add_argument(
+        "--whisper-model",
+        default="base",
+        help="Whisper model size for audio transcription: tiny|base|small|medium|large. Default 'base' is the right floor for English UGC.",
     )
     return p.parse_args()
 
@@ -581,7 +597,76 @@ def build_shot_list(
     return segments
 
 
-# ─── Stage 9: HTML viewer for skimming ─────────────────────────────────────
+# ─── Stage 9: audio transcription (Whisper) ────────────────────────────────
+
+
+def transcribe_source_audio(
+    mp4: Path,
+    recipe_dir: Path,
+    model_name: str = "base",
+) -> dict | None:
+    """Extract mono 16kHz WAV from mp4, run Whisper with word timestamps,
+    persist transcript.json next to source.mp4, return the transcript dict.
+
+    Returns None (with a printed warning) if Whisper isn't importable —
+    keeps decode runnable for users who haven't yet re-run install-deps
+    after the openai-whisper requirement was added. The downstream decode
+    fields gracefully treat None as "audio not captured."
+
+    Captures the spoken narrative — what the creator actually SAYS to
+    camera — which is the primary content for talking-head + listicle
+    UGC formats. OCR'd overlay text is a summary; audio is the full read.
+    """
+    # Late import so the absence of whisper doesn't break import-time
+    # tests / users who set --no-audio.
+    try:
+        from scripts.extract_audio import extract_audio
+        from scripts.transcribe import transcribe_audio
+    except ImportError as e:
+        print(
+            f"[decode] audio: skipping — couldn't import audio pipeline ({e}). "
+            f"Run `ugcspy install-deps` to rebuild the venv with whisper.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        import whisper  # noqa: F401 — just probing
+    except ImportError:
+        print(
+            "[decode] audio: skipping — whisper not in the active interpreter. "
+            "Run `ugcspy install-deps` to install (~700MB torch + whisper-base).",
+            file=sys.stderr,
+        )
+        return None
+
+    audio_path = recipe_dir / "source.wav"
+    transcript_path = recipe_dir / "transcript.json"
+    try:
+        extract_audio(mp4, audio_path)
+    except Exception as e:
+        print(f"[decode] audio: ffmpeg extract failed ({e}); skipping transcription.", file=sys.stderr)
+        return None
+
+    try:
+        doc = transcribe_audio(audio_path, transcript_path, model_name=model_name)
+    except Exception as e:
+        print(f"[decode] audio: whisper failed ({e}); skipping transcription.", file=sys.stderr)
+        return None
+
+    # Flatten to the decode.json shape: keep full_text for the human-readable
+    # block, segments + words for downstream alignment tools.
+    full_text = " ".join((s.get("text") or "").strip() for s in doc.get("segments", [])).strip()
+    return {
+        "language": doc.get("language"),
+        "duration_sec": doc.get("duration_sec"),
+        "full_text": full_text,
+        "segments": doc.get("segments", []),
+        "words": doc.get("words", []),
+        "model": model_name,
+    }
+
+
+# ─── Stage 10: HTML viewer for skimming ────────────────────────────────────
 
 
 # Tiny allowlist for legitimate short tokens that would otherwise fail the
@@ -650,6 +735,27 @@ def clean_overlay_text(raw: str) -> str:
     return out
 
 
+def _spoken_block(decode: Decode) -> str:
+    """Render the Whisper transcript section. Empty string if no audio
+    transcript was captured (so the existing on-screen-overlay block
+    still flows correctly underneath)."""
+    a = decode.audio_transcript
+    if not a:
+        return ""
+    text = (a.get("full_text") or "").strip()
+    lang = a.get("language") or "?"
+    word_count = len(a.get("words") or [])
+    if not text:
+        return ""
+    return (
+        '<h2>Spoken (Whisper transcript)</h2>'
+        f'<div class="spoken">{html_escape(text)}</div>'
+        f'<div style="color:#888;font-size:0.8em;margin-top:0.4em">'
+        f'Whisper-{html_escape(a.get("model") or "base")} · {html_escape(lang)} · {word_count} words with timestamps'
+        f'</div>'
+    )
+
+
 def render_html(decode: Decode) -> str:
     """Self-contained HTML — recipe.html style, easy to skim in a browser.
 
@@ -682,6 +788,7 @@ def render_html(decode: Decode) -> str:
   th {{ background: #f7f7f7; }}
   code {{ background: #f0f0f0; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; }}
   .narrative {{ background: #faf6e8; padding: 1rem; border-left: 3px solid #d4b554; border-radius: 4px; }}
+  .spoken {{ background: #eef5fb; padding: 1rem; border-left: 3px solid #4a90c2; border-radius: 4px; font-size: 0.95rem; }}
 </style></head><body>
 <h1>Decode: {decode.source_meta.get('title','(no title)')[:80]}</h1>
 <div class="meta">
@@ -696,8 +803,9 @@ def render_html(decode: Decode) -> str:
 <h2>Brand pitch</h2>
 <p>Brand: <strong>{decode.brand_pitch.get('brand') or '(none in overlay)'}</strong> · Placement: {decode.brand_pitch.get('placement','?')}</p>
 
-<h2>Narrative (reconstructed from OCR)</h2>
-<div class="narrative">{html_escape(clean_overlay_text(decode.full_narrative)) or '<em style="color:#999">Narrative was mostly OCR noise on this video — see raw OCR below or run /ugcspy-decode for an LLM-cleaned version in chat.</em>'}</div>
+{_spoken_block(decode)}
+<h2>On-screen overlay text (reconstructed from OCR)</h2>
+<div class="narrative">{html_escape(clean_overlay_text(decode.full_narrative)) or '<em style="color:#999">Overlay was mostly OCR noise on this video — see raw OCR below or run /ugcspy-decode for an LLM-cleaned version in chat.</em>'}</div>
 <details style="margin-top:0.5rem"><summary style="cursor:pointer;color:#888;font-size:0.85em">show raw OCR</summary>
 <div style="font-size:0.8em;color:#777;margin-top:0.4em;white-space:pre-wrap">{html_escape(decode.full_narrative)}</div>
 </details>
@@ -770,8 +878,18 @@ def run(args: argparse.Namespace) -> None:
     pitch = detect_brand_pitch(overlays, source_meta, tech["duration_sec"])
     shot_list = build_shot_list(cuts, overlays, tech["duration_sec"], fmt["kind"])
 
+    # Audio transcription — runs after the visual stages so a transcription
+    # failure doesn't lose the OCR work. Skippable via --no-audio for fast
+    # iteration on overlay-only changes.
+    audio_transcript: dict | None = None
+    if not getattr(args, "no_audio", False):
+        print(f"[decode] transcribing audio (whisper-{args.whisper_model})...")
+        audio_transcript = transcribe_source_audio(mp4, recipe_dir, model_name=args.whisper_model)
+        if audio_transcript:
+            print(f"[decode] transcribed {len(audio_transcript.get('words') or [])} words ({audio_transcript.get('language')})")
+
     decode = Decode(
-        schema_version="0.1",
+        schema_version="0.2",
         video_id=recipe_dir.name,
         source_url=source_meta.get("webpage_url") or source_meta.get("original_url") or "",
         source_meta={
@@ -796,6 +914,7 @@ def run(args: argparse.Namespace) -> None:
                 "Heuristic format classifier is right ~75% of the time on common UGC patterns; trust the signals[] more than the kind label for ambiguous videos",
             ],
         },
+        audio_transcript=audio_transcript,
     )
 
     decode_json = recipe_dir / "decode.json"
