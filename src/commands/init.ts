@@ -99,6 +99,16 @@ function printNextStep(config: Config): void {
       ),
     );
     console.log(`Run ${chalk.cyan("ugcspy install-deps")} now (one-time, ~30s + ~150MB download).`);
+    console.log(
+      chalk.dim(
+        `  If you'll use ${chalk.cyan("/ugcspy-decode")} or ${chalk.cyan("/ugcspy-remix")} for AI-style remixing,`,
+      ),
+    );
+    console.log(
+      chalk.dim(
+        `  add ${chalk.cyan("--with-audio")} (Whisper for spoken-narrative capture; ~3-5min + ~1.5GB).`,
+      ),
+    );
     console.log(`Then: ${chalk.cyan("ugcspy search befreed --platform tiktok")}`);
   } else {
     console.log(`Run ${chalk.cyan("ugcspy search befreed")} to try a search.`);

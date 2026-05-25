@@ -39,10 +39,14 @@ mkdir -p ~/code && cd ~/code && git clone https://github.com/serenakeyitan/ugcsp
 
 ```bash
 bun install
-bun run src/cli.ts install-deps
+bun run src/cli.ts install-deps              # core: ~30s + ~150MB
+# OR, if the user will use /ugcspy-decode + /ugcspy-remix for AI remix briefs:
+bun run src/cli.ts install-deps --with-audio  # +Whisper: ~3-5min + ~1.5GB total
 ```
 
-The second command downloads a Chromium binary (~150MB, ~30s) used to bypass TikTok bot detection. Tell the user upfront.
+The core install downloads a Chromium binary (~150MB, ~30s) used to bypass TikTok bot detection. Tell the user upfront.
+
+`--with-audio` ALSO installs openai-whisper + torch for spoken-narrative capture (口型 / lip-sync source for AI remix). Strongly recommended if the user plans to use `/ugcspy-decode` or `/ugcspy-remix` — the spoken audio is the primary content for most UGC formats, and without Whisper the decoder only sees on-screen overlay text. Skip if the user only wants `ugcspy search` + `/ugcspy-fork`.
 
 ## Step 4 — Configure
 
@@ -194,6 +198,7 @@ git clone https://github.com/serenakeyitan/ugcspy.git
 cd ugcspy
 bun install
 bun run src/cli.ts install-deps     # ~30s + 150MB Chromium download
+# (add --with-audio if you'll use /ugcspy-decode or /ugcspy-remix — adds Whisper for spoken-audio capture, ~3-5min + ~1.5GB)
 bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
 bun run build                        # produces dist/cli.js
 npm install --global .               # symlinks ugcspy onto PATH
