@@ -207,4 +207,51 @@ describe("KlingProvider.lipSyncWithText", () => {
       provider.lipSyncWithText({ video_id: "x", text: "hi" }),
     ).rejects.toThrow(/no face detected/);
   });
+
+  test("throws truthful error when succeed response has no URL (issue #30)", async () => {
+    // Before #30 the code mis-reported this as "timed out after 8min."
+    // Now it surfaces the actual unexpected-shape error with the raw
+    // response so the user can file a bug or update the parser.
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "t" } } },
+      {
+        status: 200,
+        json: {
+          data: {
+            task_status: "succeed",
+            // task_result omitted entirely — Kling returned succeed but no video
+            task_result: { videos: [] },
+          },
+        },
+      },
+    ]) as typeof fetch;
+    const provider = new KlingProvider("access", "secret");
+    await expect(
+      provider.lipSyncWithText({ video_id: "x", text: "hi" }),
+    ).rejects.toThrow(/succeed but returned no video URL/);
+  }, 15000);
+
+  test("falls back to 10s safe-upper-bound billing when duration is missing (issue #30)", async () => {
+    // Pre-#30 hardcoded 5s, under-billing 10s clips by 50%. Now we
+    // over-attribute (10s) so internal accounting doesn't drift below
+    // the real Kling bill.
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "t" } } },
+      {
+        status: 200,
+        json: {
+          data: {
+            task_status: "succeed",
+            // Duration field missing — Kling response may not always include it
+            task_result: { videos: [{ url: "https://kling.cdn/v.mp4" }] },
+          },
+        },
+      },
+      { status: 200, bodyBuffer: new ArrayBuffer(10) },
+    ]) as typeof fetch;
+    const provider = new KlingProvider("access", "secret");
+    const result = await provider.lipSyncWithText({ video_id: "x", text: "hi" });
+    // 10s × $0.084 = $0.84 (safe upper bound)
+    expect(result.cost_usd).toBeCloseTo(0.84, 5);
+  }, 15000);
 });
