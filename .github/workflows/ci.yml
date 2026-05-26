@@ -18,3 +18,13 @@ jobs:
       - run: bun run typecheck
       - run: bun test
       - run: bun run build
+
+      # Python-side: pure-compute tests that don't need scenedetect / opencv /
+      # whisper. These guard the recipe-contract boundary between compose and
+      # assemble_recipe (issue #12) and other JSON shape invariants.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install "pytest>=8.0,<9"
+      - run: cd vendor/video-recipe && python -m pytest tests/test_compose.py -v
