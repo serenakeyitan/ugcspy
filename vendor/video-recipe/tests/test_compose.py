@@ -603,3 +603,315 @@ def test_burnin_produces_no_op_when_text_empty(synthetic_clip, tmp_path):
     assert out.exists()
     duration = compose.ffprobe_duration(out)
     assert 4.9 < duration < 5.1
+
+
+# ─── Resume / idempotency (issue #16) ──────────────────────────────────────
+
+
+@pytest.fixture
+def _minimal_args():
+    """argparse.Namespace stand-in with just the fields the state helpers read."""
+    import argparse
+
+    return argparse.Namespace(lipsync=False, no_burnin=False, no_resume=False)
+
+
+def _minimal_recipe():
+    """Two-cut recipe for state tests."""
+    return {
+        "schema_version": "0.5",
+        "video_id": "test",
+        "source_url": "https://example.com/v",
+        "duration_sec": 10,
+        "generated_at": "2026-05-25T00:00:00Z",
+        "cuts": [
+            {"index": 0, "inferred": {"prompt": "scene 0"}, "duration_sec": 5},
+            {"index": 1, "inferred": {"prompt": "scene 1"}, "duration_sec": 5},
+        ],
+    }
+
+
+# compute_recipe_hash
+
+
+def test_recipe_hash_stable_across_runs():
+    r = _minimal_recipe()
+    assert compose.compute_recipe_hash(r) == compose.compute_recipe_hash(r)
+
+
+def test_recipe_hash_changes_when_prompt_changes():
+    r1 = _minimal_recipe()
+    r2 = _minimal_recipe()
+    r2["cuts"][0]["inferred"]["prompt"] = "different scene"
+    assert compose.compute_recipe_hash(r1) != compose.compute_recipe_hash(r2)
+
+
+def test_recipe_hash_stable_when_only_editorial_changes():
+    """source_url / generated_at don't affect rendering — they shouldn't
+    invalidate the cache."""
+    r1 = _minimal_recipe()
+    r2 = _minimal_recipe()
+    r2["source_url"] = "https://different.com/v"
+    r2["generated_at"] = "2099-12-31T23:59:59Z"
+    assert compose.compute_recipe_hash(r1) == compose.compute_recipe_hash(r2)
+
+
+def test_recipe_hash_changes_when_tts_changes():
+    r1 = _minimal_recipe()
+    r1["tts"] = {"script": "Hello", "language": "en", "duration_sec": 1.0, "likely_synthetic": True}
+    r2 = _minimal_recipe()
+    r2["tts"] = {"script": "Goodbye", "language": "en", "duration_sec": 1.0, "likely_synthetic": True}
+    assert compose.compute_recipe_hash(r1) != compose.compute_recipe_hash(r2)
+
+
+def test_recipe_hash_independent_of_key_order():
+    """JSON dict iteration order shouldn't affect the hash."""
+    r1 = {"cuts": [{"index": 0, "inferred": {"prompt": "x"}}]}
+    r2 = {"cuts": [{"inferred": {"prompt": "x"}, "index": 0}]}
+    assert compose.compute_recipe_hash(r1) == compose.compute_recipe_hash(r2)
+
+
+# args_signature
+
+
+def test_args_signature_changes_with_lipsync_flag(_minimal_args):
+    sig1 = compose.args_signature(_minimal_args)
+    _minimal_args.lipsync = True
+    sig2 = compose.args_signature(_minimal_args)
+    assert sig1 != sig2
+
+
+def test_args_signature_changes_with_no_burnin_flag(_minimal_args):
+    sig1 = compose.args_signature(_minimal_args)
+    _minimal_args.no_burnin = True
+    sig2 = compose.args_signature(_minimal_args)
+    assert sig1 != sig2
+
+
+# load_state / save_state
+
+
+def test_load_state_returns_none_when_no_file(tmp_path):
+    assert compose.load_state(tmp_path) is None
+
+
+def test_save_then_load_roundtrips(tmp_path):
+    state = {"schema_version": "1", "recipe_hash": "sha256:abc", "total_cost": 1.5, "cuts": []}
+    compose.save_state(tmp_path, state)
+    loaded = compose.load_state(tmp_path)
+    assert loaded == state
+
+
+def test_save_state_is_atomic(tmp_path):
+    """A partially-written state file (simulated by writing then crashing
+    mid-write) shouldn't leave the actual state file corrupt — we write
+    to a .tmp first and rename. After save_state, no .tmp leftover."""
+    state = {"schema_version": "1", "cuts": [], "total_cost": 0.0}
+    compose.save_state(tmp_path, state)
+    sp = compose.state_path(tmp_path)
+    assert sp.exists()
+    assert not sp.with_suffix(sp.suffix + ".tmp").exists()
+
+
+def test_load_state_handles_corrupt_json(tmp_path, capsys):
+    sp = compose.state_path(tmp_path)
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text("not valid json {{{")
+    result = compose.load_state(tmp_path)
+    assert result is None
+    err = capsys.readouterr().err
+    assert "unreadable" in err
+
+
+# init_or_load_state
+
+
+def test_init_or_load_state_fresh_when_no_existing(_minimal_args, tmp_path):
+    r = _minimal_recipe()
+    state, resumed = compose.init_or_load_state(tmp_path, r, _minimal_args)
+    assert resumed == 0
+    assert state["schema_version"] == "1"
+    assert state["recipe_hash"] == compose.compute_recipe_hash(r)
+    assert state["total_cost"] == 0.0
+    assert len(state["cuts"]) == 2
+    assert all(c == {"index": i, "text2video": {}, "tts": {}, "lipsync": {}} for i, c in enumerate(state["cuts"]))
+
+
+def test_init_or_load_state_resumes_matching_state(_minimal_args, tmp_path, capsys):
+    r = _minimal_recipe()
+    # Pre-populate state.json as if a previous run completed cut 0
+    prior = {
+        "schema_version": "1",
+        "recipe_hash": compose.compute_recipe_hash(r),
+        "args_signature": compose.args_signature(_minimal_args),
+        "total_cost": 0.5,
+        "cuts": [
+            {"index": 0, "text2video": {"status": "done", "cost": 0.5}, "tts": {}, "lipsync": {}},
+            {"index": 1, "text2video": {}, "tts": {}, "lipsync": {}},
+        ],
+    }
+    compose.save_state(tmp_path, prior)
+    state, resumed = compose.init_or_load_state(tmp_path, r, _minimal_args)
+    assert resumed == 1
+    assert state["total_cost"] == 0.5
+    assert state["cuts"][0]["text2video"]["status"] == "done"
+    out = capsys.readouterr().out
+    assert "resuming" in out
+
+
+def test_init_or_load_state_refuses_when_recipe_hash_mismatched(_minimal_args, tmp_path, capsys):
+    r = _minimal_recipe()
+    prior = {
+        "schema_version": "1",
+        "recipe_hash": "sha256:WRONG",  # stale hash from a prior recipe
+        "args_signature": compose.args_signature(_minimal_args),
+        "total_cost": 0.5,
+        "cuts": [],
+    }
+    compose.save_state(tmp_path, prior)
+    with pytest.raises(SystemExit) as exc:
+        compose.init_or_load_state(tmp_path, r, _minimal_args)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "recipe.json has changed" in err
+    assert "--no-resume" in err  # tells the user how to override
+
+
+def test_init_or_load_state_refuses_when_args_signature_mismatched(_minimal_args, tmp_path, capsys):
+    r = _minimal_recipe()
+    prior = {
+        "schema_version": "1",
+        "recipe_hash": compose.compute_recipe_hash(r),
+        "args_signature": "lipsync=True|no_burnin=False",  # was True, now False
+        "total_cost": 0.5,
+        "cuts": [],
+    }
+    compose.save_state(tmp_path, prior)
+    with pytest.raises(SystemExit) as exc:
+        compose.init_or_load_state(tmp_path, r, _minimal_args)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "args changed" in err
+    assert "--no-resume" in err
+
+
+def test_init_or_load_state_no_resume_discards(_minimal_args, tmp_path, capsys):
+    r = _minimal_recipe()
+    # Even a perfectly-matching state should be discarded when --no-resume.
+    prior = {
+        "schema_version": "1",
+        "recipe_hash": compose.compute_recipe_hash(r),
+        "args_signature": compose.args_signature(_minimal_args),
+        "total_cost": 99.0,
+        "cuts": [{"index": 0, "text2video": {"status": "done", "cost": 99.0}, "tts": {}, "lipsync": {}}],
+    }
+    compose.save_state(tmp_path, prior)
+    _minimal_args.no_resume = True
+    state, resumed = compose.init_or_load_state(tmp_path, r, _minimal_args)
+    assert resumed == 0
+    assert state["total_cost"] == 0.0  # fresh state, prior $99 discarded
+    out = capsys.readouterr().out
+    assert "--no-resume" in out
+
+
+def test_init_or_load_state_handles_schema_version_drift(_minimal_args, tmp_path, capsys):
+    r = _minimal_recipe()
+    prior = {
+        "schema_version": "0",  # ancient
+        "recipe_hash": compose.compute_recipe_hash(r),
+        "total_cost": 5.0,
+        "cuts": [],
+    }
+    compose.save_state(tmp_path, prior)
+    state, resumed = compose.init_or_load_state(tmp_path, r, _minimal_args)
+    # Old schema → discarded fresh. Better than failing on a stale
+    # state-file shape from an older compose build.
+    assert resumed == 0
+    assert state["total_cost"] == 0.0
+    err = capsys.readouterr().err
+    assert "schema mismatch" in err
+
+
+# stage_done
+
+
+def test_stage_done_true_when_marked():
+    state = {"cuts": [{"index": 0, "text2video": {"status": "done", "cost": 0.5}}]}
+    assert compose.stage_done(state, 0, "text2video") is True
+
+
+def test_stage_done_false_when_not_marked():
+    state = {"cuts": [{"index": 0, "text2video": {}}]}
+    assert compose.stage_done(state, 0, "text2video") is False
+
+
+def test_stage_done_false_for_unknown_cut():
+    state = {"cuts": []}
+    assert compose.stage_done(state, 0, "text2video") is False
+
+
+def test_stage_done_false_for_unknown_stage():
+    state = {"cuts": [{"index": 0}]}
+    assert compose.stage_done(state, 0, "lipsync") is False
+
+
+# record_stage
+
+
+def test_record_stage_persists_to_disk(tmp_path):
+    state = {
+        "schema_version": "1",
+        "total_cost": 0.0,
+        "cuts": [{"index": 0, "text2video": {}, "tts": {}, "lipsync": {}}],
+    }
+    compose.record_stage(state, tmp_path, 0, "text2video", 0.5, external_id="task-abc")
+    assert state["total_cost"] == 0.5
+    assert state["cuts"][0]["text2video"]["status"] == "done"
+    assert state["cuts"][0]["text2video"]["cost"] == 0.5
+    assert state["cuts"][0]["text2video"]["external_id"] == "task-abc"
+    # And persisted
+    loaded = compose.load_state(tmp_path)
+    assert loaded == state
+
+
+def test_record_stage_invalidates_downstream_lipsync(tmp_path, capsys):
+    """Re-running text2video must invalidate the lipsync cache for the
+    same cut — lipsync was warped against the OLD text2video output."""
+    state = {
+        "schema_version": "1",
+        "total_cost": 1.0,
+        "cuts": [
+            {
+                "index": 0,
+                "text2video": {"status": "done", "cost": 0.5},
+                "tts": {},
+                "lipsync": {"status": "done", "cost": 0.5},
+            }
+        ],
+    }
+    # Re-run text2video
+    compose.record_stage(state, tmp_path, 0, "text2video", 0.5)
+    assert state["cuts"][0]["text2video"]["status"] == "done"
+    # lipsync entry should be cleared so it re-runs next time
+    assert state["cuts"][0]["lipsync"] == {}
+    err = capsys.readouterr().err
+    assert "invalidating lipsync" in err
+
+
+def test_record_stage_invalidates_lipsync_when_tts_reruns(tmp_path):
+    """Lipsync uses TTS audio as input. Re-running TTS means lipsync was
+    warped against stale audio."""
+    state = {
+        "schema_version": "1",
+        "total_cost": 1.0,
+        "cuts": [
+            {
+                "index": 0,
+                "text2video": {"status": "done", "cost": 0.5},
+                "tts": {"status": "done", "cost": 0.001},
+                "lipsync": {"status": "done", "cost": 0.42},
+            }
+        ],
+    }
+    compose.record_stage(state, tmp_path, 0, "tts", 0.001)
+    assert state["cuts"][0]["lipsync"] == {}
