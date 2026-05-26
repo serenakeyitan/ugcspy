@@ -22,10 +22,21 @@ interface CapturedRequest {
 let captured: CapturedRequest[];
 let originalFetch: typeof fetch;
 
-function makeMockFetch(responses: Array<Partial<Response> & { json?: unknown; bodyBuffer?: ArrayBuffer }>) {
+interface MockResponse {
+  status?: number;
+  json?: unknown;
+  bodyBuffer?: ArrayBuffer;
+}
+
+function makeMockFetch(responses: MockResponse[]) {
   let i = 0;
-  return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === "string" ? input : input.toString();
+  return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+        ? input.toString()
+        : input.url;
     const headers: Record<string, string> = {};
     new Headers(init?.headers).forEach((v, k) => {
       headers[k] = v;
