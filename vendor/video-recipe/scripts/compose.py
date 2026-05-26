@@ -528,7 +528,13 @@ def validate_durations(cuts: list[dict]) -> None:
 # invalidate the cache.
 
 
-STATE_SCHEMA_VERSION = "1"
+# Bumped to "2" in PR #28 — args_signature now includes --tts and the kling
+# voice fields, which means existing v1 state files have an incomplete
+# signature and resuming from them risks the Frankenstein-cadence bug both
+# audit agents caught. The schema-mismatch branch in init_or_load_state
+# treats v1 state as "discard and start fresh," which is the right call
+# given we can't reconstruct the missing fields safely.
+STATE_SCHEMA_VERSION = "2"
 
 
 def compute_recipe_hash(recipe: dict) -> str:
@@ -548,8 +554,31 @@ def compute_recipe_hash(recipe: dict) -> str:
 
 def args_signature(args: argparse.Namespace) -> str:
     """Short stable string of args that affect rendering decisions.
-    If the user re-runs with different flags, the cache is invalidated."""
-    return f"lipsync={bool(getattr(args, 'lipsync', False))}|no_burnin={bool(getattr(args, 'no_burnin', False))}"
+    If the user re-runs with different flags, the cache is invalidated.
+
+    MUST include every arg whose change would silently produce mixed/stale
+    outputs across cached cuts. PR #27 added TTS-related args (--tts,
+    --kling-voice-id, --kling-voice-language, --kling-voice-speed); failing
+    to include them was the bug both audit agents flagged at HIGH after
+    PR #27 merged. See issue #28 for the full Frankenstein-cadence scenario.
+
+    Not included (intentionally):
+      - --budget: cost ceiling, doesn't change render output
+      - --dry-run: never reaches the render layer
+      - --no-resume: this IS the cache control; doesn't go in the signature
+      - --ugcspy-bin: tool path, doesn't affect outputs
+      - --disclosure-* + --no-disclosure: applied at the FINAL watermark step,
+        not per-cut. Changing these on resume re-writes only the final mp4.
+        (Strictly we could include them, but the cost is one ffmpeg pass,
+        not a re-render. Keep them out to allow cheap watermark iteration.)
+    """
+    return (
+        f"lipsync={bool(getattr(args, 'lipsync', False))}"
+        f"|no_burnin={bool(getattr(args, 'no_burnin', False))}"
+        f"|tts={getattr(args, 'tts', 'auto')}"
+        f"|kling_voice_id={getattr(args, 'kling_voice_id', None) or ''}"
+        f"|kling_voice_lang={getattr(args, 'kling_voice_language', 'en')}"
+    )
 
 
 def state_path(recipe_dir: Path) -> Path:

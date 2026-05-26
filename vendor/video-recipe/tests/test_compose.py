@@ -704,10 +704,22 @@ def test_burnin_produces_no_op_when_text_empty(synthetic_clip, tmp_path):
 
 @pytest.fixture
 def _minimal_args():
-    """argparse.Namespace stand-in with just the fields the state helpers read."""
+    """argparse.Namespace stand-in with just the fields the state helpers read.
+
+    Includes ALL fields args_signature() reads. When you add a new field
+    to args_signature, you must add it here too — otherwise tests pass
+    locally but the real CLI's args_signature would include a value the
+    fixture doesn't, and the sig comparison would silently diverge."""
     import argparse
 
-    return argparse.Namespace(lipsync=False, no_burnin=False, no_resume=False)
+    return argparse.Namespace(
+        lipsync=False,
+        no_burnin=False,
+        no_resume=False,
+        tts="auto",
+        kling_voice_id=None,
+        kling_voice_language="en",
+    )
 
 
 def _minimal_recipe():
@@ -782,6 +794,70 @@ def test_args_signature_changes_with_no_burnin_flag(_minimal_args):
     assert sig1 != sig2
 
 
+def test_args_signature_changes_with_tts_provider(_minimal_args):
+    """Issue #28 — both audit agents flagged this at HIGH. Without this
+    field in the signature, the resume layer silently mixes TTS providers
+    across cached cuts, producing the Frankenstein-cadence bug the
+    smart-picker was designed to prevent."""
+    sig_auto = compose.args_signature(_minimal_args)
+    _minimal_args.tts = "kling"
+    sig_kling = compose.args_signature(_minimal_args)
+    _minimal_args.tts = "openai"
+    sig_openai = compose.args_signature(_minimal_args)
+    assert sig_auto != sig_kling
+    assert sig_auto != sig_openai
+    assert sig_kling != sig_openai
+
+
+def test_args_signature_changes_with_kling_voice_id(_minimal_args):
+    """Voice catalog change should invalidate cached lipsync outputs —
+    the cached cuts were warped with the old voice, and reusing them
+    would produce mixed voices in the same reproduction."""
+    sig1 = compose.args_signature(_minimal_args)
+    _minimal_args.kling_voice_id = "voice-abc"
+    sig2 = compose.args_signature(_minimal_args)
+    _minimal_args.kling_voice_id = "voice-xyz"
+    sig3 = compose.args_signature(_minimal_args)
+    assert sig1 != sig2
+    assert sig2 != sig3
+
+
+def test_args_signature_changes_with_kling_voice_language(_minimal_args):
+    """English-cache vs Chinese-cache must not silently mix."""
+    sig_en = compose.args_signature(_minimal_args)
+    _minimal_args.kling_voice_language = "zh"
+    sig_zh = compose.args_signature(_minimal_args)
+    assert sig_en != sig_zh
+
+
+def test_args_signature_stable_for_unrelated_args(_minimal_args):
+    """Args that don't affect rendering (budget, dry_run, etc.) should
+    NOT change the signature. The signature is the cache-key for
+    rendered outputs; only output-affecting args belong."""
+    sig1 = compose.args_signature(_minimal_args)
+    # Pretend these args exist on the namespace — args_signature should
+    # ignore them.
+    _minimal_args.budget = 5.0
+    _minimal_args.dry_run = False
+    _minimal_args.ugcspy_bin = "/usr/local/bin/ugcspy"
+    sig2 = compose.args_signature(_minimal_args)
+    assert sig1 == sig2
+
+
+def test_args_signature_robust_to_missing_fields():
+    """args_signature must not crash when called with a Namespace that's
+    missing fields (e.g. a future args version, or a test harness with a
+    minimal mock). Uses getattr with defaults."""
+    import argparse
+
+    # Bare namespace — none of the expected fields set
+    bare = argparse.Namespace()
+    # Must not raise
+    sig = compose.args_signature(bare)
+    assert isinstance(sig, str)
+    assert len(sig) > 0
+
+
 # load_state / save_state
 
 
@@ -824,7 +900,11 @@ def test_init_or_load_state_fresh_when_no_existing(_minimal_args, tmp_path):
     r = _minimal_recipe()
     state, resumed = compose.init_or_load_state(tmp_path, r, _minimal_args)
     assert resumed == 0
-    assert state["schema_version"] == "1"
+    # Use the constant rather than a literal — when STATE_SCHEMA_VERSION
+    # bumps (it just did, PR #28), this test should track it. The
+    # invariant we care about is "freshly-init'd state has the current
+    # schema version," not "schema is exactly v1."
+    assert state["schema_version"] == compose.STATE_SCHEMA_VERSION
     assert state["recipe_hash"] == compose.compute_recipe_hash(r)
     assert state["total_cost"] == 0.0
     assert len(state["cuts"]) == 2
@@ -833,9 +913,12 @@ def test_init_or_load_state_fresh_when_no_existing(_minimal_args, tmp_path):
 
 def test_init_or_load_state_resumes_matching_state(_minimal_args, tmp_path, capsys):
     r = _minimal_recipe()
-    # Pre-populate state.json as if a previous run completed cut 0
+    # Pre-populate state.json as if a previous run completed cut 0.
+    # Use the current STATE_SCHEMA_VERSION so the test stays valid when
+    # we bump it; the test's purpose is the args-match resume path,
+    # not version-mismatch behavior (which has its own test).
     prior = {
-        "schema_version": "1",
+        "schema_version": compose.STATE_SCHEMA_VERSION,
         "recipe_hash": compose.compute_recipe_hash(r),
         "args_signature": compose.args_signature(_minimal_args),
         "total_cost": 0.5,
@@ -856,7 +939,7 @@ def test_init_or_load_state_resumes_matching_state(_minimal_args, tmp_path, caps
 def test_init_or_load_state_refuses_when_recipe_hash_mismatched(_minimal_args, tmp_path, capsys):
     r = _minimal_recipe()
     prior = {
-        "schema_version": "1",
+        "schema_version": compose.STATE_SCHEMA_VERSION,
         "recipe_hash": "sha256:WRONG",  # stale hash from a prior recipe
         "args_signature": compose.args_signature(_minimal_args),
         "total_cost": 0.5,
@@ -874,9 +957,12 @@ def test_init_or_load_state_refuses_when_recipe_hash_mismatched(_minimal_args, t
 def test_init_or_load_state_refuses_when_args_signature_mismatched(_minimal_args, tmp_path, capsys):
     r = _minimal_recipe()
     prior = {
-        "schema_version": "1",
+        "schema_version": compose.STATE_SCHEMA_VERSION,
         "recipe_hash": compose.compute_recipe_hash(r),
-        "args_signature": "lipsync=True|no_burnin=False",  # was True, now False
+        # Any string different from what args_signature() returns now. Don't
+        # hardcode the exact previous-version shape — the test's point is
+        # "mismatch is detected," not "this specific old format."
+        "args_signature": "totally-different-signature",
         "total_cost": 0.5,
         "cuts": [],
     }
@@ -893,7 +979,7 @@ def test_init_or_load_state_no_resume_discards(_minimal_args, tmp_path, capsys):
     r = _minimal_recipe()
     # Even a perfectly-matching state should be discarded when --no-resume.
     prior = {
-        "schema_version": "1",
+        "schema_version": compose.STATE_SCHEMA_VERSION,
         "recipe_hash": compose.compute_recipe_hash(r),
         "args_signature": compose.args_signature(_minimal_args),
         "total_cost": 99.0,
@@ -906,6 +992,76 @@ def test_init_or_load_state_no_resume_discards(_minimal_args, tmp_path, capsys):
     assert state["total_cost"] == 0.0  # fresh state, prior $99 discarded
     out = capsys.readouterr().out
     assert "--no-resume" in out
+
+
+def test_init_or_load_state_refuses_when_tts_provider_changed(_minimal_args, tmp_path, capsys):
+    """Issue #28 — the Frankenstein-cadence bug. Run 1 uses --tts kling.
+    Some cuts complete and get cached. Run 2 uses --tts openai. The
+    resume layer must refuse so the user explicitly chooses how to
+    proceed (re-render fresh, or revert the --tts flag). Silently
+    reusing kling-warped cuts alongside new openai-warped cuts would
+    produce the mixed-voice output the smart-picker exists to prevent."""
+    r = _minimal_recipe()
+    # Pretend run 1 was --tts kling. Save state with that signature.
+    _minimal_args.tts = "kling"
+    sig_kling = compose.args_signature(_minimal_args)
+    prior = {
+        "schema_version": compose.STATE_SCHEMA_VERSION,
+        "recipe_hash": compose.compute_recipe_hash(r),
+        "args_signature": sig_kling,
+        "total_cost": 1.5,
+        "cuts": [
+            {
+                "index": 0,
+                "text2video": {"status": "done", "cost": 0.5},
+                "tts": {},
+                "lipsync": {"status": "done", "cost": 0.42},
+            },
+            {"index": 1, "text2video": {}, "tts": {}, "lipsync": {}},
+        ],
+    }
+    compose.save_state(tmp_path, prior)
+
+    # Run 2 — same args except --tts switched to openai
+    _minimal_args.tts = "openai"
+    with pytest.raises(SystemExit) as exc:
+        compose.init_or_load_state(tmp_path, r, _minimal_args)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "args changed" in err
+    # The error message names the diff between signatures so user
+    # understands what changed
+    assert "tts=kling" in err or "tts=openai" in err
+
+
+def test_init_or_load_state_refuses_when_kling_voice_id_changed(_minimal_args, tmp_path, capsys):
+    """Issue #28 — same Frankenstein scenario, voice catalog axis.
+    Lipsync-cached cuts were warped with voice-abc; the new run uses
+    voice-xyz. Reusing those cuts would mix voices in the same output."""
+    r = _minimal_recipe()
+    _minimal_args.tts = "kling"
+    _minimal_args.kling_voice_id = "voice-abc"
+    sig_abc = compose.args_signature(_minimal_args)
+    prior = {
+        "schema_version": compose.STATE_SCHEMA_VERSION,
+        "recipe_hash": compose.compute_recipe_hash(r),
+        "args_signature": sig_abc,
+        "total_cost": 1.5,
+        "cuts": [
+            {
+                "index": 0,
+                "text2video": {"status": "done", "cost": 0.5},
+                "tts": {},
+                "lipsync": {"status": "done", "cost": 0.42},
+            },
+            {"index": 1, "text2video": {}, "tts": {}, "lipsync": {}},
+        ],
+    }
+    compose.save_state(tmp_path, prior)
+    _minimal_args.kling_voice_id = "voice-xyz"
+    with pytest.raises(SystemExit) as exc:
+        compose.init_or_load_state(tmp_path, r, _minimal_args)
+    assert exc.value.code == 1
 
 
 def test_init_or_load_state_handles_schema_version_drift(_minimal_args, tmp_path, capsys):
