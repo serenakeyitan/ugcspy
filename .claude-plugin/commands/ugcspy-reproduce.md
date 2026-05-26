@@ -16,6 +16,8 @@ This pipeline costs real money on real APIs. Tell the user upfront before doing 
 - **Lip-sync warp (opt-in, talking-head only)**: ~$0.084/sec per cut warped, on top of text2video. Add `--lipsync` to the compose call for talking-head reproductions where the mouth needs to match the TTS (口型). Roughly doubles per-clip cost. Skip for greenscreen-kinetic and AI-montage formats — there's no face to sync.
 - **Total for a typical 6-30s UGC video**: $1-6 (without lipsync) / $2-12 (with lipsync)
 - **Default budget cap**: $5 (override with `--budget 10`)
+- **Resume by default**: compose persists per-cut state. If a run fails on cut 4 of 5, the next run skips cuts 0-3 (no re-billing). Pass `--no-resume` to start fresh. Recipe-hash protects against silent corruption when recipe.json changes between runs.
+- **AI-disclosure burned by default**: final reproduction.mp4 carries a small "AI-generated" tag (bottom-right). Override with `--disclosure-text` / `--disclosure-position`, or opt-out with `--no-disclosure` (prints a ToS warning).
 
 Required API keys (the compose pipeline will fail with a clear error if missing):
 - `KLING_ACCESS_KEY` + `KLING_SECRET_KEY` — Kling's API uses HMAC-signed JWTs and needs both halves. Get the pair at https://klingai.com/dev (the developer portal — NOT the same as the web-app account at klingai.com).
@@ -105,3 +107,5 @@ After compose completes, tell the user where reproduction.mp4 lives and offer to
 - **Lipsync source-video freshness window**: Kling's lipsync only accepts source clips ≤30 days old. We just generated them ourselves so this is fine, but if you re-run lipsync standalone weeks later on cached cuts, it'll fail.
 - **`B-FREED` and other camelCase brand pronunciations**: Whisper sometimes transcribes BeFreed as "B-FREED" (verified on real Mya video). The per-cut TTS reads that literally as "B dash freed" — sounds awkward. Edit the cut's `transcript` field in recipe.json to "BeFreed" (or your preferred pronunciation) before composing.
 - **Sora 2 is being discontinued Sep 2026.** Don't build workflows depending on it. Kling, Runway, Veo, and Luma are the durable options.
+- **AI-disclosure watermark is burned by default.** Final reproduction.mp4 carries a small "AI-generated" tag bottom-right (configurable via `--disclosure-text` and `--disclosure-position`). Required by FTC + EU AI Act + TikTok ToS for AIGC content; using `--no-disclosure` prints a loud warning. Most platforms now enforce labeling of synthetic content.
+- **Resume protects against mid-pipeline failure.** A Kling 502 on cut 4 of 5 doesn't burn the $4 already spent on cuts 0-3 — compose persists per-cut state to `reproduction/compose_state.json` and skips cached stages on re-run. Refuses to resume when `recipe.json` changed (silent corruption guard); pass `--no-resume` to discard previous progress explicitly.
