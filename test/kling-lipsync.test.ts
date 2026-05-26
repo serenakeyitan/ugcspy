@@ -133,14 +133,53 @@ describe("KlingProvider.lipSyncClip", () => {
     expect(result.cost_usd).toBeCloseTo(0.42, 5);
   }, 15000);
 
-  test("throws clear error when audio file is too big", async () => {
+  test("throws clear error when audio file is too big (raw way over cap)", async () => {
     const bigPath = join(audioDir, "big.mp3");
-    writeFileSync(bigPath, Buffer.alloc(6 * 1024 * 1024, 0)); // 6MB > 5MB cap
+    writeFileSync(bigPath, Buffer.alloc(6 * 1024 * 1024, 0)); // 6MB raw → 8MB base64
     const provider = new KlingProvider("access", "secret");
     await expect(
       provider.lipSyncClip({ video_id: "x", audio_path: bigPath }),
     ).rejects.toThrow(/5MB/);
   });
+
+  test("throws when raw passes but base64 exceeds 5MB cap (the bug Codex caught)", async () => {
+    // 4MB raw passes a naive raw-bytes check (4MB < 5MB) but inflates to
+    // ~5.33MB base64, which Kling would reject mid-pipeline. Before the
+    // fix in #14, this slipped through our local check and burned the
+    // round-trip. Now we reject upfront with a clear error.
+    const trickyPath = join(audioDir, "tricky.mp3");
+    writeFileSync(trickyPath, Buffer.alloc(4 * 1024 * 1024, 0)); // 4MB raw
+    const provider = new KlingProvider("access", "secret");
+    await expect(
+      provider.lipSyncClip({ video_id: "x", audio_path: trickyPath }),
+    ).rejects.toThrow(/base64/);
+  });
+
+  test("accepts a file just under the base64-derived raw cap", async () => {
+    // base64 cap is 5MB. Raw cap is ~3.75MB (5 * 3/4). A 3MB raw file
+    // should sail through the cap check. We mock the rest of the
+    // submit/poll cycle to verify the check passes (we just want to
+    // know the cap doesn't false-reject).
+    const okPath = join(audioDir, "ok.mp3");
+    writeFileSync(okPath, Buffer.alloc(3 * 1024 * 1024, 0)); // 3MB raw → 4MB base64
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "t" } } },
+      {
+        status: 200,
+        json: {
+          data: {
+            task_status: "succeed",
+            task_result: { videos: [{ url: "https://kling.cdn/v.mp4", duration: "5" }] },
+          },
+        },
+      },
+      { status: 200, bodyBuffer: new ArrayBuffer(10) },
+    ]) as typeof fetch;
+    const provider = new KlingProvider("access", "secret");
+    // Don't await rejection — this should resolve cleanly
+    const result = await provider.lipSyncClip({ video_id: "x", audio_path: okPath });
+    expect(result.external_id).toBe("t");
+  }, 15000);
 
   test("throws when credentials are missing", async () => {
     const provider = new KlingProvider("", "");

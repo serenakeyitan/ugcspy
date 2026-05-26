@@ -174,10 +174,24 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
         this.name,
       );
     }
-    const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
-    if (audioBuf.length > MAX_AUDIO_BYTES) {
+    // Kling's docs say the inline audio_file is capped at 5MB. The cap
+    // applies to the BASE64-ENCODED payload (which is what they receive),
+    // not the raw file. base64 inflates by ~33% (every 3 raw bytes → 4
+    // base64 chars), so the raw cap is 5MB * 3/4 ≈ 3.75MB. A 4MB raw
+    // MP3 would pass a naive raw-bytes check, then get rejected by Kling
+    // mid-pipeline — exactly the failure mode the Codex audit caught.
+    //
+    // We compute the base64 length without actually encoding first:
+    // ceil(n/3)*4 is exact. Reject before encoding to save the CPU/memory.
+    const MAX_BASE64_BYTES = 5 * 1024 * 1024;
+    const expectedBase64Length = Math.ceil(audioBuf.length / 3) * 4;
+    if (expectedBase64Length > MAX_BASE64_BYTES) {
+      const rawMB = (audioBuf.length / 1024 / 1024).toFixed(2);
+      const b64MB = (expectedBase64Length / 1024 / 1024).toFixed(2);
       throw new RenderError(
-        `lipsync: audio file ${req.audio_path} is ${audioBuf.length} bytes; Kling caps inline audio at 5MB. Shorten the clip or use audio_url mode (not yet implemented).`,
+        `lipsync: audio file ${req.audio_path} is ${audioBuf.length} bytes (${rawMB}MB raw → ${b64MB}MB base64); ` +
+          `Kling caps inline audio at 5MB after base64 encoding (raw must be ≤ ~3.75MB). ` +
+          `Shorten the clip or use audio_url mode (not yet implemented).`,
         this.name,
       );
     }
