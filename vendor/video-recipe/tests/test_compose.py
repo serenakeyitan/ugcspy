@@ -361,6 +361,100 @@ def test_lipsync_eligible_no_for_missing_format_block():
     assert eligible is False
 
 
+# ─── pick_tts_provider (issue #24) ─────────────────────────────────────────
+
+
+def _cuts(*transcripts: str) -> list[dict]:
+    """Build a minimal cuts list with the given per-cut transcripts."""
+    return [{"index": i, "transcript": t} for i, t in enumerate(transcripts)]
+
+
+def test_pick_tts_openai_forced_always_openai():
+    p, _ = compose.pick_tts_provider(_cuts("hi"), "openai", lipsync_on=True)
+    assert p == "openai"
+    p, _ = compose.pick_tts_provider(_cuts("hi"), "openai", lipsync_on=False)
+    assert p == "openai"
+    # Even with cuts exceeding the Kling limit
+    p, _ = compose.pick_tts_provider(_cuts("x" * 200), "openai", lipsync_on=True)
+    assert p == "openai"
+
+
+def test_pick_tts_auto_short_with_lipsync_picks_kling():
+    p, reason = compose.pick_tts_provider(_cuts("short transcript"), "auto", lipsync_on=True)
+    assert p == "kling"
+    assert "max cut transcript" in reason
+
+
+def test_pick_tts_auto_long_picks_openai():
+    p, reason = compose.pick_tts_provider(_cuts("x" * 150), "auto", lipsync_on=True)
+    assert p == "openai"
+    assert "> 120" in reason  # mentions the limit it exceeded
+
+
+def test_pick_tts_auto_no_lipsync_picks_openai():
+    """Even with short transcripts, if lipsync is off, Kling TTS isn't
+    available (Kling TTS only exists inside the lipsync endpoint)."""
+    p, reason = compose.pick_tts_provider(_cuts("short"), "auto", lipsync_on=False)
+    assert p == "openai"
+    assert "lipsync is off" in reason
+
+
+def test_pick_tts_auto_no_transcripts_picks_openai():
+    """No TTS needed at all — picker returns openai as a safe default."""
+    p, reason = compose.pick_tts_provider([{"index": 0}], "auto", lipsync_on=True)
+    assert p == "openai"
+    assert "no cut transcripts" in reason
+
+
+def test_pick_tts_kling_forced_refuses_when_no_lipsync(capsys):
+    """Kling TTS requires lipsync to be active. Forcing --tts kling with
+    lipsync off should fail loudly."""
+    with pytest.raises(SystemExit) as exc:
+        compose.pick_tts_provider(_cuts("short"), "kling", lipsync_on=False)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "requires --lipsync" in err
+
+
+def test_pick_tts_kling_forced_refuses_when_no_transcripts(capsys):
+    """Forcing Kling TTS on a recipe with no per-cut transcripts would
+    produce silent output (Kling TTS+lipsync with no text to speak).
+    Refuse with a clear remediation."""
+    cuts = [{"index": 0}, {"index": 1, "transcript": ""}, {"index": 2, "transcript": "   "}]
+    with pytest.raises(SystemExit) as exc:
+        compose.pick_tts_provider(cuts, "kling", lipsync_on=True)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "no per-cut transcripts" in err
+
+
+def test_pick_tts_kling_forced_refuses_when_overlong_cut(capsys):
+    """Forcing --tts kling with a cut > 120 chars should fail with the
+    offending cut index + length."""
+    cuts = _cuts("short", "x" * 150, "y" * 75)
+    with pytest.raises(SystemExit) as exc:
+        compose.pick_tts_provider(cuts, "kling", lipsync_on=True)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    # Mentions the offending cut by index and length
+    assert "cut 1" in err and "150 chars" in err
+    # Doesn't name the in-range cuts as offenders
+    assert "cut 0" not in err.split("Affected")[0]
+
+
+def test_pick_tts_kling_forced_passes_when_all_in_range():
+    p, _ = compose.pick_tts_provider(_cuts("x" * 80, "y" * 119), "kling", lipsync_on=True)
+    assert p == "kling"
+
+
+def test_pick_tts_boundary_120_chars_exactly():
+    """120 chars is the limit — exactly 120 should fit, 121 should not."""
+    p, _ = compose.pick_tts_provider(_cuts("x" * 120), "auto", lipsync_on=True)
+    assert p == "kling"
+    p, _ = compose.pick_tts_provider(_cuts("x" * 121), "auto", lipsync_on=True)
+    assert p == "openai"
+
+
 # ─── Caption burn-in (issue #15) ───────────────────────────────────────────
 
 

@@ -7,9 +7,12 @@ import { RenderError } from "../render/types.ts";
  * Subcommand contract for the Python composer.
  *
  * Stdin (JSON): one of
- *   { "kind": "clip",    "prompt": str, "duration_sec": int, "aspect_ratio"?: str }
- *   { "kind": "tts",     "text": str,   "voice"?: str, "speed"?: float }
- *   { "kind": "lipsync", "video_id": str, "audio_path": str }
+ *   { "kind": "clip",               "prompt": str, "duration_sec": int, "aspect_ratio"?: str }
+ *   { "kind": "tts",                "text": str,   "voice"?: str, "speed"?: float }
+ *   { "kind": "lipsync",            "video_id": str, "audio_path": str }
+ *   { "kind": "lipsync_text2video", "video_id": str, "text": str (≤120 chars),
+ *                                   "voice_id"?: str, "voice_language"?: "en"|"zh",
+ *                                   "voice_speed"?: float (0.8-2.0) }
  *
  * Stdout (JSON):
  *   on success: { "ok": true, "mp4_path"?: str, "mp3_path"?: str,
@@ -86,6 +89,29 @@ export async function runRender(): Promise<void> {
       const result = await provider.lipSyncClip({
         video_id: String(req.video_id ?? ""),
         audio_path: String(req.audio_path ?? ""),
+      });
+      console.log(
+        JSON.stringify({
+          ok: true,
+          mp4_path: result.mp4_path,
+          external_id: result.external_id,
+          cost_usd: result.cost_usd,
+        }),
+      );
+      return;
+    }
+    if (req.kind === "lipsync_text2video") {
+      // Bundled TTS + lipsync. Kling generates the TTS internally; the
+      // returned mp4 has the synced audio embedded. No separate audio
+      // file needed on the caller side.
+      const provider = new KlingProvider(klingAccess, klingSecret);
+      const lang = req.voice_language as "en" | "zh" | undefined;
+      const result = await provider.lipSyncWithText({
+        video_id: String(req.video_id ?? ""),
+        text: String(req.text ?? ""),
+        voice_id: req.voice_id ? String(req.voice_id) : undefined,
+        voice_language: lang === "en" || lang === "zh" ? lang : undefined,
+        voice_speed: typeof req.voice_speed === "number" ? req.voice_speed : undefined,
       });
       console.log(
         JSON.stringify({

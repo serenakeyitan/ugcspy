@@ -100,6 +100,42 @@ def parse_args() -> argparse.Namespace:
         default="bottom-right",
         help="Where to place the disclosure watermark. Default: bottom-right (matches platform conventions for AI-labels).",
     )
+    p.add_argument(
+        "--tts",
+        type=str,
+        choices=["auto", "kling", "openai"],
+        default="auto",
+        help=(
+            "Choose the TTS provider for the WHOLE reproduction. Mixing providers per-cut "
+            "would break voice timbre + speech cadence (说话的节奏) across cut boundaries, so we "
+            "always pick one for the whole video. "
+            "'auto' (default): use Kling TTS when every cut transcript fits in 120 chars "
+            "(bundled with lipsync, simpler integration); else use OpenAI TTS (no char limit). "
+            "'kling': force Kling TTS, refuse upfront if any cut exceeds 120 chars. "
+            "'openai': force OpenAI TTS (current behavior, no character constraint)."
+        ),
+    )
+    p.add_argument(
+        "--kling-voice-id",
+        type=str,
+        default=None,
+        help=(
+            "Kling voice catalog ID to use when --tts is kling or auto-resolves to kling. "
+            "If unset, Kling uses its default voice for the chosen language. Voice catalog is "
+            "in Kling's dev portal; we don't ship a baked-in list because it changes. "
+            "Set this once you've picked a voice that matches the target creator."
+        ),
+    )
+    p.add_argument(
+        "--kling-voice-language",
+        type=str,
+        choices=["en", "zh"],
+        default="en",
+        help=(
+            "Kling TTS language. Currently only Chinese ('zh') and English ('en') are supported. "
+            "Other languages auto-translate to English per Kling docs."
+        ),
+    )
     return p.parse_args()
 
 
@@ -340,6 +376,113 @@ def lipsync_eligible(decode: dict | None) -> tuple[bool, str]:
         f"disabled — format.kind = {kind!r} is not in the lipsync-eligible set "
         f"({sorted(_LIPSYNC_ELIGIBLE_FORMATS)}). Lipsync warps a face; this format "
         f"likely has none. Saving the ~$0.084/sec per cut."
+    )
+
+
+# ─── TTS provider selection (issue #24) ────────────────────────────────────
+#
+# Two TTS providers are available:
+#
+#   - "openai" (current default): OpenAI TTS via the existing render adapter.
+#     No character limit per call. Renders to MP3, then optionally warped
+#     via separate Kling lipsync call (audio2video mode).
+#
+#   - "kling": Kling's TTS bundled into the lipsync endpoint (text2video mode).
+#     Cleaner integration (one API call per cut for tts+lipsync), better
+#     lipsync quality (Kling generates the TTS for the lipsync, not
+#     retrofitting external audio). Hard 120-char limit per call.
+#
+# We pick ONE provider for the whole reproduction — mixing per-cut would
+# break voice timbre + 说话的节奏 (speech rhythm) across cut boundaries,
+# making the reproduction sound Frankenstein-stitched.
+#
+# --tts auto picks based on max cut transcript length:
+#   - all cuts ≤120 chars → kling
+#   - any cut >120 chars  → openai
+
+KLING_TTS_CHAR_LIMIT = 120
+
+
+def pick_tts_provider(
+    cuts: list[dict],
+    requested: str,
+    lipsync_on: bool,
+) -> tuple[str, str]:
+    """Return (provider, reason). provider ∈ {"openai", "kling"}.
+    Refuses with code 1 if --tts kling is forced but not actually usable.
+
+    Coupling note: Kling TTS only exists inside Kling's lip-sync endpoint
+    (mode: text2video). There's no standalone Kling-TTS API. So Kling TTS
+    is only available when lipsync_on. When lipsync is off (non-talking-
+    head format, or --lipsync flag absent), OpenAI is the only option.
+
+    Args:
+      cuts: recipe cuts to compute max transcript length over.
+      requested: user's --tts flag value, ∈ {"auto", "kling", "openai"}.
+      lipsync_on: whether lipsync will actually run (combines --lipsync
+        flag with the decode-derived format gate). When False, Kling TTS
+        isn't available regardless of what the user asked for.
+    """
+    # Only consider cuts that actually have non-empty transcripts. Cuts
+    # with no spoken text don't need TTS at all and shouldn't influence
+    # the picker — otherwise a recipe with zero transcripts would force
+    # Kling TTS for "nothing" which doesn't make sense.
+    transcripts = [
+        (int(c.get("index", i)), len((c.get("transcript") or "").strip()))
+        for i, c in enumerate(cuts)
+        if (c.get("transcript") or "").strip()
+    ]
+    over_limit = [(idx, n) for idx, n in transcripts if n > KLING_TTS_CHAR_LIMIT]
+
+    if requested == "openai":
+        return "openai", "user forced --tts openai (no char limit, separate API call)"
+
+    if requested == "kling":
+        if not lipsync_on:
+            fail(
+                "--tts kling requires --lipsync to be active (Kling TTS only exists as a "
+                "sub-mode of Kling's lipsync endpoint; there's no standalone Kling TTS). "
+                "Either add --lipsync, or re-run with --tts openai. If --lipsync was set but "
+                "the decode-derived format gate turned it off, the source video isn't a "
+                "talking-head format and lipsync wouldn't help anyway.",
+                code=1,
+            )
+        if not transcripts:
+            fail(
+                "--tts kling was forced, but the recipe has no per-cut transcripts to speak. "
+                "Kling TTS+lipsync would render silence with no audio source. Either add "
+                "transcripts to recipe.json's cut entries, or omit --tts (no TTS needed for "
+                "this recipe).",
+                code=1,
+            )
+        if over_limit:
+            details = ", ".join(f"cut {idx}: {n} chars" for idx, n in over_limit)
+            fail(
+                f"--tts kling was forced, but {len(over_limit)} cut(s) exceed Kling's "
+                f"{KLING_TTS_CHAR_LIMIT}-char TTS limit. Affected: {details}. "
+                f"Either re-run without --tts (auto picks openai for long cuts), or shorten "
+                f"the cut transcripts in recipe.json.",
+                code=1,
+            )
+        return "kling", "user forced --tts kling (all cuts within 120-char limit; bundled with lipsync)"
+
+    # auto
+    if not transcripts:
+        return "openai", "auto: no cut transcripts (no TTS needed; provider doesn't matter)"
+    if not lipsync_on:
+        return (
+            "openai",
+            "auto: lipsync is off (non-talking-head format or --lipsync not set), so Kling TTS isn't available",
+        )
+    if over_limit:
+        max_idx, max_n = max(over_limit, key=lambda t: t[1])
+        return (
+            "openai",
+            f"auto: cut {max_idx} has {max_n} chars > {KLING_TTS_CHAR_LIMIT} char Kling limit",
+        )
+    return "kling", (
+        f"auto: max cut transcript = {max(n for _, n in transcripts)} chars, "
+        f"fits within Kling's {KLING_TTS_CHAR_LIMIT}-char limit; lipsync is on (bundled cleaner)"
     )
 
 
@@ -899,6 +1042,13 @@ def compose(args: argparse.Namespace) -> None:
         lipsync_on, lipsync_reason = lipsync_eligible(decode_signals)
     print(f"[compose] lipsync: {lipsync_reason}")
 
+    # 2c. Pick TTS provider for the WHOLE reproduction. Mixing per-cut would
+    # break voice timbre + 说话的节奏 (cadence) across cut boundaries.
+    # Coupling: Kling TTS only exists as a sub-mode of Kling lipsync, so
+    # the picker considers lipsync_on too.
+    tts_provider, tts_reason = pick_tts_provider(cuts, args.tts, lipsync_on)
+    print(f"[compose] tts provider: {tts_provider} ({tts_reason})")
+
     # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync.
     # Uses kling_billed_duration so the estimate matches what we'll actually
     # pay (Kling rounds 6-9s cuts UP to 10s; cost preflight has to know that).
@@ -906,21 +1056,25 @@ def compose(args: argparse.Namespace) -> None:
     cuts_with_audio = [c for c in cuts if (c.get("transcript") or "").strip()]
     cost_estimate = 0.0
     cost_breakdown: list[str] = []
-    # Kling text2video — billed by the rounded-up duration
+    # Kling text2video — billed by the rounded-up duration. Always runs
+    # regardless of TTS provider (we need a base video for lipsync to warp,
+    # or for the OpenAI TTS to be mixed over).
     kling_total = 0.0
     for cut in cuts:
         billed = kling_billed_duration(float(cut.get("duration_sec") or 0))
         kling_total += 0.10 * billed
     cost_estimate += kling_total
     cost_breakdown.append(f"text2video {len(cuts)} cuts: ${kling_total:.2f}")
-    # TTS — sum of per-cut transcript lengths (L2), or fall back to full transcript (legacy path)
+    # TTS cost — depends on provider:
+    #   openai: charged by character count (~$15 per 1M chars)
+    #   kling:  bundled into the lipsync call, no separate TTS cost
     tts_chars = sum(len(c.get("transcript") or "") for c in cuts_with_audio) or len(full_transcript)
-    tts_total = (tts_chars / 1_000_000) * 15
-    cost_estimate += tts_total
-    if tts_chars:
-        cost_breakdown.append(f"TTS {tts_chars} chars: ${tts_total:.4f}")
-    # L3 lipsync — only on cuts that have audio, only when lipsync_on
-    # (combines --lipsync flag with the decode-derived format gate).
+    if tts_provider == "openai" and tts_chars:
+        tts_total = (tts_chars / 1_000_000) * 15
+        cost_estimate += tts_total
+        cost_breakdown.append(f"openai TTS {tts_chars} chars: ${tts_total:.4f}")
+    # L3 lipsync — only on cuts that have audio, only when lipsync_on. Same
+    # per-second cost regardless of which mode (audio2video vs text2video).
     # Billed against the same rounded duration as text2video — the lipsync
     # warp runs on the same Kling-output clip, so its duration is determined
     # by what text2video produced, NOT by the original recipe value.
@@ -931,7 +1085,8 @@ def compose(args: argparse.Namespace) -> None:
             lipsync_total += 0.084 * billed
         cost_estimate += lipsync_total
         if lipsync_total > 0:
-            cost_breakdown.append(f"lipsync {len(cuts_with_audio)} cuts: ${lipsync_total:.2f}")
+            label = "lipsync+kling-tts" if tts_provider == "kling" else "lipsync"
+            cost_breakdown.append(f"{label} {len(cuts_with_audio)} cuts: ${lipsync_total:.2f}")
 
     print(f"[compose] {len(cuts)} cuts, estimated cost: ${cost_estimate:.2f}")
     for line in cost_breakdown:
@@ -1038,14 +1193,17 @@ def compose(args: argparse.Namespace) -> None:
                     code=4,
                 )
 
-        # L2: per-cut TTS, aligned to this cut's spoken window
+        # L2: per-cut TTS, aligned to this cut's spoken window.
+        # Only renders OpenAI TTS when tts_provider == "openai". When
+        # tts_provider == "kling", TTS happens inside the lipsync call
+        # (L3 below) — no separate audio file is rendered.
         audio_path: Path | None = None
-        if cut_transcript:
+        if cut_transcript and tts_provider == "openai":
             audio_path = out_dir / f"cut-{i:02d}.mp3"
             if stage_done(state, cut_idx, "tts") and audio_path.exists() and audio_path.stat().st_size > 0:
                 print(f"[compose]   cut {i}: TTS cached (skipping OpenAI call)")
             else:
-                print(f"[compose]   rendering per-cut TTS ({len(cut_transcript)} chars)...")
+                print(f"[compose]   rendering per-cut OpenAI TTS ({len(cut_transcript)} chars)...")
                 tts_result = call_render(args.ugcspy_bin, {"kind": "tts", "text": cut_transcript})
                 tts_src = Path(tts_result["mp3_path"])
                 shutil.copy(tts_src, audio_path)
@@ -1069,7 +1227,14 @@ def compose(args: argparse.Namespace) -> None:
         # TTS we already rendered above). So a failed cut is never silent
         # in --lipsync mode — that was the issue #14 silent-cut bug.
         lipsync_status = "skipped"  # for the closing summary
-        if lipsync_on and audio_path and cut_video_id:
+        # Lipsync runs when:
+        #   - lipsync_on (combines --lipsync + decode format gate), AND
+        #   - cut_video_id is set (text2video succeeded), AND
+        #   - (tts_provider == "openai" and audio_path exists)  → audio2video mode
+        #     OR (tts_provider == "kling" and cut_transcript exists)  → text2video mode
+        kling_tts_mode = tts_provider == "kling" and bool(cut_transcript)
+        openai_lipsync_mode = tts_provider == "openai" and audio_path is not None
+        if lipsync_on and cut_video_id and (kling_tts_mode or openai_lipsync_mode):
             if stage_done(state, cut_idx, "lipsync") and dst.exists() and dst.stat().st_size > 0:
                 # Lipsync was previously successful — dst already holds the
                 # warped video. Skip the API call.
@@ -1079,13 +1244,28 @@ def compose(args: argparse.Namespace) -> None:
                 lipsync_statuses.append((cut_idx, lipsync_status))
                 clip_paths.append(dst)
                 continue
-            print("[compose]   running Kling lipsync warp...")
+            if kling_tts_mode:
+                print(
+                    f"[compose]   running Kling lipsync (text2video mode, "
+                    f"{len(cut_transcript)} chars, voice_id={args.kling_voice_id or 'default'})..."
+                )
+            else:
+                print("[compose]   running Kling lipsync (audio2video mode, mixing OpenAI TTS)...")
             try:
-                lipsync_payload = {
-                    "kind": "lipsync",
-                    "video_id": cut_video_id,
-                    "audio_path": str(audio_path),
-                }
+                if kling_tts_mode:
+                    lipsync_payload = {
+                        "kind": "lipsync_text2video",
+                        "video_id": cut_video_id,
+                        "text": cut_transcript[:KLING_TTS_CHAR_LIMIT],
+                        "voice_id": args.kling_voice_id,
+                        "voice_language": args.kling_voice_language,
+                    }
+                else:
+                    lipsync_payload = {
+                        "kind": "lipsync",
+                        "video_id": cut_video_id,
+                        "audio_path": str(audio_path),
+                    }
                 lip_result = call_render(args.ugcspy_bin, lipsync_payload)
                 lip_mp4 = Path(lip_result["mp4_path"])
                 if lip_mp4.exists():
@@ -1108,13 +1288,36 @@ def compose(args: argparse.Namespace) -> None:
                     print(
                         "[compose]   lipsync returned no mp4 — keeping un-warped clip + TTS fallback (paid $0 for warp)"
                     )
+                    if kling_tts_mode:
+                        # No fallback audio exists in Kling-TTS mode — the
+                        # lipsync was the ONLY source of audio for this cut.
+                        # Falling back to silent video would be worse than
+                        # failing loudly; the user should re-run with
+                        # --tts openai if they want the resilient path.
+                        fail(
+                            f"cut {i}: Kling TTS+lipsync failed (no mp4 returned). "
+                            f"In --tts kling mode there's no audio fallback for failed cuts. "
+                            f"Re-run with --tts openai to get the resilient path "
+                            f"(OpenAI TTS rendered separately; failed lipsync cuts fall back "
+                            f"to un-warped clip with the OpenAI audio mixed in).",
+                            code=2,
+                        )
             except SystemExit:
-                # call_render fails with SystemExit on error — for lipsync,
-                # we'd rather log and continue with the un-warped clip than
-                # abort the whole reproduction. The Kling lipsync API rejects
-                # videos with no clear face — that's not a fatal compose error.
-                # The downstream concat layer will mix in the per-cut TTS so
-                # the cut isn't silent.
+                # call_render fails with SystemExit on error. Behavior diverges
+                # by TTS provider:
+                #   - openai mode: keep the un-warped clip; the downstream
+                #     concat layer mixes in the per-cut OpenAI TTS so the cut
+                #     isn't silent. Graceful degrade.
+                #   - kling mode: no fallback audio exists (we didn't render
+                #     OpenAI TTS this run). Failing loudly is the only honest
+                #     option — silent fallback would break the reproduction.
+                if kling_tts_mode:
+                    fail(
+                        f"cut {i}: Kling TTS+lipsync failed. In --tts kling mode there's "
+                        f"no audio fallback for failed cuts. Re-run with --tts openai for "
+                        f"the resilient path (separate TTS, failed lipsync degrades gracefully).",
+                        code=2,
+                    )
                 lipsync_status = "failed-fallback (paid $0)"
                 print(
                     f"[compose]   lipsync failed for cut {i} — keeping un-warped clip + TTS fallback (paid $0 for warp)"
