@@ -1,16 +1,23 @@
-"""Tests for scripts.compose recipe-contract handling.
+"""Tests for scripts.compose.
 
-These tests guard against the recipe-contract drift that shipped in PR
-#11 and was caught by audit (issue #12): compose.py reads from a
-different recipe shape than assemble_recipe.py writes. Any new schema
-revision should add a fixture here so a future regression is impossible.
+Covers:
+ - recipe-contract handling (#12): prompt resolver across v0.5 + legacy shapes
+ - duration semantics (#13): kling_billed_duration + validate_durations
+ - decode.json gating (#14): reject_non_ai_recipes + lipsync_eligible
+ - caption burn-in (#15): resolve_cut_burnin + wrap + escape + ffmpeg E2E
 
-These are PURE-COMPUTE tests. No Kling, no OpenAI, no real Whisper. The
-goal is to assert the prompt-resolver covers every supported shape and
-the validator fails loudly on malformed recipes BEFORE any API spend.
+The pure-compute tests (most of the file) require no external tools and
+run in milliseconds. The CI-gated ffmpeg integration tests at the bottom
+exercise the actual drawtext invocation; they auto-skip when ffmpeg
+lacks libfreetype (some macOS builds) and run in CI where Ubuntu's
+ffmpeg ships with freetype by default.
+
+No Kling, no OpenAI, no real Whisper, no real money spent.
 """
 
 from __future__ import annotations
+
+import subprocess
 
 import pytest
 
@@ -352,3 +359,247 @@ def test_lipsync_eligible_no_for_missing_format_block():
     refuse lipsync rather than silently pay for a likely-failed cut."""
     eligible, reason = compose.lipsync_eligible({})
     assert eligible is False
+
+
+# ─── Caption burn-in (issue #15) ───────────────────────────────────────────
+
+
+def test_resolve_burnin_from_title_cards():
+    """Top-level recipe.title_cards entry matching cut.index wins over
+    per-cut fields (legacy recipe shape, hand-edited or pre-v0.5)."""
+    cut = {"index": 0}
+    recipe = {
+        "title_cards": [
+            {
+                "cut_index": 0,
+                "ocr_text": "Hello world",
+                "presentation": "static_overlay_full_duration",
+            }
+        ]
+    }
+    text, presentation = compose.resolve_cut_burnin(cut, recipe)
+    assert text == "Hello world"
+    assert presentation == "static_overlay_full_duration"
+
+
+def test_resolve_burnin_from_cut_caption_when_no_title_card():
+    """v0.5 canonical: cut.caption is the editorial overlay layer."""
+    cut = {"index": 1, "caption": "Buy now"}
+    recipe = {"title_cards": []}
+    text, presentation = compose.resolve_cut_burnin(cut, recipe)
+    assert text == "Buy now"
+    assert presentation == "static_overlay_full_duration"
+
+
+def test_resolve_burnin_from_cut_ocr_text_when_no_caption():
+    """v0.5 fallback: cut.ocr_text is raw OCR from the source frames."""
+    cut = {"index": 1, "ocr_text": "SALE 50% OFF"}
+    recipe = {}
+    text, presentation = compose.resolve_cut_burnin(cut, recipe)
+    assert text == "SALE 50% OFF"
+
+
+def test_resolve_burnin_title_card_takes_priority_over_per_cut():
+    """When BOTH title_cards and cut.caption exist, title_cards wins
+    (it's the more specific overlay-text annotation)."""
+    cut = {"index": 0, "caption": "fallback caption", "ocr_text": "fallback ocr"}
+    recipe = {
+        "title_cards": [
+            {"cut_index": 0, "ocr_text": "title card wins", "presentation": "kinetic_per_chunk"}
+        ]
+    }
+    text, presentation = compose.resolve_cut_burnin(cut, recipe)
+    assert text == "title card wins"
+    assert presentation == "kinetic_per_chunk"
+
+
+def test_resolve_burnin_returns_none_when_no_overlay_text():
+    cut = {"index": 0}
+    recipe = {"title_cards": []}
+    text, presentation = compose.resolve_cut_burnin(cut, recipe)
+    assert text is None
+    assert presentation == ""
+
+
+def test_resolve_burnin_skips_title_card_for_wrong_cut_index():
+    """A title_cards entry for cut_index=2 shouldn't burn into cut 0."""
+    cut = {"index": 0, "caption": "use cut caption"}
+    recipe = {"title_cards": [{"cut_index": 2, "ocr_text": "for different cut"}]}
+    text, _ = compose.resolve_cut_burnin(cut, recipe)
+    assert text == "use cut caption"
+
+
+# wrap_burnin_text
+
+
+def test_wrap_burnin_text_handles_single_line():
+    out = compose.wrap_burnin_text("Hello world", columns=30)
+    assert out == "Hello world"
+
+
+def test_wrap_burnin_text_wraps_long_line():
+    long = "This is a very long sentence that should wrap across multiple lines for mobile readability"
+    out = compose.wrap_burnin_text(long, columns=30)
+    lines = out.split("\n")
+    # Every line should be ≤30 chars (or one word if a word is longer)
+    for line in lines:
+        # break_long_words=False means words longer than columns can exceed
+        assert len(line) <= 60, f"line too long: {line!r}"
+    assert len(lines) >= 3  # roughly 90 chars / 30 cols
+
+
+def test_wrap_burnin_text_preserves_existing_newlines():
+    """When the recipe pre-formats with \\n (numbered lists, headlines),
+    those breaks should be respected, not joined into a single block."""
+    out = compose.wrap_burnin_text("Top 5 tips:\n\n1. First\n2. Second", columns=30)
+    # The "Top 5 tips:" line is its own paragraph; the empty line preserves
+    # the blank between headline and list
+    lines = out.split("\n")
+    assert "Top 5 tips:" in lines
+    assert "1. First" in lines
+    assert "2. Second" in lines
+
+
+def test_wrap_burnin_text_truncates_to_max_lines():
+    """An overlay that wraps to many lines covers the frame; truncate with …"""
+    very_long = "word " * 200  # 200 words, will wrap to many lines
+    out = compose.wrap_burnin_text(very_long, columns=30, max_lines=5)
+    lines = out.split("\n")
+    assert len(lines) == 5
+    assert lines[-1] == "…"
+
+
+def test_wrap_burnin_text_handles_empty():
+    assert compose.wrap_burnin_text("") == ""
+
+
+# escape_drawtext
+
+
+def test_escape_drawtext_passes_plain_text():
+    assert compose.escape_drawtext("Hello world") == "Hello world"
+
+
+@pytest.mark.parametrize(
+    "raw,expected_contains",
+    [
+        # The escape function adds backslashes; we verify the special char
+        # is now preceded by one (ffmpeg parses these out).
+        ("path:to:something", "path\\:to\\:something"),
+        ("it's a test", "it\\'s a test"),
+        ("a,b,c", "a\\,b\\,c"),
+        ("100% off", "100\\% off"),
+        ("[bracket]", "\\[bracket\\]"),
+    ],
+)
+def test_escape_drawtext_escapes_special_chars(raw, expected_contains):
+    assert expected_contains in compose.escape_drawtext(raw)
+
+
+def test_escape_drawtext_handles_backslashes_first():
+    """Backslash must be escaped FIRST so we don't double-escape the
+    backslashes we add for other special chars."""
+    # A raw backslash should become double backslash
+    assert compose.escape_drawtext("a\\b") == "a\\\\b"
+
+
+# build_drawtext_filter
+
+
+def test_build_drawtext_filter_includes_text():
+    out = compose.build_drawtext_filter("Hello", clip_dur=5.0)
+    assert "Hello" in out
+    assert out.startswith("drawtext=")
+
+
+def test_build_drawtext_filter_escapes_special_chars():
+    out = compose.build_drawtext_filter("it's: 50%", clip_dur=5.0)
+    # The output should not contain the raw special chars in a way that
+    # would break filtergraph parsing. Specifically: apostrophe + colon
+    # + percent should be escaped.
+    assert "it\\'s" in out
+    assert "\\:" in out
+    assert "\\%" in out
+
+
+def test_build_drawtext_filter_renders_styling():
+    out = compose.build_drawtext_filter("Hi", clip_dur=5.0)
+    # Verify the key styling args are present so a regression in
+    # render style breaks the test
+    assert "fontcolor=white" in out
+    assert "fontsize=42" in out
+    assert "box=1" in out  # background box for legibility
+    assert "x=(w-text_w)/2" in out  # centered horizontally
+
+
+# ─── Burn-in ffmpeg integration (CI-gated) ────────────────────────────────
+#
+# These tests exercise the actual ffmpeg drawtext invocation end-to-end.
+# Skipped on environments where ffmpeg lacks libfreetype (e.g. some
+# macOS Homebrew builds). Ubuntu apt-installed ffmpeg ships with
+# freetype, so CI runs these.
+
+
+@pytest.fixture
+def synthetic_clip(tmp_path):
+    """Generate a 5s color test clip via ffmpeg for burn-in integration."""
+    out = tmp_path / "synthetic.mp4"
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=teal:1080x1920:duration=5:rate=30",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        pytest.skip(f"ffmpeg not available for fixture generation: {proc.stderr[:200]}")
+    return out
+
+
+@pytest.mark.skipif(not compose.drawtext_available(), reason="ffmpeg lacks libfreetype")
+def test_burnin_produces_video_with_correct_duration(synthetic_clip, tmp_path):
+    """End-to-end: feed a synthetic clip + drawtext filter through
+    mix_clip_with_silence, verify the output is the right duration and
+    contains video stream. Confirms the filter syntax is valid and the
+    drawtext call actually completes."""
+    out = tmp_path / "burned.mp4"
+    text = compose.wrap_burnin_text("TOP 5 TIPS\nfor better conversation", columns=30)
+    filter_spec = compose.build_drawtext_filter(text, clip_dur=5.0)
+    compose.mix_clip_with_silence(synthetic_clip, out, clip_dur=5.0, burnin=filter_spec)
+    assert out.exists()
+    duration = compose.ffprobe_duration(out)
+    assert 4.9 < duration < 5.1, f"expected ~5s, got {duration}"
+
+
+@pytest.mark.skipif(not compose.drawtext_available(), reason="ffmpeg lacks libfreetype")
+def test_burnin_handles_apostrophes_and_special_chars(synthetic_clip, tmp_path):
+    """Real UGC overlay text has apostrophes, percent signs, commas, etc.
+    Regression test for escape_drawtext."""
+    out = tmp_path / "burned-special.mp4"
+    tricky_text = "Save 50% off — it's a steal, today only!"
+    wrapped = compose.wrap_burnin_text(tricky_text)
+    filter_spec = compose.build_drawtext_filter(wrapped, clip_dur=5.0)
+    # Should not raise — the escape function is doing its job
+    compose.mix_clip_with_silence(synthetic_clip, out, clip_dur=5.0, burnin=filter_spec)
+    assert out.exists()
+    duration = compose.ffprobe_duration(out)
+    assert 4.9 < duration < 5.1
+
+
+@pytest.mark.skipif(not compose.drawtext_available(), reason="ffmpeg lacks libfreetype")
+def test_burnin_produces_no_op_when_text_empty(synthetic_clip, tmp_path):
+    """No burnin → no filter applied → output still correct."""
+    out = tmp_path / "no-burnin.mp4"
+    compose.mix_clip_with_silence(synthetic_clip, out, clip_dur=5.0, burnin=None)
+    assert out.exists()
+    duration = compose.ffprobe_duration(out)
+    assert 4.9 < duration < 5.1
