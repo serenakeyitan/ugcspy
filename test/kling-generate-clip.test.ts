@@ -34,8 +34,30 @@ describe("KlingProvider.generateClip duration guard", () => {
     ).rejects.toThrow(/duration_sec=10.0001/);
   });
 
+  test("rejects prompts longer than Kling's 2500-char cap (issue #30)", async () => {
+    // Codex flagged: compose.py's L1 transcript injection truncates the
+    // appended portion but doesn't cap total prompt length. A long
+    // base_prompt + 300-char append could exceed Kling's text2video
+    // cap and fail at submit with a cryptic API error. The guard here
+    // catches it upfront with a clear remediation pointing at recipe.json.
+    const provider = new KlingProvider("access", "secret");
+    const longPrompt = "x".repeat(2501);
+    await expect(
+      provider.generateClip({ prompt: longPrompt, duration_sec: 5 }),
+    ).rejects.toThrow(/2500/);
+  });
+
+  // Note: we don't test "accepts prompts at exactly 2500 chars" because
+  // the happy path requires mocking the full Kling submit+poll+download
+  // cycle, which is covered in test/kling-lipsync.test.ts. Asserting
+  // the inverse ("not.toThrow(/2500/)") would create a flaky test
+  // that depends on what error fires NEXT (network, JWT, etc.) when
+  // we lack mocks. The boundary correctness is locked by the
+  // implementation's `> PROMPT_CHAR_LIMIT` comparison + the 2501-char
+  // rejection test above.
+
   // Note: we don't test the happy path here because that requires
   // mocking the full Kling submit+poll+download cycle, which is
   // covered in test/kling-lipsync.test.ts via makeMockFetch. The
-  // sole purpose of this file is the upfront duration guard.
+  // sole purpose of this file is the upfront duration + prompt guards.
 });

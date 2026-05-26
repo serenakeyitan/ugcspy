@@ -136,6 +136,16 @@ def parse_args() -> argparse.Namespace:
             "Other languages auto-translate to English per Kling docs."
         ),
     )
+    p.add_argument(
+        "--kling-voice-speed",
+        type=float,
+        default=1.0,
+        help=(
+            "Kling TTS speech rate, 0.8 (slowest) to 2.0 (fastest). Default 1.0 is natural "
+            "conversational pacing. Lower values can feel sluggish on short transcripts; higher "
+            "values useful for tight-cut videos where TTS audio must fit within the cut duration."
+        ),
+    )
     return p.parse_args()
 
 
@@ -578,6 +588,7 @@ def args_signature(args: argparse.Namespace) -> str:
         f"|tts={getattr(args, 'tts', 'auto')}"
         f"|kling_voice_id={getattr(args, 'kling_voice_id', None) or ''}"
         f"|kling_voice_lang={getattr(args, 'kling_voice_language', 'en')}"
+        f"|kling_voice_speed={getattr(args, 'kling_voice_speed', 1.0):.2f}"
     )
 
 
@@ -1336,6 +1347,10 @@ def compose(args: argparse.Namespace) -> None:
                         "text": cut_transcript[:KLING_TTS_CHAR_LIMIT],
                         "voice_id": args.kling_voice_id,
                         "voice_language": args.kling_voice_language,
+                        # voice_speed wired through per issue #30. Kling
+                        # validates the range [0.8, 2.0] in render adapter;
+                        # we trust argparse's float parse and pass through.
+                        "voice_speed": args.kling_voice_speed,
                     }
                 else:
                     lipsync_payload = {

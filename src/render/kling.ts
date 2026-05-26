@@ -62,6 +62,22 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
         this.name,
       );
     }
+    // Kling text2video prompt cap is ~2500 chars (per fal.ai mirror docs).
+    // Compose's L1 injection truncates the *appended* transcript to 300
+    // chars but doesn't cap base_prompt itself, so a long inferred prompt
+    // + 300-char append could exceed Kling's limit and fail at submit
+    // with a cryptic error. Catch upfront with a clear remediation.
+    // Issue #30 (Codex flagged).
+    const PROMPT_CHAR_LIMIT = 2500;
+    if (req.prompt.length > PROMPT_CHAR_LIMIT) {
+      throw new RenderError(
+        `prompt is ${req.prompt.length} chars; Kling text2video caps at ${PROMPT_CHAR_LIMIT}. ` +
+          `Shorten cut.inferred.prompt in recipe.json — the most descriptive ~2000 chars are ` +
+          `usually plenty for diffusion-based generation. Compose's L1 transcript injection ` +
+          `(~300 chars) is included in this budget.`,
+        this.name,
+      );
+    }
     const duration = req.duration_sec <= 5 ? 5 : 10;
     const aspect = req.aspect_ratio ?? "9:16";
 
@@ -254,6 +270,15 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
         const v = statusJson.data?.task_result?.videos?.[0];
         videoUrl = v?.url ?? null;
         durationSec = Number(v?.duration ?? 0);
+        // Same defensive parsing as lipSyncWithText. Issue #30.
+        if (!videoUrl) {
+          throw new RenderError(
+            `Kling lipsync job ${taskId} reported succeed but returned no video URL. ` +
+              `Unexpected response shape. Raw response: ` +
+              `${JSON.stringify(statusJson).slice(0, 500)}`,
+            this.name,
+          );
+        }
         break;
       }
       if (status === "failed") {
@@ -277,9 +302,17 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     }
     writeFileSync(outPath, Buffer.from(await dl.arrayBuffer()));
 
-    // If the API didn't report duration, fall back to a 5s minimum charge
-    // (since Kling's clips are always 5s or 10s).
-    const billableSeconds = durationSec > 0 ? durationSec : 5;
+    // Defensive billing — issue #30. See lipSyncWithText for full rationale.
+    // Over-attribute (10s, Kling's max) when duration is missing so we
+    // don't silently under-count cost.
+    const billableSeconds = durationSec > 0 ? durationSec : 10;
+    if (durationSec <= 0) {
+      console.warn(
+        `[kling] lipsync succeed response missing duration for task ${taskId}; ` +
+          `billing the safe upper bound (10s = $${(10 * this.lipsync_cost_per_second_usd).toFixed(2)}). ` +
+          `Real Kling bill is authoritative.`,
+      );
+    }
     return {
       mp4_path: outPath,
       external_id: taskId,
@@ -398,6 +431,19 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
         const v = statusJson.data?.task_result?.videos?.[0];
         videoUrl = v?.url ?? null;
         durationSec = Number(v?.duration ?? 0);
+        // Defensive: if task_status is "succeed" but URL is missing,
+        // we want to throw a TRUTHFUL error (the response shape is
+        // unexpected), NOT a fake "timed out" message. Issue #30
+        // (Codex caught this). Capture the raw response so the user
+        // can file a bug with concrete evidence.
+        if (!videoUrl) {
+          throw new RenderError(
+            `Kling lipsync text2video job ${taskId} reported succeed but returned no video URL. ` +
+              `This is an unexpected response shape — the API may have changed. Raw response: ` +
+              `${JSON.stringify(statusJson).slice(0, 500)}`,
+            this.name,
+          );
+        }
         break;
       }
       if (status === "failed") {
@@ -421,7 +467,22 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     }
     writeFileSync(outPath, Buffer.from(await dl.arrayBuffer()));
 
-    const billableSeconds = durationSec > 0 ? durationSec : 5;
+    // Defensive billing: if Kling didn't return a duration field in the
+    // succeed response (issue #30), we can't know the actual clip
+    // length. Two options: under-attribute (5s hardcode, the old
+    // behavior) or over-attribute (10s, Kling's max). Over-attribute
+    // is safer for the user — they see inflated internal cost, but
+    // their actual Kling bill (which they'll see independently) is the
+    // truth. Under-attribute would silently let total_cost drift below
+    // the real bill, which is the failure mode that bites users.
+    const billableSeconds = durationSec > 0 ? durationSec : 10;
+    if (durationSec <= 0) {
+      console.warn(
+        `[kling] lipsync text2video succeed response missing duration for task ${taskId}; ` +
+          `billing the safe upper bound (10s = $${(10 * this.lipsync_cost_per_second_usd).toFixed(2)}). ` +
+          `Real Kling bill is authoritative.`,
+      );
+    }
     return {
       mp4_path: outPath,
       external_id: taskId,

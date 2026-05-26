@@ -719,6 +719,7 @@ def _minimal_args():
         tts="auto",
         kling_voice_id=None,
         kling_voice_language="en",
+        kling_voice_speed=1.0,
     )
 
 
@@ -828,6 +829,22 @@ def test_args_signature_changes_with_kling_voice_language(_minimal_args):
     _minimal_args.kling_voice_language = "zh"
     sig_zh = compose.args_signature(_minimal_args)
     assert sig_en != sig_zh
+
+
+def test_args_signature_changes_with_kling_voice_speed(_minimal_args):
+    """Different speech rate produces audibly different lipsync. Issue #30
+    wired the flag through; this test guards against silently reusing
+    cuts rendered at the old speed."""
+    sig_1 = compose.args_signature(_minimal_args)
+    _minimal_args.kling_voice_speed = 1.3
+    sig_1p3 = compose.args_signature(_minimal_args)
+    _minimal_args.kling_voice_speed = 0.8
+    sig_0p8 = compose.args_signature(_minimal_args)
+    assert sig_1 != sig_1p3
+    assert sig_1p3 != sig_0p8
+    # Idempotency: identical speed → identical sig
+    _minimal_args.kling_voice_speed = 1.0
+    assert compose.args_signature(_minimal_args) == sig_1
 
 
 def test_args_signature_stable_for_unrelated_args(_minimal_args):
