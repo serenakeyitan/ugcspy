@@ -32,6 +32,38 @@ export interface VideoGenProvider {
   generateClip(req: ClipGenRequest): Promise<ClipGenResult>;
 }
 
+/**
+ * Post-generation lip-sync warp. Takes a clip the provider previously
+ * generated (referenced by external_id from a ClipGenResult) plus an
+ * audio file, returns a new clip whose mouth movements match the audio.
+ *
+ * Only sensible on clips that contain a clear human face — Kling's API
+ * will reject (with code != 0) if no face is detectable. The caller is
+ * responsible for gating to talking-head formats; the provider just
+ * surfaces the API error if the gate is wrong.
+ */
+export interface LipSyncRequest {
+  /** task_id / external_id from a prior generateClip call. Must be from
+   *  the same provider account and ≤30 days old (Kling constraint). */
+  video_id: string;
+  /** Path on local disk to the audio file (mp3/wav/m4a/aac, ≤5MB). The
+   *  adapter base64-encodes it and posts inline; no external upload step. */
+  audio_path: string;
+}
+
+export interface LipSyncResult {
+  mp4_path: string;
+  external_id: string;
+  cost_usd: number;
+}
+
+export interface LipSyncProvider {
+  readonly name: string;
+  /** USD per second of warped video. Kling Std is ~$0.084/sec. */
+  readonly lipsync_cost_per_second_usd: number;
+  lipSyncClip(req: LipSyncRequest): Promise<LipSyncResult>;
+}
+
 export interface TtsRequest {
   text: string;
   // Stock voice id. Each provider has its own voice catalog; we default

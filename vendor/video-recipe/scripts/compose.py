@@ -3,14 +3,23 @@
 
 The pipeline:
   1. Read recipe.json from the cut-recipe directory
-  2. For each cut, call `ugcspy render` (TS subprocess) with kind=clip to
-     generate a 5s or 10s MP4 via Kling 3.0
-  3. If recipe.voiceover.transcript_available, call `ugcspy render` with
-     kind=tts to generate the voiceover MP3
-  4. Stitch clips with ffmpeg concat demuxer
-  5. Mix voiceover audio in (replacing any per-clip audio)
-  6. Burn OCR'd overlay text as subtitles (one chunk per cut)
+  2. For each cut, build a prompt enriched with the spoken text for that
+     cut's time window (L1 — gives Kling text2video a target for mouth
+     movements; "free" improvement, no extra API call)
+  3. For each cut, call `ugcspy render` kind=clip → 5s or 10s MP4 via Kling
+  4. For each cut WITH a spoken-text window, call `ugcspy render` kind=tts
+     to render a per-cut MP3 (L2 — replaces the single-MP3 approach so
+     audio events land at the right cuts even if Kling cuts shift)
+  5. For each cut whose generated clip has a face AND has audio, call
+     `ugcspy render` kind=lipsync with {video_id, audio_file: base64-mp3}
+     → warped MP4 with mouth movements synced to the TTS (L3 — talking-head
+     reproduction. Roughly +$0.084/sec but only for talking-head cuts.)
+  6. Stitch warped/un-warped clips with ffmpeg concat demuxer
   7. Output reproduction.mp4 in the recipe directory
+
+The L3 lip-sync pass is opt-in via --lipsync. Default off because it
+roughly doubles per-clip cost. When on, it only triggers for cuts that
+have a spoken transcript (no point lip-syncing a silent cut).
 
 Cost tracking: every render call returns cost_usd. We accumulate and
 abort if the running total exceeds a user-set budget cap (default $5).
@@ -55,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="ugcspy",
         help="Path to the ugcspy CLI binary. Defaults to PATH lookup.",
+    )
+    p.add_argument(
+        "--lipsync",
+        action="store_true",
+        help="Apply Kling lip-sync warp to cuts that have audio. Roughly doubles cost (~+$0.084/sec per cut warped). Recommended for talking-head reproductions; pointless for greenscreen-kinetic or AI-montage.",
     )
     return p.parse_args()
 
@@ -115,16 +129,37 @@ def compose(args: argparse.Namespace) -> None:
                 code=1,
             )
 
-    # 2. Cost preflight — sum estimated cost across all cuts + TTS
+    # 2. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync
+    full_transcript = recipe.get("voiceover", {}).get("full_transcript", "")
+    cuts_with_audio = [c for c in cuts if (c.get("transcript") or "").strip()]
     cost_estimate = 0.0
+    cost_breakdown: list[str] = []
+    # Kling text2video — same for every cut
+    kling_total = 0.0
     for cut in cuts:
         dur = max(5, int(round(cut.get("duration_sec", 5))))
-        cost_estimate += 0.10 * dur  # Kling std
-    transcript = recipe.get("voiceover", {}).get("full_transcript", "")
-    if transcript:
-        cost_estimate += (len(transcript) / 1_000_000) * 15  # OpenAI TTS standard
+        kling_total += 0.10 * dur
+    cost_estimate += kling_total
+    cost_breakdown.append(f"text2video {len(cuts)} cuts: ${kling_total:.2f}")
+    # TTS — sum of per-cut transcript lengths (L2), or fall back to full transcript (legacy path)
+    tts_chars = sum(len(c.get("transcript") or "") for c in cuts_with_audio) or len(full_transcript)
+    tts_total = (tts_chars / 1_000_000) * 15
+    cost_estimate += tts_total
+    if tts_chars:
+        cost_breakdown.append(f"TTS {tts_chars} chars: ${tts_total:.4f}")
+    # L3 lipsync — only on cuts that have audio, only if --lipsync
+    if args.lipsync:
+        lipsync_total = 0.0
+        for cut in cuts_with_audio:
+            dur = max(5, int(round(cut.get("duration_sec", 5))))
+            lipsync_total += 0.084 * dur
+        cost_estimate += lipsync_total
+        if lipsync_total > 0:
+            cost_breakdown.append(f"lipsync {len(cuts_with_audio)} cuts: ${lipsync_total:.2f}")
 
     print(f"[compose] {len(cuts)} cuts, estimated cost: ${cost_estimate:.2f}")
+    for line in cost_breakdown:
+        print(f"  - {line}")
     if cost_estimate > args.budget:
         fail(
             f"estimated cost ${cost_estimate:.2f} exceeds budget ${args.budget:.2f}. "
@@ -135,22 +170,36 @@ def compose(args: argparse.Namespace) -> None:
         print("[compose] dry-run; no API calls made.")
         return
 
-    # 2. Render each cut
+    # 3. Render each cut: clip → optional per-cut TTS → optional lipsync warp
     total_cost = 0.0
     clip_paths: list[Path] = []
+    cut_audio_paths: list[Path | None] = []  # parallel to cuts; None if no audio for this cut
     out_dir = args.recipe_dir / "reproduction"
     out_dir.mkdir(exist_ok=True)
     for i, cut in enumerate(cuts):
-        prompt = cut.get("inferred_generation_prompt") or cut.get("scene_description")
-        if not prompt:
+        base_prompt = cut.get("inferred_generation_prompt") or cut.get("scene_description")
+        if not base_prompt:
             fail(f"cut {i} has no prompt or scene_description; cannot render")
-        if prompt.startswith("N/A"):
+        if base_prompt.startswith("N/A"):
             fail(
                 f"cut {i} marked N/A (likely a human-shot UGC video — "
                 f"reproduction by AI render won't match the source). "
                 f"Use /ugcspy-fork to brief a real creator instead.",
                 code=1,
             )
+
+        # L1: append the spoken text for this cut to the prompt so Kling
+        # text2video has a target for mouth movements. Cheap, no extra API.
+        cut_transcript = (cut.get("transcript") or "").strip()
+        if cut_transcript:
+            # Truncate very long reads so we don't exceed Kling's prompt limits;
+            # the words matter more than the full read for diffusion-based
+            # mouth steering.
+            short = cut_transcript[:300]
+            prompt = f"{base_prompt} The person says: '{short}'"
+        else:
+            prompt = base_prompt
+
         print(f"[compose] rendering cut {i}/{len(cuts)-1} ({cut.get('duration_sec',5)}s)...")
         result = call_render(
             args.ugcspy_bin,
@@ -159,10 +208,10 @@ def compose(args: argparse.Namespace) -> None:
         mp4 = Path(result["mp4_path"])
         if not mp4.exists():
             fail(f"render returned mp4_path={mp4} but file doesn't exist", code=2)
-        # Copy into recipe_dir so it survives temp cleanup
         dst = out_dir / f"cut-{i:02d}.mp4"
         shutil.copy(mp4, dst)
-        clip_paths.append(dst)
+        # Capture the Kling task_id (external_id) — needed for L3 lipsync
+        cut_video_id = result.get("external_id")
         total_cost += result["cost_usd"]
         print(f"[compose]   cost so far: ${total_cost:.2f}")
         if total_cost > args.budget:
@@ -171,49 +220,82 @@ def compose(args: argparse.Namespace) -> None:
                 code=4,
             )
 
-    # 3. Render TTS (if transcript exists)
-    voiceover_mp3: Path | None = None
-    if transcript:
-        print(f"[compose] rendering voiceover ({len(transcript)} chars)...")
-        result = call_render(args.ugcspy_bin, {"kind": "tts", "text": transcript})
-        src = Path(result["mp3_path"])
-        voiceover_mp3 = out_dir / "voiceover.mp3"
-        shutil.copy(src, voiceover_mp3)
-        total_cost += result["cost_usd"]
+        # L2: per-cut TTS, aligned to this cut's spoken window
+        audio_path: Path | None = None
+        if cut_transcript:
+            print(f"[compose]   rendering per-cut TTS ({len(cut_transcript)} chars)...")
+            tts_result = call_render(args.ugcspy_bin, {"kind": "tts", "text": cut_transcript})
+            tts_src = Path(tts_result["mp3_path"])
+            audio_path = out_dir / f"cut-{i:02d}.mp3"
+            shutil.copy(tts_src, audio_path)
+            total_cost += tts_result["cost_usd"]
+            if total_cost > args.budget:
+                fail(f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} TTS", code=4)
+        cut_audio_paths.append(audio_path)
 
-    # 4. Concat clips with ffmpeg concat demuxer
-    concat_list = out_dir / "concat.txt"
-    concat_list.write_text("\n".join(f"file '{p.name}'" for p in clip_paths) + "\n")
-    stitched = out_dir / "stitched.mp4"
-    run_ffmpeg(
-        [
-            "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_list),
-            "-c", "copy",
-            str(stitched),
-        ]
-    )
+        # L3: optional lipsync warp — replaces dst with a face-synced version
+        if args.lipsync and audio_path and cut_video_id:
+            print("[compose]   running Kling lipsync warp...")
+            try:
+                lipsync_payload = {
+                    "kind": "lipsync",
+                    "video_id": cut_video_id,
+                    "audio_path": str(audio_path),
+                }
+                lip_result = call_render(args.ugcspy_bin, lipsync_payload)
+                lip_mp4 = Path(lip_result["mp4_path"])
+                if lip_mp4.exists():
+                    # Overwrite the un-warped clip with the warped one
+                    shutil.copy(lip_mp4, dst)
+                    total_cost += lip_result["cost_usd"]
+                    print(f"[compose]   lipsync ok; cost now: ${total_cost:.2f}")
+                else:
+                    print("[compose]   lipsync returned no mp4 — keeping un-warped clip")
+            except SystemExit:
+                # call_render fails with SystemExit on error — for lipsync,
+                # we'd rather log and continue with the un-warped clip than
+                # abort the whole reproduction. The Kling lipsync API rejects
+                # videos with no clear face — that's not a fatal compose error.
+                print(f"[compose]   lipsync failed for cut {i} — keeping un-warped clip")
+            if total_cost > args.budget:
+                fail(f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} lipsync", code=4)
+        clip_paths.append(dst)
 
-    # 5. Mix voiceover audio in if we have one — replaces clip audio
-    final = args.recipe_dir / "reproduction.mp4"
-    if voiceover_mp3:
-        run_ffmpeg(
-            [
-                "-y",
-                "-i", str(stitched),
-                "-i", str(voiceover_mp3),
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-shortest",
-                str(final),
-            ]
-        )
+    # 4. Concat clips with ffmpeg. When L3 lipsync ran, each clip already
+    # has its synced audio baked in. When L3 didn't run, we need to mix
+    # the per-cut TTS into each clip first.
+    if args.lipsync:
+        # Lipsync clips have audio; straight concat works
+        concat_list = out_dir / "concat.txt"
+        concat_list.write_text("\n".join(f"file '{p.name}'" for p in clip_paths) + "\n")
+        final = args.recipe_dir / "reproduction.mp4"
+        run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
     else:
-        shutil.move(str(stitched), str(final))
+        # Mix each clip with its corresponding per-cut TTS first, THEN concat.
+        # Removes the "TTS drifts out of sync with cuts" failure mode from
+        # the old single-MP3 approach.
+        mixed_paths: list[Path] = []
+        for i, (clip, audio) in enumerate(zip(clip_paths, cut_audio_paths)):
+            if audio:
+                mixed = out_dir / f"mixed-{i:02d}.mp4"
+                run_ffmpeg([
+                    "-y",
+                    "-i", str(clip),
+                    "-i", str(audio),
+                    "-c:v", "copy",
+                    "-c:a", "aac",
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-shortest",
+                    str(mixed),
+                ])
+                mixed_paths.append(mixed)
+            else:
+                mixed_paths.append(clip)
+        concat_list = out_dir / "concat.txt"
+        concat_list.write_text("\n".join(f"file '{p.name}'" for p in mixed_paths) + "\n")
+        final = args.recipe_dir / "reproduction.mp4"
+        run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
 
     print(f"\n[compose] ✓ reproduction.mp4 written to {final}")
     print(f"[compose] total cost: ${total_cost:.2f} of ${args.budget:.2f} budget")
