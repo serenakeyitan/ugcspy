@@ -82,6 +82,24 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Discard any previous compose_state.json and re-run from scratch. By default, compose resumes: cuts whose API calls succeeded previously are skipped and their cached outputs reused (so a Kling 502 mid-pipeline doesn't force you to re-pay for completed cuts). Use this when you want a clean run.",
     )
+    p.add_argument(
+        "--no-disclosure",
+        action="store_true",
+        help="Skip the AI-generated disclosure watermark on the final reproduction. Default behavior burns 'AI-generated' bottom-right of the output, required by FTC + EU AI Act + TikTok ToS for AIGC content. Using this flag prints a loud warning — most platforms now enforce labeling of synthetic content.",
+    )
+    p.add_argument(
+        "--disclosure-text",
+        type=str,
+        default="AI-generated",
+        help="Override the default disclosure text. Keep it short — long text dominates the frame. Default: 'AI-generated'.",
+    )
+    p.add_argument(
+        "--disclosure-position",
+        type=str,
+        choices=["bottom-right", "bottom-left", "top-right", "top-left"],
+        default="bottom-right",
+        help="Where to place the disclosure watermark. Default: bottom-right (matches platform conventions for AI-labels).",
+    )
     return p.parse_args()
 
 
@@ -747,6 +765,79 @@ def build_drawtext_filter(burnin_text: str, clip_dur: float) -> str:
     )
 
 
+# ─── AI-disclosure watermark (issue #17) ───────────────────────────────────
+#
+# FTC + EU AI Act + TikTok ToS all require labeling of AI-generated content.
+# Unlabeled output of this tool is a compliance gap — especially for lipsync
+# warps where the synthetic mouth is on a face resembling a real creator.
+# We burn a disclosure watermark on the final reproduction by default.
+#
+# Position uses corner-anchored placement to match how platforms typically
+# render their own AI-label badges (TikTok's "AI-Generated" badge sits
+# bottom-right; Instagram's "AI" tag sits top-left on Reels).
+#
+# Like the caption burn-in, this requires ffmpeg with libfreetype. When
+# missing we degrade gracefully: a warning prints, the final reproduction
+# is written without the watermark. The user gets explicit notice so they
+# don't unknowingly post unlabeled AI content.
+
+# Maps user-facing position names to drawtext (x, y) expressions.
+_DISCLOSURE_POSITIONS: dict[str, tuple[str, str]] = {
+    "bottom-right": ("w-text_w-30", "h-text_h-30"),
+    "bottom-left": ("30", "h-text_h-30"),
+    "top-right": ("w-text_w-30", "30"),
+    "top-left": ("30", "30"),
+}
+
+
+def build_disclosure_filter(text: str, position: str) -> str:
+    """Build a drawtext filter for the AI-disclosure watermark.
+
+    Smaller fontsize than the caption burn-in (28 vs 42) — the disclosure
+    is meant to be visible-but-not-dominant. Black box behind for
+    legibility on any background; corner-anchored placement matches
+    platform conventions for AI labels."""
+    x_expr, y_expr = _DISCLOSURE_POSITIONS.get(position, _DISCLOSURE_POSITIONS["bottom-right"])
+    escaped = escape_drawtext(text)
+    font = _resolve_burnin_font()
+    font_arg = f":fontfile={font}" if font else ""
+    return (
+        f"drawtext=text='{escaped}'"
+        f"{font_arg}"
+        f":fontcolor=white"
+        f":fontsize=28"
+        f":box=1"
+        f":boxcolor=black@0.65"
+        f":boxborderw=8"
+        f":x={x_expr}"
+        f":y={y_expr}"
+    )
+
+
+def apply_disclosure_watermark(src: Path, dst: Path, text: str, position: str) -> None:
+    """Single ffmpeg pass: apply disclosure drawtext over `src` and write
+    to `dst`. Stream-copies audio (no need to re-encode); only re-encodes
+    video. Faster than a full re-encode of the whole reproduction."""
+    run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(src),
+            "-vf",
+            build_disclosure_filter(text, position),
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",  # audio passes through; only video gets a new encode
+            str(dst),
+        ]
+    )
+
+
 # ─── Composer ──────────────────────────────────────────────────────────────
 
 
@@ -1128,10 +1219,54 @@ def compose(args: argparse.Namespace) -> None:
     concat_list = out_dir / "concat.txt"
     concat_list.write_text("\n".join(f"file '{p.name}'" for p in final_clip_paths) + "\n")
     final = args.recipe_dir / "reproduction.mp4"
-    # Now stream-copy is safe: every input has identical codec params.
-    run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
+    # First concat all the normalized clips into a stitched intermediate.
+    # Stream-copy is safe here: every input has identical codec params.
+    # Then optionally apply the disclosure watermark to that stitched file.
+    stitched = out_dir / "stitched.mp4"
+    run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(stitched)])
+
+    # Apply AI-disclosure watermark unless explicitly opted out. Required
+    # by FTC + EU AI Act + TikTok ToS for AI-generated content.
+    disclosure_status: str
+    if args.no_disclosure:
+        print(
+            "[compose] ⚠ WARNING: --no-disclosure was set. The reproduction will NOT carry an AI-generated label. "
+            "Most platforms (TikTok, Instagram, YouTube) require AIGC labeling under their ToS, "
+            "and FTC + EU AI Act require disclosure of synthetic content. "
+            "Use this flag only when you have a specific reason (e.g. you're applying a different label downstream).",
+            file=sys.stderr,
+        )
+        shutil.move(str(stitched), str(final))
+        disclosure_status = "skipped (--no-disclosure)"
+    elif not drawtext_available():
+        # ffmpeg without libfreetype can't render the watermark either. We
+        # already warned earlier about caption burn-in being skipped; surface
+        # the disclosure issue separately because it's a compliance gap.
+        print(
+            "[compose] ⚠ WARNING: ffmpeg drawtext unavailable; AI-disclosure watermark NOT applied. "
+            "Install ffmpeg with libfreetype (apt install ffmpeg on Debian/Ubuntu, "
+            "or brew tap homebrew-ffmpeg/ffmpeg + brew install homebrew-ffmpeg/ffmpeg/ffmpeg "
+            "--with-freetype on macOS) and re-run to add the required label.",
+            file=sys.stderr,
+        )
+        shutil.move(str(stitched), str(final))
+        disclosure_status = "skipped (drawtext unavailable)"
+    else:
+        print(
+            f"[compose] applying AI-disclosure watermark "
+            f"({args.disclosure_text!r} at {args.disclosure_position})..."
+        )
+        apply_disclosure_watermark(stitched, final, args.disclosure_text, args.disclosure_position)
+        # Clean up the intermediate stitched.mp4 since the watermarked
+        # version is what the user wants.
+        try:
+            stitched.unlink()
+        except OSError:
+            pass
+        disclosure_status = f"burned {args.disclosure_text!r} at {args.disclosure_position}"
 
     print(f"\n[compose] ✓ reproduction.mp4 written to {final}")
+    print(f"[compose] AI-disclosure: {disclosure_status}")
     print(f"[compose] total cost: ${total_cost:.2f} of ${args.budget:.2f} budget")
     # Per-cut lipsync summary (only emitted when lipsync was on for at least one cut)
     if any(s != "skipped" for _, s in lipsync_statuses):
