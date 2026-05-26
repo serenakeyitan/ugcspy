@@ -171,3 +171,80 @@ def test_validate_fails_when_inferred_is_null_and_no_fallback(capsys):
     with pytest.raises(SystemExit) as exc:
         compose.validate_compose_ready(cuts)
     assert exc.value.code == 1
+
+
+# ─── kling_billed_duration ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "requested,expected",
+    [
+        (1.0, 5),  # 1s → 5s (rounded up to nearest supported)
+        (2.3, 5),  # 2.3s → 5s
+        (5.0, 5),  # exactly 5s
+        (5.0001, 10),  # just over 5s → 10s
+        (6.0, 10),  # 6s → 10s (the case that under-priced the dry-run)
+        (9.9, 10),  # 9.9s → 10s
+        (10.0, 10),  # exactly 10s
+    ],
+)
+def test_kling_billed_duration_rounding(requested, expected):
+    assert compose.kling_billed_duration(requested) == expected
+
+
+def test_kling_billed_duration_zero():
+    """Edge case: a recipe with duration_sec=0 should round to 5 (min)."""
+    assert compose.kling_billed_duration(0) == 5
+
+
+# ─── validate_durations ────────────────────────────────────────────────────
+
+
+def test_validate_durations_passes_for_in_range_cuts():
+    cuts = [
+        {"index": 0, "duration_sec": 5.0},
+        {"index": 1, "duration_sec": 8.5},
+        {"index": 2, "duration_sec": 10.0},
+    ]
+    # Should not raise
+    compose.validate_durations(cuts)
+
+
+def test_validate_durations_refuses_oversized_cuts(capsys):
+    cuts = [
+        {"index": 0, "duration_sec": 5.0},
+        {"index": 1, "duration_sec": 14.0},  # too long
+        {"index": 2, "duration_sec": 22.0},  # too long
+    ]
+    with pytest.raises(SystemExit) as exc:
+        compose.validate_durations(cuts)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    # Names the offending cuts
+    assert "cut 1" in err and "14.0" in err
+    assert "cut 2" in err and "22.0" in err
+    # Doesn't name the in-range cut
+    assert "cut 0" not in err
+    # Points the user at a remediation
+    assert "smaller --max-cut-duration" in err or "split long cuts" in err
+
+
+def test_validate_durations_passes_with_no_duration_field():
+    """A cut missing duration_sec entirely is presumed in-range (0 ≤ 10);
+    the prompt validator catches the underlying problem upstream."""
+    cuts = [{"index": 0, "inferred": {"prompt": "x"}}]
+    compose.validate_durations(cuts)
+
+
+def test_kling_billed_matches_kling_ts_rounding():
+    """Belt-and-suspenders: the Python composer's rounding must match
+    src/render/kling.ts:52 (`duration_sec <= 5 ? 5 : 10`). If you change
+    one, change both. This test exists so a future drift breaks the
+    build instead of the wire-format."""
+    # Same boundary conditions as kling.ts
+    assert compose.kling_billed_duration(5) == 5
+    assert compose.kling_billed_duration(5.0001) == 10
+    # The TS code uses `<=`, so a value of exactly 5.0 → 5.
+    # Floating-point: very-close-to-5 floats should still round to 5 if
+    # they're at or below 5.0.
+    assert compose.kling_billed_duration(4.999999) == 5

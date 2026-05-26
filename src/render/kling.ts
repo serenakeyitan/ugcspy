@@ -48,7 +48,19 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
 
   async generateClip(req: ClipGenRequest): Promise<ClipGenResult> {
     this.assertConfigured();
-    // Kling std supports 5s or 10s segments; round up to nearest supported.
+    // Kling std supports 5s or 10s segments. Compose layer should already
+    // have rounded via kling_billed_duration() (see
+    // vendor/video-recipe/scripts/compose.py:kling_billed_duration), but
+    // we re-apply the same rule here as defense-in-depth: a caller that
+    // forgets to round shouldn't get a 47s render request or have Kling
+    // silently truncate to 10s with no log line.
+    if (req.duration_sec > 10) {
+      throw new RenderError(
+        `Kling std supports 5s or 10s segments only; received duration_sec=${req.duration_sec}. ` +
+          `Round the recipe cut to ≤10s in the composer before calling render, or split the cut.`,
+        this.name,
+      );
+    }
     const duration = req.duration_sec <= 5 ? 5 : 10;
     const aspect = req.aspect_ratio ?? "9:16";
 

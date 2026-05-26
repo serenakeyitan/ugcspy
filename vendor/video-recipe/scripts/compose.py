@@ -179,6 +179,54 @@ def validate_compose_ready(cuts: list[dict]) -> None:
         )
 
 
+# ─── Duration semantics ────────────────────────────────────────────────────
+#
+# Kling text2video std mode only produces 5s OR 10s segments. Whatever
+# duration the recipe asks for, Kling will round to one of those two.
+# compose.py used to estimate cost from raw `cut.duration_sec` (which
+# under-priced 6-9s cuts and over-priced no one), and pass the raw value
+# to Kling (which silently truncated >10s cuts and rounded everything
+# else). Both audits caught this.
+#
+# Now: a single helper maps any requested duration to what Kling will
+# actually render and bill for. Use this EVERYWHERE — cost preflight,
+# pre-flight refusal, the render call. Recipes with cuts longer than
+# Kling's max are refused upfront, not silently truncated.
+
+# Kling std supports these two durations. Pro tier adds others but we
+# don't expose Pro yet (recipe.v0.5 has no `mode` field per cut).
+KLING_SUPPORTED_DURATIONS: tuple[int, ...] = (5, 10)
+KLING_MAX_DURATION_SEC: int = max(KLING_SUPPORTED_DURATIONS)
+
+
+def kling_billed_duration(requested_sec: float) -> int:
+    """Return what Kling will actually render and bill for, given a
+    requested duration. <=5 → 5, else 10. Matches src/render/kling.ts
+    line ~52. If you change that file, change this one too."""
+    if requested_sec <= 5:
+        return 5
+    return 10
+
+
+def validate_durations(cuts: list[dict]) -> None:
+    """Refuse recipes whose cuts exceed what Kling can render. Better
+    to fail upfront than silently truncate the user's content."""
+    too_long: list[tuple[int, float]] = []
+    for cut in cuts:
+        dur = float(cut.get("duration_sec") or 0)
+        if dur > KLING_MAX_DURATION_SEC:
+            too_long.append((int(cut.get("index", -1)), dur))
+    if too_long:
+        details = ", ".join(f"cut {i}: {d:.1f}s" for i, d in too_long)
+        fail(
+            f"cuts exceed Kling's max segment duration ({KLING_MAX_DURATION_SEC}s). "
+            f"Affected: {details}. Re-cut the source video into shorter segments "
+            f"(re-run /ugcspy-recipe with smaller --max-cut-duration or edit "
+            f"recipe.json by hand to split long cuts).",
+            code=1,
+        )
+
+
 # ─── Composer ──────────────────────────────────────────────────────────────
 
 
@@ -198,6 +246,12 @@ def compose(args: argparse.Namespace) -> None:
     # newer or older pipeline than compose was built against.
     validate_compose_ready(cuts)
 
+    # 1b. Validate durations — refuse cuts longer than Kling can render
+    # rather than silently truncate. Surface this BEFORE cost preflight
+    # so the user doesn't see a misleading dollar estimate for a recipe
+    # we're about to reject.
+    validate_durations(cuts)
+
     # 2. Pre-flight refusal check — if ANY cut is marked N/A (human-shot
     # UGC where AI reproduction would look uncanny), refuse before the
     # user spends money. Also surfaces this on --dry-run so they don't
@@ -213,16 +267,18 @@ def compose(args: argparse.Namespace) -> None:
                 code=1,
             )
 
-    # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync
+    # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync.
+    # Uses kling_billed_duration so the estimate matches what we'll actually
+    # pay (Kling rounds 6-9s cuts UP to 10s; cost preflight has to know that).
     full_transcript = resolve_recipe_full_transcript(recipe)
     cuts_with_audio = [c for c in cuts if (c.get("transcript") or "").strip()]
     cost_estimate = 0.0
     cost_breakdown: list[str] = []
-    # Kling text2video — same for every cut
+    # Kling text2video — billed by the rounded-up duration
     kling_total = 0.0
     for cut in cuts:
-        dur = max(5, int(round(cut.get("duration_sec", 5))))
-        kling_total += 0.10 * dur
+        billed = kling_billed_duration(float(cut.get("duration_sec") or 0))
+        kling_total += 0.10 * billed
     cost_estimate += kling_total
     cost_breakdown.append(f"text2video {len(cuts)} cuts: ${kling_total:.2f}")
     # TTS — sum of per-cut transcript lengths (L2), or fall back to full transcript (legacy path)
@@ -231,12 +287,15 @@ def compose(args: argparse.Namespace) -> None:
     cost_estimate += tts_total
     if tts_chars:
         cost_breakdown.append(f"TTS {tts_chars} chars: ${tts_total:.4f}")
-    # L3 lipsync — only on cuts that have audio, only if --lipsync
+    # L3 lipsync — only on cuts that have audio, only if --lipsync.
+    # Billed against the same rounded duration as text2video — the lipsync
+    # warp runs on the same Kling-output clip, so its duration is determined
+    # by what text2video produced, NOT by the original recipe value.
     if args.lipsync:
         lipsync_total = 0.0
         for cut in cuts_with_audio:
-            dur = max(5, int(round(cut.get("duration_sec", 5))))
-            lipsync_total += 0.084 * dur
+            billed = kling_billed_duration(float(cut.get("duration_sec") or 0))
+            lipsync_total += 0.084 * billed
         cost_estimate += lipsync_total
         if lipsync_total > 0:
             cost_breakdown.append(f"lipsync {len(cuts_with_audio)} cuts: ${lipsync_total:.2f}")
@@ -287,10 +346,22 @@ def compose(args: argparse.Namespace) -> None:
         else:
             prompt = base_prompt
 
-        print(f"[compose] rendering cut {i}/{len(cuts)-1} ({cut.get('duration_sec',5)}s)...")
+        # Always send the BILLED duration to Kling — not the raw recipe
+        # value. Kling will round internally anyway, but passing the
+        # rounded value makes the cost wire-format match what we logged
+        # in the preflight breakdown.
+        requested_dur = float(cut.get("duration_sec") or 0)
+        billed_dur = kling_billed_duration(requested_dur)
+        if billed_dur != requested_dur:
+            print(
+                f"[compose] cut {i}: recipe asks for {requested_dur:.1f}s, "
+                f"Kling will render {billed_dur}s ({'rounded down' if billed_dur < requested_dur else 'rounded up'})..."
+            )
+        else:
+            print(f"[compose] rendering cut {i}/{len(cuts) - 1} ({billed_dur}s)...")
         result = call_render(
             args.ugcspy_bin,
-            {"kind": "clip", "prompt": prompt, "duration_sec": cut.get("duration_sec", 5)},
+            {"kind": "clip", "prompt": prompt, "duration_sec": billed_dur},
         )
         mp4 = Path(result["mp4_path"])
         if not mp4.exists():
@@ -348,41 +419,64 @@ def compose(args: argparse.Namespace) -> None:
                 fail(f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} lipsync", code=4)
         clip_paths.append(dst)
 
-    # 4. Concat clips with ffmpeg. When L3 lipsync ran, each clip already
-    # has its synced audio baked in. When L3 didn't run, we need to mix
-    # the per-cut TTS into each clip first.
-    if args.lipsync:
-        # Lipsync clips have audio; straight concat works
-        concat_list = out_dir / "concat.txt"
-        concat_list.write_text("\n".join(f"file '{p.name}'" for p in clip_paths) + "\n")
-        final = args.recipe_dir / "reproduction.mp4"
-        run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
-    else:
-        # Mix each clip with its corresponding per-cut TTS first, THEN concat.
-        # Removes the "TTS drifts out of sync with cuts" failure mode from
-        # the old single-MP3 approach.
-        mixed_paths: list[Path] = []
-        for i, (clip, audio) in enumerate(zip(clip_paths, cut_audio_paths)):
-            if audio:
-                mixed = out_dir / f"mixed-{i:02d}.mp4"
-                run_ffmpeg([
-                    "-y",
-                    "-i", str(clip),
-                    "-i", str(audio),
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    "-map", "0:v:0",
-                    "-map", "1:a:0",
-                    "-shortest",
-                    str(mixed),
-                ])
-                mixed_paths.append(mixed)
-            else:
-                mixed_paths.append(clip)
-        concat_list = out_dir / "concat.txt"
-        concat_list.write_text("\n".join(f"file '{p.name}'" for p in mixed_paths) + "\n")
-        final = args.recipe_dir / "reproduction.mp4"
-        run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
+    # 4. Normalize every clip to a canonical codec + timebase, then concat.
+    #
+    # Three reasons:
+    #   a) ffmpeg concat demuxer with `-c copy` requires identical codecs
+    #      and timebases across inputs. Our pre-concat inputs are a mix of:
+    #        - raw Kling text2video MP4 (whatever Kling encodes to)
+    #        - Kling lipsync-warped MP4 (possibly different settings)
+    #        - re-encoded mix MP4 (with AAC audio we just produced)
+    #      Stream-copying across that mix glitches or fails on real
+    #      inputs. So we normalize before concat.
+    #   b) We need EVERY output to have an audio track so the final
+    #      reproduction has continuous audio. Lipsync-warped clips have
+    #      Kling's mouth-synced audio baked in; lipsync-failed cuts fall
+    #      back to TTS-mix; cuts with no transcript get silent audio
+    #      padded to the clip duration. (Lipsync failed-cut handling is
+    #      the explicit fix for issue #14, but it's worth fixing the
+    #      audio-track shape here too.)
+    #   c) Drop the `-shortest` truncation. When TTS audio is shorter
+    #      than the Kling clip (the common case — Kling rounds up to
+    #      5/10s, TTS is whatever the script length is), padding audio
+    #      with silence preserves all paid-for Kling frames. When TTS
+    #      is LONGER (rare but possible), we cut audio to clip duration
+    #      explicitly — same total length, no A/V drift across the
+    #      concat boundary.
+    final_clip_paths: list[Path] = []
+    for i, (clip, audio) in enumerate(zip(clip_paths, cut_audio_paths)):
+        # Read the clip's actual duration via ffprobe — Kling rounded to
+        # 5 or 10s, that's the duration to align audio against.
+        clip_dur = ffprobe_duration(clip)
+        normalized = out_dir / f"final-{i:02d}.mp4"
+        # The lipsync warped clip already has synced audio (Kling bakes
+        # it in). When --lipsync ran successfully, the clip file already
+        # has an audio track; when lipsync failed and fell back, the clip
+        # has no audio (Kling text2video has no audio). We detect via
+        # ffprobe instead of trusting --lipsync state, which keeps the
+        # normalization correct even when the lipsync stage silently
+        # fell back to un-warped output (the failure path issue #14
+        # tracks fixing properly).
+        clip_has_audio = is_lipsync_clip(clip, i, out_dir)
+        if clip_has_audio:
+            # Lipsync clip — has audio, just normalize codec
+            normalize_with_audio(clip, normalized, clip_dur)
+        elif audio:
+            # Non-lipsync (or lipsync-failed) cut with TTS audio.
+            # Pad TTS with silence to clip duration so we don't lose
+            # paid-for Kling frames via -shortest truncation.
+            mix_clip_with_padded_audio(clip, audio, normalized, clip_dur)
+        else:
+            # No audio for this cut (no transcript) — pad with silence
+            # so concat doesn't choke on missing audio track
+            mix_clip_with_silence(clip, normalized, clip_dur)
+        final_clip_paths.append(normalized)
+
+    concat_list = out_dir / "concat.txt"
+    concat_list.write_text("\n".join(f"file '{p.name}'" for p in final_clip_paths) + "\n")
+    final = args.recipe_dir / "reproduction.mp4"
+    # Now stream-copy is safe: every input has identical codec params.
+    run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
 
     print(f"\n[compose] ✓ reproduction.mp4 written to {final}")
     print(f"[compose] total cost: ${total_cost:.2f} of ${args.budget:.2f} budget")
@@ -397,6 +491,176 @@ def run_ffmpeg(args: list[str]) -> None:
     )
     if proc.returncode != 0:
         fail(f"ffmpeg failed: {proc.stderr[-400:]}", code=3)
+
+
+# ─── ffmpeg helpers for clip normalization ─────────────────────────────────
+#
+# Every helper writes to a canonical shape:
+#   video: h264, yuv420p, 30fps, fixed timebase
+#   audio: AAC stereo 44.1kHz, fixed timebase
+# That lets the final concat use stream-copy without glitching.
+
+_CANONICAL_VIDEO_ARGS: list[str] = [
+    "-c:v",
+    "libx264",
+    "-preset",
+    "fast",
+    "-pix_fmt",
+    "yuv420p",
+    "-r",
+    "30",
+    "-video_track_timescale",
+    "30000",
+]
+
+_CANONICAL_AUDIO_ARGS: list[str] = [
+    "-c:a",
+    "aac",
+    "-ar",
+    "44100",
+    "-ac",
+    "2",
+    "-b:a",
+    "128k",
+]
+
+
+def ffprobe_duration(path: Path) -> float:
+    """Return the duration of a video/audio file in seconds via ffprobe."""
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        fail(f"ffprobe failed on {path}: {proc.stderr[:200]}", code=3)
+    try:
+        return float(proc.stdout.strip())
+    except ValueError:
+        fail(f"ffprobe returned non-numeric duration for {path}: {proc.stdout[:100]}", code=3)
+
+
+def is_lipsync_clip(clip: Path, cut_index: int, out_dir: Path) -> bool:
+    """Heuristic: a clip is the lipsync-warped version if it was written
+    by the lipsync stage, which overwrites cut-NN.mp4 with the warp output.
+    We can't tell from the file alone, so we check if the lipsync stage
+    recorded success by writing a sentinel — but it doesn't. Instead, in
+    the current architecture the lipsync stage overwrites the same
+    cut-NN.mp4 path, so the safest check is: was --lipsync set AND did
+    the cut have a transcript? If both, AND the clip exists, lipsync
+    either succeeded (overwrote) or fell back (still un-warped). The
+    final-clip stage handles both cases identically: normalize codec,
+    keep whatever audio track exists, pad silence if no audio.
+
+    For correctness here we just check: does the clip have an audio
+    track? If yes, treat it as lipsync-succeeded (or pre-mixed). If no,
+    treat it as needing TTS mix or silence."""
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(clip),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return bool(proc.stdout.strip())
+
+
+def normalize_with_audio(src: Path, dst: Path, clip_dur: float) -> None:
+    """Re-encode `src` (which already has audio) to canonical codec
+    params. Used for lipsync-warped clips so they concat cleanly with
+    TTS-mixed clips from other cuts."""
+    run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(src),
+            *_CANONICAL_VIDEO_ARGS,
+            *_CANONICAL_AUDIO_ARGS,
+            "-t",
+            f"{clip_dur:.3f}",
+            str(dst),
+        ]
+    )
+
+
+def mix_clip_with_padded_audio(clip: Path, audio: Path, dst: Path, clip_dur: float) -> None:
+    """Mix `audio` over `clip`. Pad audio with silence to clip_dur when
+    audio is shorter (preserves all paid-for Kling video frames). Cut
+    audio to clip_dur when audio is longer (no A/V drift across concat
+    boundary). Either way: output is exactly clip_dur long.
+
+    apad + atrim is the standard ffmpeg pattern for this. We use
+    apad's whole_dur to extend silence to clip_dur, then atrim
+    explicitly to that same duration in case the source audio was
+    longer than expected."""
+    run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(clip),
+            "-i",
+            str(audio),
+            "-filter_complex",
+            f"[1:a]apad=whole_dur={clip_dur:.3f},atrim=duration={clip_dur:.3f}[a]",
+            "-map",
+            "0:v:0",
+            "-map",
+            "[a]",
+            *_CANONICAL_VIDEO_ARGS,
+            *_CANONICAL_AUDIO_ARGS,
+            "-t",
+            f"{clip_dur:.3f}",
+            str(dst),
+        ]
+    )
+
+
+def mix_clip_with_silence(clip: Path, dst: Path, clip_dur: float) -> None:
+    """For cuts with no transcript: re-encode video with a silent audio
+    track of clip_dur. Needed so the final concat doesn't fail on
+    missing audio streams between cuts."""
+    run_ffmpeg(
+        [
+            "-y",
+            "-i",
+            str(clip),
+            "-f",
+            "lavfi",
+            "-t",
+            f"{clip_dur:.3f}",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=44100",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            *_CANONICAL_VIDEO_ARGS,
+            *_CANONICAL_AUDIO_ARGS,
+            "-t",
+            f"{clip_dur:.3f}",
+            str(dst),
+        ]
+    )
 
 
 if __name__ == "__main__":
