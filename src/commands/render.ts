@@ -7,8 +7,9 @@ import { RenderError } from "../render/types.ts";
  * Subcommand contract for the Python composer.
  *
  * Stdin (JSON): one of
- *   { "kind": "clip", "prompt": str, "duration_sec": int, "aspect_ratio"?: str }
- *   { "kind": "tts",  "text": str,   "voice"?: str, "speed"?: float }
+ *   { "kind": "clip",    "prompt": str, "duration_sec": int, "aspect_ratio"?: str }
+ *   { "kind": "tts",     "text": str,   "voice"?: str, "speed"?: float }
+ *   { "kind": "lipsync", "video_id": str, "audio_path": str }
  *
  * Stdout (JSON):
  *   on success: { "ok": true, "mp4_path"?: str, "mp3_path"?: str,
@@ -75,6 +76,22 @@ export async function runRender(): Promise<void> {
           ok: true,
           mp3_path: result.mp3_path,
           duration_sec: result.duration_sec,
+          cost_usd: result.cost_usd,
+        }),
+      );
+      return;
+    }
+    if (req.kind === "lipsync") {
+      const provider = new KlingProvider(klingAccess, klingSecret);
+      const result = await provider.lipSyncClip({
+        video_id: String(req.video_id ?? ""),
+        audio_path: String(req.audio_path ?? ""),
+      });
+      console.log(
+        JSON.stringify({
+          ok: true,
+          mp4_path: result.mp4_path,
+          external_id: result.external_id,
           cost_usd: result.cost_usd,
         }),
       );

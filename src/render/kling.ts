@@ -1,9 +1,17 @@
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createHmac } from "node:crypto";
-import { RenderError, type ClipGenRequest, type ClipGenResult, type VideoGenProvider } from "./types.ts";
+import {
+  RenderError,
+  type ClipGenRequest,
+  type ClipGenResult,
+  type LipSyncProvider,
+  type LipSyncRequest,
+  type LipSyncResult,
+  type VideoGenProvider,
+} from "./types.ts";
 
 /**
  * Kling (kling.ai / Kuaishou) text-to-video. $0.10/sec for std mode,
@@ -25,9 +33,12 @@ import { RenderError, type ClipGenRequest, type ClipGenResult, type VideoGenProv
  * /v1/videos/text2video/<task_id> every 5s until task_status="succeed"
  * (typical 1-3 min for std mode).
  */
-export class KlingProvider implements VideoGenProvider {
+export class KlingProvider implements VideoGenProvider, LipSyncProvider {
   readonly name = "kling";
   readonly cost_per_second_usd = 0.10;
+  // Kling lip-sync Std pricing per fal.ai mirror (verified May 2026).
+  // Roughly doubles per-clip cost when used.
+  readonly lipsync_cost_per_second_usd = 0.084;
 
   // Base URL is api.klingai.com (NOT api.kling.ai — that domain doesn't host
   // the dev API). Verified empirically.
@@ -120,6 +131,132 @@ export class KlingProvider implements VideoGenProvider {
       mp4_path: outPath,
       external_id: taskId,
       cost_usd: duration * this.cost_per_second_usd,
+    };
+  }
+
+  /**
+   * Apply lip-sync warp to a previously-generated Kling clip. The source
+   * clip is referenced by its task_id (from a prior generateClip) — Kling
+   * has direct access to its own task outputs so no upload of the video
+   * is needed.
+   *
+   * Audio is sent inline as base64 in the JSON body (audio_type: "file").
+   * That keeps us off the hook for hosting the MP3 anywhere; OpenAI TTS
+   * outputs are ~4KB/sec so a 10s clip stays well under Kling's 5MB cap.
+   *
+   * Constraints (per Kling docs): source video must be 5s or 10s, ≤30 days
+   * old, ≥720p, and contain a clear steady face. We don't pre-check those
+   * — the API rejects with code != 0 and the caller decides whether to
+   * keep the un-warped clip (compose.py does this) or fail loudly.
+   */
+  async lipSyncClip(req: LipSyncRequest): Promise<LipSyncResult> {
+    this.assertConfigured();
+
+    // 1. Read audio file, base64-encode
+    let audioBuf: Buffer;
+    try {
+      audioBuf = readFileSync(req.audio_path);
+    } catch (e) {
+      throw new RenderError(
+        `lipsync: failed to read audio at ${req.audio_path}: ${(e as Error).message}`,
+        this.name,
+      );
+    }
+    const MAX_AUDIO_BYTES = 5 * 1024 * 1024;
+    if (audioBuf.length > MAX_AUDIO_BYTES) {
+      throw new RenderError(
+        `lipsync: audio file ${req.audio_path} is ${audioBuf.length} bytes; Kling caps inline audio at 5MB. Shorten the clip or use audio_url mode (not yet implemented).`,
+        this.name,
+      );
+    }
+    const audioB64 = audioBuf.toString("base64");
+
+    // 2. Submit lipsync job
+    const submitRes = await this.fetchSigned("/v1/videos/lip-sync", {
+      method: "POST",
+      body: JSON.stringify({
+        input: {
+          video_id: req.video_id,
+          mode: "audio2video",
+          audio_type: "file",
+          audio_file: audioB64,
+        },
+      }),
+    });
+    if (!submitRes.ok) {
+      throw new RenderError(
+        `Kling lipsync submit failed: ${submitRes.status} ${await submitRes.text()}`,
+        this.name,
+      );
+    }
+    const submitJson = (await submitRes.json()) as {
+      code?: number;
+      message?: string;
+      data?: { task_id?: string };
+    };
+    if (submitJson.code !== 0) {
+      throw new RenderError(
+        `Kling lipsync submit returned code=${submitJson.code} message="${submitJson.message}"`,
+        this.name,
+      );
+    }
+    const taskId = submitJson.data?.task_id;
+    if (!taskId) {
+      throw new RenderError("Kling lipsync response missing data.task_id", this.name);
+    }
+
+    // 3. Poll for completion — same lifecycle as text2video
+    const startedAt = Date.now();
+    const POLL_INTERVAL_MS = 5000;
+    const TIMEOUT_MS = 8 * 60 * 1000;
+    let videoUrl: string | null = null;
+    let durationSec = 0;
+    while (Date.now() - startedAt < TIMEOUT_MS) {
+      await sleep(POLL_INTERVAL_MS);
+      const statusRes = await this.fetchSigned(`/v1/videos/lip-sync/${taskId}`);
+      if (!statusRes.ok) continue;
+      const statusJson = (await statusRes.json()) as {
+        data?: {
+          task_status?: string;
+          task_status_msg?: string;
+          task_result?: { videos?: { url?: string; duration?: string }[] };
+        };
+      };
+      const status = statusJson.data?.task_status;
+      if (status === "succeed") {
+        const v = statusJson.data?.task_result?.videos?.[0];
+        videoUrl = v?.url ?? null;
+        durationSec = Number(v?.duration ?? 0);
+        break;
+      }
+      if (status === "failed") {
+        throw new RenderError(
+          `Kling lipsync job ${taskId} failed: ${statusJson.data?.task_status_msg ?? "no message"}`,
+          this.name,
+        );
+      }
+    }
+    if (!videoUrl) {
+      throw new RenderError(`Kling lipsync job ${taskId} timed out after 8min`, this.name);
+    }
+
+    // 4. Download warped MP4 to local temp
+    const outDir = join(tmpdir(), "ugcspy-renders");
+    await mkdir(outDir, { recursive: true });
+    const outPath = join(outDir, `kling-lipsync-${taskId}.mp4`);
+    const dl = await fetch(videoUrl);
+    if (!dl.ok) {
+      throw new RenderError(`Kling lipsync download failed: ${dl.status}`, this.name);
+    }
+    writeFileSync(outPath, Buffer.from(await dl.arrayBuffer()));
+
+    // If the API didn't report duration, fall back to a 5s minimum charge
+    // (since Kling's clips are always 5s or 10s).
+    const billableSeconds = durationSec > 0 ? durationSec : 5;
+    return {
+      mp4_path: outPath,
+      external_id: taskId,
+      cost_usd: billableSeconds * this.lipsync_cost_per_second_usd,
     };
   }
 
