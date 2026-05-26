@@ -40,6 +40,7 @@ import json
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 # ─── CLI helpers ────────────────────────────────────────────────────────────
@@ -69,6 +70,11 @@ def parse_args() -> argparse.Namespace:
         "--lipsync",
         action="store_true",
         help="Apply Kling lip-sync warp to cuts that have audio. Roughly doubles cost (~+$0.084/sec per cut warped). Recommended for talking-head reproductions; pointless for greenscreen-kinetic or AI-montage.",
+    )
+    p.add_argument(
+        "--no-burnin",
+        action="store_true",
+        help="Skip burning OCR'd overlay text into the reproduction. By default, overlay text from recipe.title_cards / cut.ocr_text / cut.caption is rendered as on-screen text per cut. Use this for testing or when the source's overlay is undesirable in the reproduction.",
     )
     return p.parse_args()
 
@@ -332,6 +338,202 @@ def validate_durations(cuts: list[dict]) -> None:
         )
 
 
+# ─── Overlay burn-in helpers ───────────────────────────────────────────────
+#
+# Caption / overlay burn-in is the ffmpeg drawtext pass that renders the
+# source video's on-screen text into the AI-generated reproduction. For
+# kinetic-typography UGC (Mya pattern, talking-head with static overlay)
+# the overlay IS the content — without it, the reproduction is silent
+# imagery with no message. PR #11 deleted this step while shipping lipsync;
+# this restores it.
+#
+# Text source priority per cut:
+#   1. Top-level recipe.title_cards entry matching cut.index (legacy
+#      schema used by hand-edited recipes like 7630138325545880845)
+#   2. cut.caption (v0.5 editorial overlay — production-added kinetic text)
+#   3. cut.ocr_text (v0.5 — OCR'd from source frames)
+#
+# Presentation handling (v1, single drawtext block per cut):
+#   - static_overlay_full_duration → text visible for the cut's full duration
+#   - any other (kinetic_per_chunk, animated, missing) → static drawtext as
+#     fallback. Animated kinetic typography is a future improvement and
+#     deserves its own ASS-subtitle pipeline (#15-followup).
+
+# Conservative line width for 9:16 mobile video. Wider text wraps to more
+# lines but each line stays readable. 30 chars is a good default for
+# ~40-50pt fontsize on 1080-wide output.
+_BURNIN_WRAP_COLUMNS: int = 30
+# Cap on how many lines we'll burn. Beyond this, the overlay covers too
+# much of the frame and becomes unreadable. Recipes with very long OCR
+# text get truncated to the first N lines with a "…" marker.
+_BURNIN_MAX_LINES: int = 12
+
+
+def resolve_cut_burnin(cut: dict, recipe: dict) -> tuple[str | None, str]:
+    """Return (burnin_text, presentation) for a cut, or (None, '') if no
+    burn-in text resolves. Tries top-level recipe.title_cards first
+    (legacy shape), then per-cut fields (v0.5 canonical).
+
+    The `presentation` string tells the renderer how to display the
+    text (static_overlay_full_duration / kinetic_per_chunk / unknown).
+    v1 ignores it and always renders as static, but we surface it so a
+    future kinetic-typography pipeline can branch on it."""
+    cut_idx = int(cut.get("index", -1))
+
+    # Priority 1: top-level title_cards array, find entry matching cut_idx
+    title_cards = recipe.get("title_cards") or []
+    for tc in title_cards:
+        if int(tc.get("cut_index", -1)) == cut_idx:
+            text = (tc.get("ocr_text") or "").strip()
+            if text:
+                return text, tc.get("presentation") or "unknown"
+
+    # Priority 2: cut.caption (v0.5 editorial overlay)
+    caption = (cut.get("caption") or "").strip()
+    if caption:
+        return caption, "static_overlay_full_duration"
+
+    # Priority 3: cut.ocr_text (v0.5 — raw OCR from source frames)
+    ocr = (cut.get("ocr_text") or "").strip()
+    if ocr:
+        return ocr, "static_overlay_full_duration"
+
+    return None, ""
+
+
+def wrap_burnin_text(text: str, columns: int = _BURNIN_WRAP_COLUMNS, max_lines: int = _BURNIN_MAX_LINES) -> str:
+    """Wrap raw overlay text into a multi-line drawtext payload.
+
+    Splits on existing newlines (recipes often pre-format with \n), then
+    wraps each segment to `columns`. Truncates with an ellipsis when the
+    total line count exceeds `max_lines` so the overlay never covers the
+    whole frame."""
+    if not text:
+        return ""
+    lines: list[str] = []
+    # Respect existing line breaks in the source text — recipes often
+    # write headlines + numbered lists with \n separators.
+    for paragraph in text.split("\n"):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            # Empty line preserves visual paragraph break
+            lines.append("")
+            continue
+        wrapped = textwrap.fill(
+            paragraph,
+            width=columns,
+            break_long_words=False,
+            break_on_hyphens=False,
+        )
+        lines.extend(wrapped.split("\n"))
+    if len(lines) > max_lines:
+        lines = lines[: max_lines - 1] + ["…"]
+    return "\n".join(lines)
+
+
+def escape_drawtext(text: str) -> str:
+    """Escape special characters for ffmpeg's drawtext filter syntax.
+
+    drawtext is fragile: backslash, colon, single-quote, comma, percent,
+    and bracket all need special handling inside the filtergraph string.
+    See https://ffmpeg.org/ffmpeg-filters.html#drawtext"""
+    # Order matters — escape backslash first so we don't double-escape
+    # the escapes we add later.
+    out = text.replace("\\", "\\\\")
+    out = out.replace(":", "\\:")
+    out = out.replace("'", "\\'")
+    out = out.replace("%", "\\%")
+    # Commas and brackets are filtergraph separators
+    out = out.replace(",", "\\,")
+    out = out.replace("[", "\\[")
+    out = out.replace("]", "\\]")
+    # Drawtext interprets the newline literal as a line break when
+    # text_shaping is enabled. We use textfile= to sidestep most of these
+    # issues but keep escaping here for defense in depth.
+    return out
+
+
+# Font resolution: try a list of common system font paths so the same
+# code works on macOS dev machines and Linux CI. drawtext's compiled-in
+# default font isn't reliable across builds, so we explicitly pick.
+_FONT_CANDIDATES: tuple[str, ...] = (
+    # macOS
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/System/Library/Fonts/HelveticaNeue.ttc",
+    "/Library/Fonts/Arial.ttf",
+    # Linux (Ubuntu default + common alternatives)
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",  # Arch / Alpine
+)
+
+
+def _resolve_burnin_font() -> str | None:
+    """Find the first available font from our candidate list, or None
+    when no candidate exists. None lets drawtext fall back to its
+    compiled-in default (which is fine when present, errors otherwise)."""
+    for path in _FONT_CANDIDATES:
+        if Path(path).exists():
+            return path
+    return None
+
+
+# Detect whether ffmpeg was built with libfreetype (drawtext support).
+# Homebrew's default ffmpeg formula omits freetype on some builds; without
+# it the drawtext filter throws "Filter not found" and compose fails.
+# We probe once at module load and cache the result. When drawtext is
+# unavailable, the burn-in pass is skipped with a clear warning rather
+# than crashing the entire compose.
+_DRAWTEXT_AVAILABLE: bool | None = None
+
+
+def drawtext_available() -> bool:
+    """Cached probe for ffmpeg drawtext support."""
+    global _DRAWTEXT_AVAILABLE
+    if _DRAWTEXT_AVAILABLE is not None:
+        return _DRAWTEXT_AVAILABLE
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-filters"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        _DRAWTEXT_AVAILABLE = "drawtext" in proc.stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        _DRAWTEXT_AVAILABLE = False
+    return _DRAWTEXT_AVAILABLE
+
+
+def build_drawtext_filter(burnin_text: str, clip_dur: float) -> str:
+    """Build a drawtext filter expression for static-overlay burn-in.
+
+    Returns an ffmpeg filtergraph string ready to drop into -vf or
+    -filter_complex."""
+    escaped = escape_drawtext(burnin_text)
+    # Position: top-center, with padding from the top. Mobile UGC overlays
+    # typically sit in the upper third of the frame to avoid the captions
+    # area at the bottom.
+    # fontcolor=white with a black box behind for legibility on any background.
+    # fontsize=42 is good for 1080-wide 9:16 video; readable but doesn't dominate.
+    font = _resolve_burnin_font()
+    font_arg = f":fontfile={font}" if font else ""
+    return (
+        f"drawtext=text='{escaped}'"
+        f"{font_arg}"
+        f":fontcolor=white"
+        f":fontsize=42"
+        f":box=1"
+        f":boxcolor=black@0.55"
+        f":boxborderw=12"
+        f":x=(w-text_w)/2"
+        f":y=h/8"
+        f":line_spacing=8"
+    )
+
+
 # ─── Composer ──────────────────────────────────────────────────────────────
 
 
@@ -588,11 +790,47 @@ def compose(args: argparse.Namespace) -> None:
     #      explicitly — same total length, no A/V drift across the
     #      concat boundary.
     final_clip_paths: list[Path] = []
+    burnin_summary: list[tuple[int, str]] = []  # (cut_idx, "burned N chars" | "skipped: reason")
     for i, (clip, audio) in enumerate(zip(clip_paths, cut_audio_paths)):
         # Read the clip's actual duration via ffprobe — Kling rounded to
         # 5 or 10s, that's the duration to align audio against.
         clip_dur = ffprobe_duration(clip)
         normalized = out_dir / f"final-{i:02d}.mp4"
+
+        # Resolve per-cut burn-in text from recipe.title_cards or
+        # cut.caption / cut.ocr_text (in that priority). When --no-burnin
+        # is passed or no text resolves, burnin_filter is None and the
+        # normalize helpers skip drawtext.
+        burnin_filter: str | None = None
+        cuts_idx = int(cuts[i].get("index", i))
+        if args.no_burnin:
+            burnin_summary.append((cuts_idx, "skipped: --no-burnin"))
+        elif not drawtext_available():
+            # ffmpeg without libfreetype can't run drawtext. Degrade
+            # gracefully — emit a clear one-time warning at the first
+            # cut, then skip burn-in for every cut.
+            if i == 0:
+                print(
+                    "[compose] warning: ffmpeg drawtext filter unavailable "
+                    "(this build lacks libfreetype). Burn-in skipped. "
+                    "To enable: install ffmpeg with `--enable-libfreetype` "
+                    "(brew tap homebrew-ffmpeg/ffmpeg && brew install homebrew-ffmpeg/ffmpeg/ffmpeg "
+                    "--with-freetype, or `apt install ffmpeg` on Debian/Ubuntu "
+                    "ships with freetype by default).",
+                    file=sys.stderr,
+                )
+            burnin_summary.append((cuts_idx, "skipped: drawtext unavailable in ffmpeg"))
+        else:
+            burnin_text, presentation = resolve_cut_burnin(cuts[i], recipe)
+            if burnin_text:
+                wrapped = wrap_burnin_text(burnin_text)
+                burnin_filter = build_drawtext_filter(wrapped, clip_dur)
+                burnin_summary.append(
+                    (cuts_idx, f"burned {len(burnin_text)} chars ({presentation})")
+                )
+            else:
+                burnin_summary.append((cuts_idx, "skipped: no overlay text in recipe"))
+
         # The lipsync warped clip already has synced audio (Kling bakes
         # it in). When --lipsync ran successfully, the clip file already
         # has an audio track; when lipsync failed and fell back, the clip
@@ -603,17 +841,17 @@ def compose(args: argparse.Namespace) -> None:
         # tracks fixing properly).
         clip_has_audio = is_lipsync_clip(clip, i, out_dir)
         if clip_has_audio:
-            # Lipsync clip — has audio, just normalize codec
-            normalize_with_audio(clip, normalized, clip_dur)
+            # Lipsync clip — has audio, just normalize codec + optional burn-in
+            normalize_with_audio(clip, normalized, clip_dur, burnin=burnin_filter)
         elif audio:
             # Non-lipsync (or lipsync-failed) cut with TTS audio.
             # Pad TTS with silence to clip duration so we don't lose
             # paid-for Kling frames via -shortest truncation.
-            mix_clip_with_padded_audio(clip, audio, normalized, clip_dur)
+            mix_clip_with_padded_audio(clip, audio, normalized, clip_dur, burnin=burnin_filter)
         else:
             # No audio for this cut (no transcript) — pad with silence
             # so concat doesn't choke on missing audio track
-            mix_clip_with_silence(clip, normalized, clip_dur)
+            mix_clip_with_silence(clip, normalized, clip_dur, burnin=burnin_filter)
         final_clip_paths.append(normalized)
 
     concat_list = out_dir / "concat.txt"
@@ -628,6 +866,13 @@ def compose(args: argparse.Namespace) -> None:
     if any(s != "skipped" for _, s in lipsync_statuses):
         print("[compose] lipsync per-cut status:")
         for cut_idx, status in lipsync_statuses:
+            print(f"  - cut {cut_idx}: {status}")
+    # Per-cut burn-in summary — always emitted so the user knows whether
+    # their reproduction will carry the source's on-screen text.
+    if burnin_summary:
+        burned_count = sum(1 for _, s in burnin_summary if s.startswith("burned"))
+        print(f"[compose] caption burn-in: {burned_count}/{len(burnin_summary)} cuts")
+        for cut_idx, status in burnin_summary:
             print(f"  - cut {cut_idx}: {status}")
 
 
@@ -734,15 +979,21 @@ def is_lipsync_clip(clip: Path, cut_index: int, out_dir: Path) -> bool:
     return bool(proc.stdout.strip())
 
 
-def normalize_with_audio(src: Path, dst: Path, clip_dur: float) -> None:
+def normalize_with_audio(src: Path, dst: Path, clip_dur: float, burnin: str | None = None) -> None:
     """Re-encode `src` (which already has audio) to canonical codec
     params. Used for lipsync-warped clips so they concat cleanly with
-    TTS-mixed clips from other cuts."""
-    run_ffmpeg(
+    TTS-mixed clips from other cuts.
+
+    When `burnin` is provided, applies a drawtext filter overlay before
+    re-encoding. burnin is a complete drawtext filter spec from
+    build_drawtext_filter()."""
+    cmd = ["-y", "-i", str(src)]
+    if burnin:
+        # Use -vf so the drawtext filter applies to the video stream only;
+        # audio passes through unchanged.
+        cmd.extend(["-vf", burnin])
+    cmd.extend(
         [
-            "-y",
-            "-i",
-            str(src),
             *_CANONICAL_VIDEO_ARGS,
             *_CANONICAL_AUDIO_ARGS,
             "-t",
@@ -750,9 +1001,16 @@ def normalize_with_audio(src: Path, dst: Path, clip_dur: float) -> None:
             str(dst),
         ]
     )
+    run_ffmpeg(cmd)
 
 
-def mix_clip_with_padded_audio(clip: Path, audio: Path, dst: Path, clip_dur: float) -> None:
+def mix_clip_with_padded_audio(
+    clip: Path,
+    audio: Path,
+    dst: Path,
+    clip_dur: float,
+    burnin: str | None = None,
+) -> None:
     """Mix `audio` over `clip`. Pad audio with silence to clip_dur when
     audio is shorter (preserves all paid-for Kling video frames). Cut
     audio to clip_dur when audio is longer (no A/V drift across concat
@@ -761,7 +1019,19 @@ def mix_clip_with_padded_audio(clip: Path, audio: Path, dst: Path, clip_dur: flo
     apad + atrim is the standard ffmpeg pattern for this. We use
     apad's whole_dur to extend silence to clip_dur, then atrim
     explicitly to that same duration in case the source audio was
-    longer than expected."""
+    longer than expected.
+
+    When `burnin` is provided, chains a drawtext filter on the video
+    stream within the same -filter_complex graph."""
+    # Build the filter_complex: optional video drawtext + mandatory audio pad
+    video_filter = f"[0:v]{burnin}[v]" if burnin else ""
+    audio_filter = f"[1:a]apad=whole_dur={clip_dur:.3f},atrim=duration={clip_dur:.3f}[a]"
+    if video_filter:
+        filter_complex = f"{video_filter};{audio_filter}"
+        video_map = "[v]"
+    else:
+        filter_complex = audio_filter
+        video_map = "0:v:0"
     run_ffmpeg(
         [
             "-y",
@@ -770,9 +1040,9 @@ def mix_clip_with_padded_audio(clip: Path, audio: Path, dst: Path, clip_dur: flo
             "-i",
             str(audio),
             "-filter_complex",
-            f"[1:a]apad=whole_dur={clip_dur:.3f},atrim=duration={clip_dur:.3f}[a]",
+            filter_complex,
             "-map",
-            "0:v:0",
+            video_map,
             "-map",
             "[a]",
             *_CANONICAL_VIDEO_ARGS,
@@ -784,21 +1054,27 @@ def mix_clip_with_padded_audio(clip: Path, audio: Path, dst: Path, clip_dur: flo
     )
 
 
-def mix_clip_with_silence(clip: Path, dst: Path, clip_dur: float) -> None:
+def mix_clip_with_silence(clip: Path, dst: Path, clip_dur: float, burnin: str | None = None) -> None:
     """For cuts with no transcript: re-encode video with a silent audio
     track of clip_dur. Needed so the final concat doesn't fail on
-    missing audio streams between cuts."""
-    run_ffmpeg(
+    missing audio streams between cuts.
+
+    When `burnin` is provided, applies drawtext to the video stream."""
+    cmd = [
+        "-y",
+        "-i",
+        str(clip),
+        "-f",
+        "lavfi",
+        "-t",
+        f"{clip_dur:.3f}",
+        "-i",
+        "anullsrc=channel_layout=stereo:sample_rate=44100",
+    ]
+    if burnin:
+        cmd.extend(["-vf", burnin])
+    cmd.extend(
         [
-            "-y",
-            "-i",
-            str(clip),
-            "-f",
-            "lavfi",
-            "-t",
-            f"{clip_dur:.3f}",
-            "-i",
-            "anullsrc=channel_layout=stereo:sample_rate=44100",
             "-map",
             "0:v:0",
             "-map",
@@ -810,6 +1086,7 @@ def mix_clip_with_silence(clip: Path, dst: Path, clip_dur: float) -> None:
             str(dst),
         ]
     )
+    run_ffmpeg(cmd)
 
 
 if __name__ == "__main__":
