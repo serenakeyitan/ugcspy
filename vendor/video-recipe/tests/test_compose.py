@@ -248,3 +248,107 @@ def test_kling_billed_matches_kling_ts_rounding():
     # Floating-point: very-close-to-5 floats should still round to 5 if
     # they're at or below 5.0.
     assert compose.kling_billed_duration(4.999999) == 5
+
+
+# ─── decode.json signal loading + gating (issue #14) ───────────────────────
+
+
+def test_load_decode_signals_returns_none_when_missing(tmp_path):
+    """decode.json is optional. Missing → None, no error."""
+    assert compose.load_decode_signals(tmp_path) is None
+
+
+def test_load_decode_signals_returns_parsed_dict(tmp_path):
+    (tmp_path / "decode.json").write_text(
+        '{"format": {"kind": "talking_head_floating_card", "is_ai_generated": false}}'
+    )
+    d = compose.load_decode_signals(tmp_path)
+    assert d is not None
+    assert d["format"]["kind"] == "talking_head_floating_card"
+
+
+def test_load_decode_signals_handles_invalid_json(tmp_path, capsys):
+    (tmp_path / "decode.json").write_text("not valid json")
+    result = compose.load_decode_signals(tmp_path)
+    assert result is None
+    # Should warn but not crash
+    captured = capsys.readouterr()
+    assert "invalid JSON" in captured.err
+
+
+# reject_non_ai_recipes
+
+
+def test_reject_non_ai_recipes_passes_when_no_decode():
+    """No decode signal → no opinion → proceed (legacy N/A check still fires)."""
+    compose.reject_non_ai_recipes(None)  # should not raise
+
+
+def test_reject_non_ai_recipes_passes_when_ai_generated():
+    decode = {"format": {"kind": "ai_montage_kinetic", "is_ai_generated": True}}
+    compose.reject_non_ai_recipes(decode)
+
+
+def test_reject_non_ai_recipes_fails_when_explicitly_human_shot(capsys):
+    decode = {"format": {"kind": "talking_head_with_static_overlay", "is_ai_generated": False}}
+    with pytest.raises(SystemExit) as exc:
+        compose.reject_non_ai_recipes(decode)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    # Names the format kind so the user can decide whether to override
+    assert "talking_head_with_static_overlay" in err
+    assert "/ugcspy-fork" in err  # points at the right alternative
+
+
+def test_reject_non_ai_recipes_no_opinion_when_field_missing():
+    """is_ai_generated absent ≠ False. Decode couldn't tell. Let user proceed."""
+    decode = {"format": {"kind": "unknown"}}  # no is_ai_generated key
+    compose.reject_non_ai_recipes(decode)  # should not raise
+
+
+# lipsync_eligible
+
+
+def test_lipsync_eligible_no_decode_signal_allows_lipsync():
+    """No decode → trust user's --lipsync flag. Kling will reject faceless
+    clips anyway with code 1006, and we fall back gracefully."""
+    eligible, reason = compose.lipsync_eligible(None)
+    assert eligible is True
+    assert "no decode signal" in reason
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "talking_head_floating_card",
+        "talking_head_with_static_overlay",
+        "multi_scene_talking_head",
+    ],
+)
+def test_lipsync_eligible_yes_for_talking_head_kinds(kind):
+    eligible, reason = compose.lipsync_eligible({"format": {"kind": kind}})
+    assert eligible is True
+    assert kind in reason
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "greenscreen_kinetic_listicle",
+        "ai_montage_kinetic",
+        "unknown",
+        "static_title_card_montage",
+    ],
+)
+def test_lipsync_eligible_no_for_non_talking_head_kinds(kind):
+    eligible, reason = compose.lipsync_eligible({"format": {"kind": kind}})
+    assert eligible is False
+    assert "disabled" in reason
+    assert kind in reason
+
+
+def test_lipsync_eligible_no_for_missing_format_block():
+    """Decode.json with no `format` key → no kind to gate on → conservative,
+    refuse lipsync rather than silently pay for a likely-failed cut."""
+    eligible, reason = compose.lipsync_eligible({})
+    assert eligible is False

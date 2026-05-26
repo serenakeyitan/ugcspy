@@ -208,6 +208,111 @@ def kling_billed_duration(requested_sec: float) -> int:
     return 10
 
 
+# ─── decode.json signal loading + gating ───────────────────────────────────
+#
+# decode.py (separate ugcspy stage) classifies videos by `format.kind`
+# (talking_head_floating_card, greenscreen_kinetic_listicle, ai_montage,
+# etc.) and `format.is_ai_generated`. compose.py can read these signals
+# to (a) refuse human-shot videos before any API spend and (b) gate the
+# --lipsync feature to talking-head formats only (Kling lipsync rejects
+# faceless clips with code 1006 anyway; we save the user the bill and
+# the failure round-trip).
+#
+# decode.json is OPTIONAL in the recipe directory. When missing, we
+# default to "no signals" — refusal falls back to the legacy N/A
+# prefix check, and --lipsync is left on (the user opted in explicitly,
+# and the Kling API will reject the cut if there's no face).
+#
+# Talking-head format names from decode.py:classify_format()'s ladder.
+# If decode.py grows new format kinds, expand this set.
+_LIPSYNC_ELIGIBLE_FORMATS: frozenset[str] = frozenset({
+    "talking_head_floating_card",
+    "talking_head_with_static_overlay",
+    "multi_scene_talking_head",
+})
+
+
+def load_decode_signals(recipe_dir: Path) -> dict | None:
+    """Read decode.json from the recipe dir if present. Returns the
+    parsed dict, or None when decode.json is missing/invalid. We don't
+    fail loudly on missing decode.json — compose can still run without
+    it, just without the extra gating signal."""
+    p = recipe_dir / "decode.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except json.JSONDecodeError:
+        print(
+            f"[compose] warning: decode.json at {p} is invalid JSON — "
+            f"skipping decode-derived gating.",
+            file=sys.stderr,
+        )
+        return None
+
+
+def reject_non_ai_recipes(decode: dict | None) -> None:
+    """Refuse recipes whose source decode classifies the video as
+    NOT AI-generated. The slash command docs claim compose does this;
+    until this fix, only the N/A-prefix string check fired (and that
+    only worked if the agent that wrote the prompt remembered the
+    prefix). With decode.json's structured signal, the gate is
+    enforced regardless of prompt shape.
+
+    No-op when decode.json is missing — falls through to the legacy
+    N/A check in the cut loop."""
+    if not decode:
+        return
+    fmt = decode.get("format") or {}
+    is_ai = fmt.get("is_ai_generated")
+    # Only refuse when the field is explicitly False. Missing field
+    # means "decode couldn't tell" — let the user proceed.
+    if is_ai is False:
+        kind = fmt.get("kind", "unknown")
+        fail(
+            f"decode.json classifies this video as NOT AI-generated "
+            f"(format.kind = {kind!r}). AI-reproducing a real creator looks "
+            f"uncanny and risks misleading attribution. Use /ugcspy-fork to "
+            f"brief a real creator instead. If you genuinely want to override "
+            f"this, edit decode.json to set format.is_ai_generated: true.",
+            code=1,
+        )
+
+
+def lipsync_eligible(decode: dict | None) -> tuple[bool, str]:
+    """Decide whether --lipsync should actually run, given decode signals.
+
+    Returns (eligible, reason) where reason is a short explanation
+    shown in the cost preflight.
+
+    Three states:
+      - decode is None (file missing) → trust the user's --lipsync flag.
+        Kling will reject faceless clips with code 1006 if our guess is
+        wrong, and we fall back gracefully.
+      - decode is present but no format.kind → conservative refusal.
+        Decode ran but couldn't classify; safer to skip lipsync than to
+        spend money on a likely-faceless cut.
+      - decode has a known format.kind → look it up against the
+        lipsync-eligible set."""
+    if decode is None:
+        return True, "no decode signal (decode.json missing) — running lipsync as requested"
+    fmt = decode.get("format") or {}
+    kind = fmt.get("kind")
+    if not kind:
+        return False, (
+            "disabled — decode.json present but format.kind absent. "
+            "Conservative refusal; re-run /ugcspy-decode to classify, "
+            "or force lipsync by setting format.kind in decode.json."
+        )
+    if kind in _LIPSYNC_ELIGIBLE_FORMATS:
+        return True, f"enabled — format.kind = {kind!r}"
+    return False, (
+        f"disabled — format.kind = {kind!r} is not in the lipsync-eligible set "
+        f"({sorted(_LIPSYNC_ELIGIBLE_FORMATS)}). Lipsync warps a face; this format "
+        f"likely has none. Saving the ~$0.084/sec per cut."
+    )
+
+
 def validate_durations(cuts: list[dict]) -> None:
     """Refuse recipes whose cuts exceed what Kling can render. Better
     to fail upfront than silently truncate the user's content."""
@@ -252,11 +357,18 @@ def compose(args: argparse.Namespace) -> None:
     # we're about to reject.
     validate_durations(cuts)
 
-    # 2. Pre-flight refusal check — if ANY cut is marked N/A (human-shot
-    # UGC where AI reproduction would look uncanny), refuse before the
-    # user spends money. Also surfaces this on --dry-run so they don't
-    # waste time thinking through cost decisions for a video that won't
-    # render anyway.
+    # 1c. Load decode.json signals (optional). decode.json sits next to
+    # recipe.json in the recipe dir when /ugcspy-decode has run.
+    # Used by reject_non_ai_recipes (structured refusal) and lipsync_eligible
+    # (format-based --lipsync gate). reject_non_ai_recipes runs immediately
+    # because we want the strongest refusal signal to fire as early as possible.
+    decode_signals = load_decode_signals(args.recipe_dir)
+    reject_non_ai_recipes(decode_signals)
+
+    # 2. Pre-flight refusal check — if ANY cut is marked N/A (legacy human-shot
+    # UGC marker that predates decode.json). Refuses before any API spend.
+    # decode.json's is_ai_generated check (above) is the better gate, but the
+    # N/A prefix is still required for recipes that don't have decode.json.
     for i, cut in enumerate(cuts):
         prompt = resolve_cut_prompt(cut) or ""
         if prompt.startswith("N/A"):
@@ -266,6 +378,14 @@ def compose(args: argparse.Namespace) -> None:
                 f"Use /ugcspy-fork to brief a real creator instead.",
                 code=1,
             )
+
+    # 2b. Decide whether lipsync actually runs given decode signals. We surface
+    # this AFTER refusal checks so the user sees the lipsync decision only
+    # for recipes we're actually going to compose.
+    lipsync_on, lipsync_reason = (False, "not requested")
+    if args.lipsync:
+        lipsync_on, lipsync_reason = lipsync_eligible(decode_signals)
+    print(f"[compose] lipsync: {lipsync_reason}")
 
     # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync.
     # Uses kling_billed_duration so the estimate matches what we'll actually
@@ -287,11 +407,12 @@ def compose(args: argparse.Namespace) -> None:
     cost_estimate += tts_total
     if tts_chars:
         cost_breakdown.append(f"TTS {tts_chars} chars: ${tts_total:.4f}")
-    # L3 lipsync — only on cuts that have audio, only if --lipsync.
+    # L3 lipsync — only on cuts that have audio, only when lipsync_on
+    # (combines --lipsync flag with the decode-derived format gate).
     # Billed against the same rounded duration as text2video — the lipsync
     # warp runs on the same Kling-output clip, so its duration is determined
     # by what text2video produced, NOT by the original recipe value.
-    if args.lipsync:
+    if lipsync_on:
         lipsync_total = 0.0
         for cut in cuts_with_audio:
             billed = kling_billed_duration(float(cut.get("duration_sec") or 0))
@@ -317,6 +438,7 @@ def compose(args: argparse.Namespace) -> None:
     total_cost = 0.0
     clip_paths: list[Path] = []
     cut_audio_paths: list[Path | None] = []  # parallel to cuts; None if no audio for this cut
+    lipsync_statuses: list[tuple[int, str]] = []  # per-cut: (cut_index, status_string)
     out_dir = args.recipe_dir / "reproduction"
     out_dir.mkdir(exist_ok=True)
     for i, cut in enumerate(cuts):
@@ -391,8 +513,17 @@ def compose(args: argparse.Namespace) -> None:
                 fail(f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} TTS", code=4)
         cut_audio_paths.append(audio_path)
 
-        # L3: optional lipsync warp — replaces dst with a face-synced version
-        if args.lipsync and audio_path and cut_video_id:
+        # L3: optional lipsync warp — replaces dst with a face-synced version.
+        # Only runs when lipsync_on (which combines the user's --lipsync
+        # flag with the decode-derived format gate). When lipsync fails,
+        # we keep the un-warped clip — the downstream concat layer
+        # ffprobe-detects whether the clip has audio and routes to either
+        # `normalize_with_audio` (lipsync succeeded) or
+        # `mix_clip_with_padded_audio` (lipsync failed, mix the per-cut
+        # TTS we already rendered above). So a failed cut is never silent
+        # in --lipsync mode — that was the issue #14 silent-cut bug.
+        lipsync_status = "skipped"  # for the closing summary
+        if lipsync_on and audio_path and cut_video_id:
             print("[compose]   running Kling lipsync warp...")
             try:
                 lipsync_payload = {
@@ -406,17 +537,30 @@ def compose(args: argparse.Namespace) -> None:
                     # Overwrite the un-warped clip with the warped one
                     shutil.copy(lip_mp4, dst)
                     total_cost += lip_result["cost_usd"]
+                    lipsync_status = f"ok (+${lip_result['cost_usd']:.2f})"
                     print(f"[compose]   lipsync ok; cost now: ${total_cost:.2f}")
                 else:
-                    print("[compose]   lipsync returned no mp4 — keeping un-warped clip")
+                    lipsync_status = "no-mp4-fallback (paid $0)"
+                    print(
+                        "[compose]   lipsync returned no mp4 — keeping un-warped clip + TTS fallback (paid $0 for warp)"
+                    )
             except SystemExit:
                 # call_render fails with SystemExit on error — for lipsync,
                 # we'd rather log and continue with the un-warped clip than
                 # abort the whole reproduction. The Kling lipsync API rejects
                 # videos with no clear face — that's not a fatal compose error.
-                print(f"[compose]   lipsync failed for cut {i} — keeping un-warped clip")
+                # The downstream concat layer will mix in the per-cut TTS so
+                # the cut isn't silent.
+                lipsync_status = "failed-fallback (paid $0)"
+                print(
+                    f"[compose]   lipsync failed for cut {i} — keeping un-warped clip + TTS fallback (paid $0 for warp)"
+                )
             if total_cost > args.budget:
-                fail(f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} lipsync", code=4)
+                fail(
+                    f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} lipsync",
+                    code=4,
+                )
+        lipsync_statuses.append((i, lipsync_status))
         clip_paths.append(dst)
 
     # 4. Normalize every clip to a canonical codec + timebase, then concat.
@@ -480,6 +624,11 @@ def compose(args: argparse.Namespace) -> None:
 
     print(f"\n[compose] ✓ reproduction.mp4 written to {final}")
     print(f"[compose] total cost: ${total_cost:.2f} of ${args.budget:.2f} budget")
+    # Per-cut lipsync summary (only emitted when lipsync was on for at least one cut)
+    if any(s != "skipped" for _, s in lipsync_statuses):
+        print("[compose] lipsync per-cut status:")
+        for cut_idx, status in lipsync_statuses:
+            print(f"  - cut {cut_idx}: {status}")
 
 
 def run_ffmpeg(args: list[str]) -> None:
