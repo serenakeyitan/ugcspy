@@ -688,7 +688,15 @@ def init_or_load_state(
 
 
 def stage_done(state: dict, cut_idx: int, stage: str) -> bool:
-    """True iff this stage of this cut was previously completed.
+    """True iff this stage of this cut was previously completed successfully.
+
+    Returns False for:
+      - missing cut entry
+      - stage never attempted (empty dict)
+      - stage attempted but failed (status: "failed", written by
+        record_stage_failure — issue #29). Failed stages should be
+        retried on resume, not skipped.
+
     Caller still checks the output file exists on disk before trusting
     the cache — state can lie if the user manually deleted files."""
     for c in state.get("cuts", []):
@@ -738,6 +746,46 @@ def record_stage(
                     c[downstream] = {}
             break
     state["total_cost"] = state.get("total_cost", 0.0) + cost
+    save_state(recipe_dir, state)
+
+
+def record_stage_failure(
+    state: dict,
+    recipe_dir: Path,
+    cut_idx: int,
+    stage: str,
+    error: str,
+) -> None:
+    """Mark a stage as failed in the state dict and persist immediately.
+    Called BEFORE fail() in unrecoverable error paths so the next run
+    knows what was attempted and can resume cleanly.
+
+    Issue #29: previously a Kling-TTS lipsync failure called fail() with
+    no record. The next run saw text2video cached + lipsync still pending,
+    but the user's only path was to retry with --tts openai. After PR #28
+    that's an args_signature mismatch → forces --no-resume → discards the
+    cached text2video clips → 2× text2video cost. Recording the failure
+    lets the user re-run with the SAME --tts kling (retrying just the
+    failed lipsync) OR change args knowingly.
+
+    We record cost=0 because we don't actually know whether Kling billed
+    for the failed attempt. The conservative answer ("don't claim a cost
+    that may not have been incurred") is safer than over-counting. The
+    `error` string is persisted for forensics.
+
+    Does NOT invalidate downstream stages — a failed stage means
+    downstreams couldn't have run yet anyway."""
+    for c in state.get("cuts", []):
+        if c.get("index") == cut_idx:
+            c[stage] = {
+                "status": "failed",
+                "cost": 0.0,
+                "error": error,
+            }
+            break
+    # total_cost unchanged; we didn't pay for this attempt (per the
+    # comment above — if Kling did bill, we'll see it on the bill, but
+    # we won't double-count it via state)
     save_state(recipe_dir, state)
 
 
@@ -1323,12 +1371,25 @@ def compose(args: argparse.Namespace) -> None:
                         # Falling back to silent video would be worse than
                         # failing loudly; the user should re-run with
                         # --tts openai if they want the resilient path.
+                        # Issue #29: record the failure to state BEFORE
+                        # fail() so the next run can resume cleanly (text2video
+                        # stays cached, lipsync re-attempts) instead of
+                        # forcing --no-resume → 2× text2video cost.
+                        record_stage_failure(
+                            state,
+                            args.recipe_dir,
+                            cut_idx,
+                            "lipsync",
+                            error="kling-tts: lipsync returned no mp4",
+                        )
                         fail(
                             f"cut {i}: Kling TTS+lipsync failed (no mp4 returned). "
                             f"In --tts kling mode there's no audio fallback for failed cuts. "
                             f"Re-run with --tts openai to get the resilient path "
                             f"(OpenAI TTS rendered separately; failed lipsync cuts fall back "
-                            f"to un-warped clip with the OpenAI audio mixed in).",
+                            f"to un-warped clip with the OpenAI audio mixed in), "
+                            f"OR re-run with the same --tts kling to retry just this cut's lipsync "
+                            f"(text2video stays cached, no double-billing).",
                             code=2,
                         )
             except SystemExit:
@@ -1341,10 +1402,21 @@ def compose(args: argparse.Namespace) -> None:
                 #     OpenAI TTS this run). Failing loudly is the only honest
                 #     option — silent fallback would break the reproduction.
                 if kling_tts_mode:
+                    # Issue #29: persist the failure before fail() so retry
+                    # doesn't force a full re-render of cached text2video clips.
+                    record_stage_failure(
+                        state,
+                        args.recipe_dir,
+                        cut_idx,
+                        "lipsync",
+                        error="kling-tts: lipsync call raised SystemExit (API error)",
+                    )
                     fail(
                         f"cut {i}: Kling TTS+lipsync failed. In --tts kling mode there's "
                         f"no audio fallback for failed cuts. Re-run with --tts openai for "
-                        f"the resilient path (separate TTS, failed lipsync degrades gracefully).",
+                        f"the resilient path (separate TTS, failed lipsync degrades gracefully), "
+                        f"OR re-run with the same --tts kling to retry just this cut's lipsync "
+                        f"(text2video stays cached, no double-billing).",
                         code=2,
                     )
                 lipsync_status = "failed-fallback (paid $0)"

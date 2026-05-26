@@ -1167,6 +1167,110 @@ def test_record_stage_invalidates_lipsync_when_tts_reruns(tmp_path):
     assert state["cuts"][0]["lipsync"] == {}
 
 
+# ─── record_stage_failure (issue #29) ──────────────────────────────────────
+
+
+def test_record_stage_failure_persists_with_failed_status(tmp_path):
+    """A failed stage gets status: 'failed' + error string + cost: 0."""
+    state = {
+        "schema_version": compose.STATE_SCHEMA_VERSION,
+        "total_cost": 1.0,
+        "cuts": [{"index": 0, "text2video": {"status": "done", "cost": 1.0}, "tts": {}, "lipsync": {}}],
+    }
+    compose.record_stage_failure(state, tmp_path, 0, "lipsync", "Kling 1006 no face")
+    assert state["cuts"][0]["lipsync"]["status"] == "failed"
+    assert state["cuts"][0]["lipsync"]["cost"] == 0.0
+    assert state["cuts"][0]["lipsync"]["error"] == "Kling 1006 no face"
+    # Total cost unchanged — we don't claim a cost we may not have incurred
+    assert state["total_cost"] == 1.0
+    # Persisted to disk
+    loaded = compose.load_state(tmp_path)
+    assert loaded["cuts"][0]["lipsync"]["status"] == "failed"
+
+
+def test_record_stage_failure_preserves_upstream_stages(tmp_path):
+    """A failed downstream stage MUST NOT affect upstream stages.
+    text2video stayed cached → next run skips it → no double-billing."""
+    state = {
+        "schema_version": compose.STATE_SCHEMA_VERSION,
+        "total_cost": 1.0,
+        "cuts": [
+            {
+                "index": 0,
+                "text2video": {"status": "done", "cost": 1.0, "external_id": "kling-xyz"},
+                "tts": {"status": "done", "cost": 0.001},
+                "lipsync": {},
+            }
+        ],
+    }
+    compose.record_stage_failure(state, tmp_path, 0, "lipsync", "Kling 500")
+    # Upstreams preserved
+    assert state["cuts"][0]["text2video"]["status"] == "done"
+    assert state["cuts"][0]["text2video"]["cost"] == 1.0
+    assert state["cuts"][0]["text2video"]["external_id"] == "kling-xyz"
+    assert state["cuts"][0]["tts"]["status"] == "done"
+
+
+def test_stage_done_false_for_failed_status():
+    """stage_done must return False for failed stages so the resume layer
+    re-attempts them. Issue #29: without this, a failed lipsync would
+    be 'skipped as done' on retry."""
+    state = {
+        "cuts": [{"index": 0, "lipsync": {"status": "failed", "error": "Kling 500"}}]
+    }
+    assert compose.stage_done(state, 0, "lipsync") is False
+
+
+def test_stage_done_true_only_for_done_status():
+    """Belt-and-suspenders: every non-'done' status should return False.
+    This guards against future status values (e.g. 'in_progress', 'retrying')
+    being silently treated as done."""
+    for status in ("failed", "pending", "in_progress", "retrying", ""):
+        state = {"cuts": [{"index": 0, "lipsync": {"status": status}}]}
+        assert compose.stage_done(state, 0, "lipsync") is False, (
+            f"status {status!r} should not be treated as done"
+        )
+    state = {"cuts": [{"index": 0, "lipsync": {"status": "done"}}]}
+    assert compose.stage_done(state, 0, "lipsync") is True
+
+
+def test_failed_lipsync_resume_re_attempts_only_lipsync(tmp_path):
+    """The end-to-end #29 scenario. Cut 0:
+      - text2video: done (cached, $1.00 already paid)
+      - tts: done (cached, $0 for kling-mode bundled)
+      - lipsync: failed (Kling error, $0 attributed)
+    Resume should: skip text2video, skip tts, retry lipsync.
+    Without record_stage_failure (the bug we're fixing), resume would see
+    lipsync.status missing/empty → treat as pending → retry it ANYWAY.
+    But the FAILURE path also didn't record_stage(), so total_cost was
+    accurate in the old code by luck. The real bug is: under the args-
+    signature fix from #28, switching --tts to recover forces --no-resume
+    → re-runs text2video. With our failure-state, the user can stay with
+    the SAME --tts and retry just the failed lipsync."""
+    # Persist a stale-but-correct state on disk
+    state = {
+        "schema_version": compose.STATE_SCHEMA_VERSION,
+        "recipe_hash": "sha256:hash",
+        "args_signature": "sig",
+        "total_cost": 1.0,
+        "cuts": [
+            {
+                "index": 0,
+                "text2video": {"status": "done", "cost": 1.0, "external_id": "k1"},
+                "tts": {"status": "done", "cost": 0},
+                "lipsync": {"status": "failed", "cost": 0, "error": "Kling 500"},
+            }
+        ],
+    }
+    compose.save_state(tmp_path, state)
+    loaded = compose.load_state(tmp_path)
+    # text2video + tts still cached → resume layer skips them
+    assert compose.stage_done(loaded, 0, "text2video") is True
+    assert compose.stage_done(loaded, 0, "tts") is True
+    # lipsync failed → resume layer retries it
+    assert compose.stage_done(loaded, 0, "lipsync") is False
+
+
 # ─── AI-disclosure watermark (issue #17) ───────────────────────────────────
 
 
