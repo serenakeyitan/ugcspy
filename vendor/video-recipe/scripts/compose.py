@@ -36,6 +36,7 @@ Exit codes:
     4 — budget cap exceeded
 """
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -75,6 +76,11 @@ def parse_args() -> argparse.Namespace:
         "--no-burnin",
         action="store_true",
         help="Skip burning OCR'd overlay text into the reproduction. By default, overlay text from recipe.title_cards / cut.ocr_text / cut.caption is rendered as on-screen text per cut. Use this for testing or when the source's overlay is undesirable in the reproduction.",
+    )
+    p.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Discard any previous compose_state.json and re-run from scratch. By default, compose resumes: cuts whose API calls succeeded previously are skipped and their cached outputs reused (so a Kling 502 mid-pipeline doesn't force you to re-pay for completed cuts). Use this when you want a clean run.",
     )
     return p.parse_args()
 
@@ -338,6 +344,213 @@ def validate_durations(cuts: list[dict]) -> None:
         )
 
 
+# ─── Resume / idempotency state (issue #16) ───────────────────────────────
+#
+# Long composes (10+ cuts, ~15 min wall time) WILL fail mid-way at some
+# point — transient Kling 502, OpenAI rate-limit, network hiccup. Without
+# resume, the next compose run re-pays for every successful cut from the
+# first run. That's directly users-burning-money.
+#
+# This module persists per-cut, per-stage state to
+# `<recipe_dir>/reproduction/compose_state.json` after every successful
+# API call. On the next compose invocation:
+#
+#   1. State file present + recipe.json unchanged → resume mode. Skip
+#      stages marked `done` whose output file still exists.
+#   2. State file present + recipe.json changed → refuse to resume;
+#      tell the user to either revert the recipe OR pass `--no-resume`
+#      to discard previous progress explicitly.
+#   3. State file absent → fresh run (default behavior for first-time).
+#
+# Recipe hash includes only the cuts + tts blocks (the bits that affect
+# what we render). Editorial fields like source_url + generated_at don't
+# invalidate the cache.
+
+
+STATE_SCHEMA_VERSION = "1"
+
+
+def compute_recipe_hash(recipe: dict) -> str:
+    """SHA-256 hash of the parts of recipe.json that affect rendering.
+    Editorial fields like generated_at + source_url don't invalidate the
+    cache. We canonicalize via sorted JSON so dict ordering doesn't
+    change the hash."""
+    relevant = {
+        "cuts": recipe.get("cuts"),
+        "tts": recipe.get("tts"),
+        "title_cards": recipe.get("title_cards"),
+        "voiceover": recipe.get("voiceover"),
+    }
+    canon = json.dumps(relevant, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def args_signature(args: argparse.Namespace) -> str:
+    """Short stable string of args that affect rendering decisions.
+    If the user re-runs with different flags, the cache is invalidated."""
+    return f"lipsync={bool(getattr(args, 'lipsync', False))}|no_burnin={bool(getattr(args, 'no_burnin', False))}"
+
+
+def state_path(recipe_dir: Path) -> Path:
+    """Where compose_state.json lives. Same dir as the cut output files
+    so removing the reproduction dir wipes both."""
+    return recipe_dir / "reproduction" / "compose_state.json"
+
+
+def load_state(recipe_dir: Path) -> dict | None:
+    """Read compose_state.json if present. Returns None on missing or
+    unreadable. Caller decides what to do (refuse / discard / resume)."""
+    p = state_path(recipe_dir)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"[compose] warning: compose_state.json at {p} is unreadable ({e}); "
+            f"treating as fresh run.",
+            file=sys.stderr,
+        )
+        return None
+
+
+def save_state(recipe_dir: Path, state: dict) -> None:
+    """Atomically write compose_state.json. We write to a temp path first
+    and rename — partial writes from a Ctrl-C never leave a corrupt file."""
+    p = state_path(recipe_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    tmp.replace(p)
+
+
+def init_or_load_state(
+    recipe_dir: Path,
+    recipe: dict,
+    args: argparse.Namespace,
+) -> tuple[dict, int]:
+    """Return (state, resumed_cut_count). When the existing state matches
+    the current recipe + args, we resume from it. When it mismatches,
+    refuse with a clear error so the user makes the call. When --no-resume
+    is set, start fresh.
+
+    The state dict is initialized with empty per-cut sub-objects for every
+    cut so callers don't have to special-case "first time seeing this cut."
+    """
+    cuts = recipe.get("cuts") or []
+    fresh = {
+        "schema_version": STATE_SCHEMA_VERSION,
+        "recipe_hash": compute_recipe_hash(recipe),
+        "args_signature": args_signature(args),
+        "total_cost": 0.0,
+        "cuts": [
+            {"index": int(c.get("index", i)), "text2video": {}, "tts": {}, "lipsync": {}}
+            for i, c in enumerate(cuts)
+        ],
+    }
+    if getattr(args, "no_resume", False):
+        # Caller asked for a clean slate. Wipe any prior state.
+        if state_path(recipe_dir).exists():
+            print("[compose] --no-resume: discarding previous compose_state.json")
+        return fresh, 0
+
+    existing = load_state(recipe_dir)
+    if existing is None:
+        return fresh, 0
+    if existing.get("schema_version") != STATE_SCHEMA_VERSION:
+        print(
+            f"[compose] compose_state.json schema mismatch "
+            f"({existing.get('schema_version')!r} vs {STATE_SCHEMA_VERSION!r}); "
+            f"discarding previous state.",
+            file=sys.stderr,
+        )
+        return fresh, 0
+    if existing.get("recipe_hash") != fresh["recipe_hash"]:
+        fail(
+            "recipe.json has changed since the last compose_state.json was written. "
+            "Resuming would mix outputs from the old + new recipe — silent corruption. "
+            "Either revert recipe.json to match the previous run, or pass --no-resume "
+            "to discard previous progress and start fresh.",
+            code=1,
+        )
+    if existing.get("args_signature") != fresh["args_signature"]:
+        fail(
+            f"compose args changed since the last run "
+            f"({existing.get('args_signature')!r} → {fresh['args_signature']!r}). "
+            f"Resuming would mix outputs with different render settings. "
+            f"Pass --no-resume to discard previous progress, or re-run with the "
+            f"matching flags.",
+            code=1,
+        )
+    # State matches — resume. Count how many cuts have at least one
+    # completed stage so we can report the resume scope to the user.
+    resumed = sum(
+        1
+        for c in existing.get("cuts", [])
+        if any(c.get(stage, {}).get("status") == "done" for stage in ("text2video", "tts", "lipsync"))
+    )
+    if resumed > 0:
+        print(
+            f"[compose] resuming from previous run — {resumed}/{len(cuts)} cuts "
+            f"have completed stages, ${existing.get('total_cost', 0):.2f} already spent."
+        )
+    return existing, resumed
+
+
+def stage_done(state: dict, cut_idx: int, stage: str) -> bool:
+    """True iff this stage of this cut was previously completed.
+    Caller still checks the output file exists on disk before trusting
+    the cache — state can lie if the user manually deleted files."""
+    for c in state.get("cuts", []):
+        if c.get("index") == cut_idx:
+            return c.get(stage, {}).get("status") == "done"
+    return False
+
+
+# Stage dependency map: re-running a stage invalidates its downstream
+# stages, since their cached outputs were produced against the OLD
+# upstream output. text2video produces dst; tts produces audio_path;
+# lipsync warps dst using both. Re-running text2video means lipsync is
+# stale; re-running tts also means lipsync is stale.
+_STAGE_DOWNSTREAM: dict[str, tuple[str, ...]] = {
+    "text2video": ("lipsync",),
+    "tts": ("lipsync",),
+    "lipsync": (),
+}
+
+
+def record_stage(
+    state: dict,
+    recipe_dir: Path,
+    cut_idx: int,
+    stage: str,
+    cost: float,
+    external_id: str | None = None,
+) -> None:
+    """Mark a stage as done in the state dict and persist immediately.
+    Also invalidates any downstream stages so we don't reuse outputs
+    produced against the old upstream output. Persist-on-every-success
+    means a Ctrl-C between stages loses at most the in-flight stage."""
+    for c in state.get("cuts", []):
+        if c.get("index") == cut_idx:
+            entry: dict = {"status": "done", "cost": float(cost)}
+            if external_id:
+                entry["external_id"] = external_id
+            c[stage] = entry
+            # Invalidate downstream stages — they were produced against
+            # the now-stale upstream output.
+            for downstream in _STAGE_DOWNSTREAM.get(stage, ()):
+                if c.get(downstream, {}).get("status") == "done":
+                    print(
+                        f"[compose] cut {cut_idx}: {stage} re-ran, invalidating {downstream} cache",
+                        file=sys.stderr,
+                    )
+                    c[downstream] = {}
+            break
+    state["total_cost"] = state.get("total_cost", 0.0) + cost
+    save_state(recipe_dir, state)
+
+
 # ─── Overlay burn-in helpers ───────────────────────────────────────────────
 #
 # Caption / overlay burn-in is the ffmpeg drawtext pass that renders the
@@ -567,6 +780,12 @@ def compose(args: argparse.Namespace) -> None:
     decode_signals = load_decode_signals(args.recipe_dir)
     reject_non_ai_recipes(decode_signals)
 
+    # 1d. Initialize resume state. This must run BEFORE cost preflight so
+    # a recipe-hash mismatch refusal fires even on --dry-run (the user
+    # finds out about the stale state file before they commit to spending).
+    # init_or_load_state may call fail() with code 1 — that's correct here.
+    state, _resumed_count = init_or_load_state(args.recipe_dir, recipe, args)
+
     # 2. Pre-flight refusal check — if ANY cut is marked N/A (legacy human-shot
     # UGC marker that predates decode.json). Refuses before any API spend.
     # decode.json's is_ai_generated check (above) is the better gate, but the
@@ -636,13 +855,20 @@ def compose(args: argparse.Namespace) -> None:
         print("[compose] dry-run; no API calls made.")
         return
 
-    # 3. Render each cut: clip → optional per-cut TTS → optional lipsync warp
-    total_cost = 0.0
+    # 3. Render each cut: clip → optional per-cut TTS → optional lipsync warp.
+    # Resume-aware: if a stage was completed in a previous run AND its
+    # output file still exists on disk, skip the API call. State is
+    # persisted after every successful API call so a Ctrl-C between
+    # stages loses at most the in-flight stage.
     clip_paths: list[Path] = []
     cut_audio_paths: list[Path | None] = []  # parallel to cuts; None if no audio for this cut
     lipsync_statuses: list[tuple[int, str]] = []  # per-cut: (cut_index, status_string)
     out_dir = args.recipe_dir / "reproduction"
     out_dir.mkdir(exist_ok=True)
+    # State was initialized earlier (before cost preflight) so the
+    # recipe-hash-mismatch refusal fires on --dry-run too. By the time
+    # we reach the render loop, state is already loaded or freshly built.
+    total_cost = float(state.get("total_cost", 0.0))
     for i, cut in enumerate(cuts):
         base_prompt = resolve_cut_prompt(cut)
         # validate_compose_ready already asserted every cut has a prompt,
@@ -676,43 +902,70 @@ def compose(args: argparse.Namespace) -> None:
         # in the preflight breakdown.
         requested_dur = float(cut.get("duration_sec") or 0)
         billed_dur = kling_billed_duration(requested_dur)
-        if billed_dur != requested_dur:
-            print(
-                f"[compose] cut {i}: recipe asks for {requested_dur:.1f}s, "
-                f"Kling will render {billed_dur}s ({'rounded down' if billed_dur < requested_dur else 'rounded up'})..."
-            )
-        else:
-            print(f"[compose] rendering cut {i}/{len(cuts) - 1} ({billed_dur}s)...")
-        result = call_render(
-            args.ugcspy_bin,
-            {"kind": "clip", "prompt": prompt, "duration_sec": billed_dur},
-        )
-        mp4 = Path(result["mp4_path"])
-        if not mp4.exists():
-            fail(f"render returned mp4_path={mp4} but file doesn't exist", code=2)
+        # Text2video stage. Resume-cache: if state says we already
+        # rendered this cut AND the cached mp4 still exists, skip the
+        # API call entirely.
+        cut_idx = int(cut.get("index", i))
         dst = out_dir / f"cut-{i:02d}.mp4"
-        shutil.copy(mp4, dst)
-        # Capture the Kling task_id (external_id) — needed for L3 lipsync
-        cut_video_id = result.get("external_id")
-        total_cost += result["cost_usd"]
-        print(f"[compose]   cost so far: ${total_cost:.2f}")
-        if total_cost > args.budget:
-            fail(
-                f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i}",
-                code=4,
+        cut_video_id: str | None = None
+        if stage_done(state, cut_idx, "text2video") and dst.exists() and dst.stat().st_size > 0:
+            # Reuse cached clip — no API call, no cost added (state already
+            # has the cost from the previous run).
+            for c in state["cuts"]:
+                if c.get("index") == cut_idx:
+                    cut_video_id = c.get("text2video", {}).get("external_id")
+                    break
+            print(f"[compose] cut {i}/{len(cuts) - 1}: text2video cached (skipping Kling call)")
+        else:
+            if billed_dur != requested_dur:
+                print(
+                    f"[compose] cut {i}: recipe asks for {requested_dur:.1f}s, "
+                    f"Kling will render {billed_dur}s ({'rounded down' if billed_dur < requested_dur else 'rounded up'})..."
+                )
+            else:
+                print(f"[compose] rendering cut {i}/{len(cuts) - 1} ({billed_dur}s)...")
+            result = call_render(
+                args.ugcspy_bin,
+                {"kind": "clip", "prompt": prompt, "duration_sec": billed_dur},
             )
+            mp4 = Path(result["mp4_path"])
+            if not mp4.exists():
+                fail(f"render returned mp4_path={mp4} but file doesn't exist", code=2)
+            shutil.copy(mp4, dst)
+            # Capture the Kling task_id (external_id) — needed for L3 lipsync
+            cut_video_id = result.get("external_id")
+            cost_this = float(result["cost_usd"])
+            total_cost += cost_this
+            print(f"[compose]   cost so far: ${total_cost:.2f}")
+            # Persist BEFORE the budget check so a budget-exceeded abort
+            # still saves the work we just paid for. The next run can
+            # resume this cut even though we exited 4.
+            record_stage(state, args.recipe_dir, cut_idx, "text2video", cost_this, cut_video_id)
+            if total_cost > args.budget:
+                fail(
+                    f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i}",
+                    code=4,
+                )
 
         # L2: per-cut TTS, aligned to this cut's spoken window
         audio_path: Path | None = None
         if cut_transcript:
-            print(f"[compose]   rendering per-cut TTS ({len(cut_transcript)} chars)...")
-            tts_result = call_render(args.ugcspy_bin, {"kind": "tts", "text": cut_transcript})
-            tts_src = Path(tts_result["mp3_path"])
             audio_path = out_dir / f"cut-{i:02d}.mp3"
-            shutil.copy(tts_src, audio_path)
-            total_cost += tts_result["cost_usd"]
-            if total_cost > args.budget:
-                fail(f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} TTS", code=4)
+            if stage_done(state, cut_idx, "tts") and audio_path.exists() and audio_path.stat().st_size > 0:
+                print(f"[compose]   cut {i}: TTS cached (skipping OpenAI call)")
+            else:
+                print(f"[compose]   rendering per-cut TTS ({len(cut_transcript)} chars)...")
+                tts_result = call_render(args.ugcspy_bin, {"kind": "tts", "text": cut_transcript})
+                tts_src = Path(tts_result["mp3_path"])
+                shutil.copy(tts_src, audio_path)
+                cost_this = float(tts_result["cost_usd"])
+                total_cost += cost_this
+                record_stage(state, args.recipe_dir, cut_idx, "tts", cost_this)
+                if total_cost > args.budget:
+                    fail(
+                        f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} TTS",
+                        code=4,
+                    )
         cut_audio_paths.append(audio_path)
 
         # L3: optional lipsync warp — replaces dst with a face-synced version.
@@ -726,6 +979,15 @@ def compose(args: argparse.Namespace) -> None:
         # in --lipsync mode — that was the issue #14 silent-cut bug.
         lipsync_status = "skipped"  # for the closing summary
         if lipsync_on and audio_path and cut_video_id:
+            if stage_done(state, cut_idx, "lipsync") and dst.exists() and dst.stat().st_size > 0:
+                # Lipsync was previously successful — dst already holds the
+                # warped video. Skip the API call.
+                print(f"[compose]   cut {i}: lipsync cached (skipping Kling warp call)")
+                lipsync_status = "cached"
+                # Don't fall through to the call_render block
+                lipsync_statuses.append((cut_idx, lipsync_status))
+                clip_paths.append(dst)
+                continue
             print("[compose]   running Kling lipsync warp...")
             try:
                 lipsync_payload = {
@@ -738,8 +1000,17 @@ def compose(args: argparse.Namespace) -> None:
                 if lip_mp4.exists():
                     # Overwrite the un-warped clip with the warped one
                     shutil.copy(lip_mp4, dst)
-                    total_cost += lip_result["cost_usd"]
-                    lipsync_status = f"ok (+${lip_result['cost_usd']:.2f})"
+                    cost_this = float(lip_result["cost_usd"])
+                    total_cost += cost_this
+                    lipsync_status = f"ok (+${cost_this:.2f})"
+                    record_stage(
+                        state,
+                        args.recipe_dir,
+                        cut_idx,
+                        "lipsync",
+                        cost_this,
+                        lip_result.get("external_id"),
+                    )
                     print(f"[compose]   lipsync ok; cost now: ${total_cost:.2f}")
                 else:
                     lipsync_status = "no-mp4-fallback (paid $0)"
