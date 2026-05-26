@@ -62,6 +62,37 @@ export interface LipSyncProvider {
   /** USD per second of warped video. Kling Std is ~$0.084/sec. */
   readonly lipsync_cost_per_second_usd: number;
   lipSyncClip(req: LipSyncRequest): Promise<LipSyncResult>;
+  /** Optional: bundled TTS+lipsync in one call. Kling supports this via
+   * mode: text2video on the same endpoint. Hard 120-char limit per call.
+   * Adapters that don't support it can throw or omit the method. */
+  lipSyncWithText?(req: LipSyncWithTextRequest): Promise<LipSyncResult>;
+}
+
+/**
+ * Bundled TTS + lip-sync (Kling's `mode: "text2video"` on the lipsync
+ * endpoint). The provider generates the TTS internally and produces a
+ * face-synced video in a single call. No separate audio file to manage.
+ *
+ * Use this when:
+ *   - the TTS text fits the provider's char limit (Kling: 120)
+ *   - the source video is talking-head (otherwise lipsync fails anyway)
+ *
+ * Voice catalog is provider-specific. Pass voice_id explicitly when you
+ * want a particular voice; omit it to use the provider's default for the
+ * language.
+ */
+export interface LipSyncWithTextRequest {
+  /** task_id / external_id from a prior generateClip call. */
+  video_id: string;
+  /** Text to be spoken. Provider may enforce a hard char limit. */
+  text: string;
+  /** Provider-specific voice catalog ID. Optional — provider picks a
+   *  default for the language when unset. */
+  voice_id?: string;
+  /** Language code. Kling supports "en" and "zh". */
+  voice_language?: "en" | "zh";
+  /** Speech rate, 0.8–2.0 (Kling range). Defaults to 1.0. */
+  voice_speed?: number;
 }
 
 export interface TtsRequest {

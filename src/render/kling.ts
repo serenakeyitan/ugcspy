@@ -10,6 +10,7 @@ import {
   type LipSyncProvider,
   type LipSyncRequest,
   type LipSyncResult,
+  type LipSyncWithTextRequest,
   type VideoGenProvider,
 } from "./types.ts";
 
@@ -278,6 +279,148 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
 
     // If the API didn't report duration, fall back to a 5s minimum charge
     // (since Kling's clips are always 5s or 10s).
+    const billableSeconds = durationSec > 0 ? durationSec : 5;
+    return {
+      mp4_path: outPath,
+      external_id: taskId,
+      cost_usd: billableSeconds * this.lipsync_cost_per_second_usd,
+    };
+  }
+
+  /**
+   * Bundled TTS + lip-sync via Kling's `mode: "text2video"` on the same
+   * /v1/videos/lip-sync endpoint. Kling generates the TTS internally
+   * (using its voice catalog) and produces a face-synced clip in one
+   * call. No separate audio file to manage.
+   *
+   * Constraints (per Kling docs, verified May 2026):
+   *   - `text` max 120 chars; longer text MUST be split by the caller
+   *     into separate cuts (this method enforces the limit and refuses
+   *     loudly rather than silently truncating).
+   *   - `voice_language` ∈ {"en", "zh"}; other languages auto-translate
+   *     to English on Kling's side (likely surprising).
+   *   - `voice_speed` ∈ [0.8, 2.0].
+   *
+   * Same source-video constraints as lipSyncClip (5/10s, ≤30 days old,
+   * clear face). Same pricing per second.
+   */
+  async lipSyncWithText(req: LipSyncWithTextRequest): Promise<LipSyncResult> {
+    this.assertConfigured();
+
+    if (req.text.length > 120) {
+      throw new RenderError(
+        `Kling lipsync text2video text is ${req.text.length} chars; Kling caps at 120. ` +
+          `Either split the cut into shorter segments, or use lipSyncClip with separately-rendered TTS audio.`,
+        this.name,
+      );
+    }
+    if (!req.text.trim()) {
+      throw new RenderError(
+        "Kling lipsync text2video requires non-empty text.",
+        this.name,
+      );
+    }
+    const lang = req.voice_language ?? "en";
+    if (lang !== "en" && lang !== "zh") {
+      throw new RenderError(
+        `Kling lipsync text2video voice_language must be "en" or "zh"; got ${JSON.stringify(lang)}.`,
+        this.name,
+      );
+    }
+    const speed = req.voice_speed ?? 1.0;
+    if (speed < 0.8 || speed > 2.0) {
+      throw new RenderError(
+        `Kling lipsync text2video voice_speed must be in [0.8, 2.0]; got ${speed}.`,
+        this.name,
+      );
+    }
+
+    // 1. Submit lipsync text2video job
+    // Schema verified against github/199-mcp/mcp-kling/kling-api-docs.md
+    // section 3-13 (lip-sync endpoint, mode: text2video sub-shape).
+    const submitBody: Record<string, unknown> = {
+      input: {
+        video_id: req.video_id,
+        mode: "text2video",
+        text: req.text,
+        voice_language: lang,
+        voice_speed: speed,
+      },
+    };
+    if (req.voice_id) {
+      (submitBody.input as Record<string, unknown>).voice_id = req.voice_id;
+    }
+    const submitRes = await this.fetchSigned("/v1/videos/lip-sync", {
+      method: "POST",
+      body: JSON.stringify(submitBody),
+    });
+    if (!submitRes.ok) {
+      throw new RenderError(
+        `Kling lipsync text2video submit failed: ${submitRes.status} ${await submitRes.text()}`,
+        this.name,
+      );
+    }
+    const submitJson = (await submitRes.json()) as {
+      code?: number;
+      message?: string;
+      data?: { task_id?: string };
+    };
+    if (submitJson.code !== 0) {
+      throw new RenderError(
+        `Kling lipsync text2video submit returned code=${submitJson.code} message="${submitJson.message}"`,
+        this.name,
+      );
+    }
+    const taskId = submitJson.data?.task_id;
+    if (!taskId) {
+      throw new RenderError("Kling lipsync text2video response missing data.task_id", this.name);
+    }
+
+    // 2. Poll for completion — same lifecycle as lipSyncClip
+    const startedAt = Date.now();
+    const POLL_INTERVAL_MS = 5000;
+    const TIMEOUT_MS = 8 * 60 * 1000;
+    let videoUrl: string | null = null;
+    let durationSec = 0;
+    while (Date.now() - startedAt < TIMEOUT_MS) {
+      await sleep(POLL_INTERVAL_MS);
+      const statusRes = await this.fetchSigned(`/v1/videos/lip-sync/${taskId}`);
+      if (!statusRes.ok) continue;
+      const statusJson = (await statusRes.json()) as {
+        data?: {
+          task_status?: string;
+          task_status_msg?: string;
+          task_result?: { videos?: { url?: string; duration?: string }[] };
+        };
+      };
+      const status = statusJson.data?.task_status;
+      if (status === "succeed") {
+        const v = statusJson.data?.task_result?.videos?.[0];
+        videoUrl = v?.url ?? null;
+        durationSec = Number(v?.duration ?? 0);
+        break;
+      }
+      if (status === "failed") {
+        throw new RenderError(
+          `Kling lipsync text2video job ${taskId} failed: ${statusJson.data?.task_status_msg ?? "no message"}`,
+          this.name,
+        );
+      }
+    }
+    if (!videoUrl) {
+      throw new RenderError(`Kling lipsync text2video job ${taskId} timed out after 8min`, this.name);
+    }
+
+    // 3. Download warped MP4 to local temp
+    const outDir = join(tmpdir(), "ugcspy-renders");
+    await mkdir(outDir, { recursive: true });
+    const outPath = join(outDir, `kling-lipsync-t2v-${taskId}.mp4`);
+    const dl = await fetch(videoUrl);
+    if (!dl.ok) {
+      throw new RenderError(`Kling lipsync text2video download failed: ${dl.status}`, this.name);
+    }
+    writeFileSync(outPath, Buffer.from(await dl.arrayBuffer()));
+
     const billableSeconds = durationSec > 0 ? durationSec : 5;
     return {
       mp4_path: outPath,
