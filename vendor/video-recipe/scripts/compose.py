@@ -88,22 +88,44 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--kling-model",
         type=str,
-        default="kling-v2-6",
+        default="kling-v3",
         help=(
-            "Kling model_name for clip generation (native api.klingai.com string, HYPHENS not dots). "
-            "Default 'kling-v2-6' is the best native-callable model (top fidelity + native audio). "
-            "Cheaper option: 'kling-v1-6'. Others: kling-v2-1, kling-v2-1-master (pro-only), "
-            "kling-v2-5-turbo. NOTE: 'kling-v3' is NOT native (reseller-only) and will fail."
+            "Kling model_name for clip generation (official native string, HYPHENS not dots). "
+            "Default 'kling-v3' is the flagship (native 4K + native audio + multi-shot). "
+            "Cheaper options: 'kling-v2-6', 'kling-v1-6'. Full enum: kling-v1, kling-v1-5, kling-v1-6, "
+            "kling-v2-master, kling-v2-1, kling-v2-1-master (pro-only), kling-v2-5-turbo, kling-v2-6, kling-v3."
         ),
     )
     p.add_argument(
         "--kling-mode",
         type=str,
-        choices=["std", "pro"],
+        choices=["std", "pro", "4k"],
         default="pro",
         help=(
-            "Kling quality mode. 'pro' (default) = higher fidelity, ~1.8x cost (and where v2-6's "
-            "native audio lives); 'std' = cheaper. Pro-only models (kling-v2-1-master) coerce to pro."
+            "Kling quality mode. 'std' = 720p (cheapest), 'pro' (default) = 1080p, "
+            "'4k' = native 4K (Kling 3.0). Pro-only models (kling-v2-1-master) coerce to pro. "
+            "4k is significantly pricier — always --dry-run to see the estimate."
+        ),
+    )
+    p.add_argument(
+        "--kling-sound",
+        type=str,
+        choices=["on", "off"],
+        default="off",
+        help=(
+            "Kling native audio. 'on' makes audio-capable models (kling-v3) generate sound + "
+            "lip-sync inline — no separate TTS/lipsync pass. Use 'on' for talking-head cuts. "
+            "Default 'off'. Ignored by models without native audio."
+        ),
+    )
+    p.add_argument(
+        "--kling-base-url",
+        type=str,
+        default=None,
+        help=(
+            "Override the Kling API base URL (passed to the render layer as KLING_BASE_URL). "
+            "Default is the official https://api-singapore.klingai.com (non-China). Use this for "
+            "a region-specific host or the legacy api.klingai.com domain."
         ),
     )
     p.add_argument(
@@ -121,8 +143,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Kling cfg_scale, 0..1 (Kling default 0.5). Higher = stricter prompt adherence, less "
-            "model freedom. Left unset = Kling's own default. Clamped to [0,1]."
+            "Kling cfg_scale, 0..1 (Kling default 0.5). Higher = stricter prompt adherence. "
+            "NOTE: kling-v2.x and kling-v3 do NOT support cfg_scale — the render layer drops it "
+            "there. Only meaningful on kling-v1.x. Clamped to [0,1]."
         ),
     )
     p.add_argument(
@@ -210,14 +233,24 @@ def fail(msg: str, code: int = 1) -> None:
 # ─── Render adapter ─────────────────────────────────────────────────────────
 
 
-def call_render(ugcspy_bin: str, payload: dict) -> dict:
-    """Subprocess into `ugcspy render`, pass payload via stdin, return parsed result."""
+def call_render(ugcspy_bin: str, payload: dict, env_extra: dict[str, str] | None = None) -> dict:
+    """Subprocess into `ugcspy render`, pass payload via stdin, return parsed result.
+
+    `env_extra` is merged into the subprocess environment — used to pass
+    KLING_BASE_URL when --kling-base-url is set, so the render layer hits the
+    chosen Kling host."""
+    env = None
+    if env_extra:
+        import os
+
+        env = {**os.environ, **env_extra}
     proc = subprocess.run(
         [ugcspy_bin, "render"],
         input=json.dumps(payload),
         capture_output=True,
         text=True,
         check=False,
+        env=env,
     )
     if not proc.stdout:
         fail(f"render returned no stdout (stderr: {proc.stderr[:200]})", code=2)
@@ -339,17 +372,19 @@ DEFAULT_KLING_NEGATIVE_PROMPT = (
 # Per-second USD by model + mode. MUST stay in sync with KLING_COST_PER_SEC in
 # src/render/kling.ts — the TS adapter computes the authoritative cost; this
 # mirror only powers compose's pre-spend estimate. Chosen to not under-bill.
+# mode keys: std=720p, pro=1080p, 4k=native 4K (Kling 3.0).
 KLING_COST_PER_SEC: dict[str, dict[str, float]] = {
-    "kling-v1": {"std": 0.05, "pro": 0.09},
-    "kling-v1-5": {"std": 0.05, "pro": 0.09},
-    "kling-v1-6": {"std": 0.05, "pro": 0.09},
-    "kling-v2-master": {"std": 0.19, "pro": 0.19},
-    "kling-v2-1": {"std": 0.09, "pro": 0.16},
-    "kling-v2-1-master": {"std": 0.19, "pro": 0.19},
-    "kling-v2-5-turbo": {"std": 0.10, "pro": 0.18},
-    "kling-v2-6": {"std": 0.10, "pro": 0.18},
+    "kling-v1": {"std": 0.05, "pro": 0.09, "4k": 0.28},
+    "kling-v1-5": {"std": 0.05, "pro": 0.09, "4k": 0.28},
+    "kling-v1-6": {"std": 0.05, "pro": 0.09, "4k": 0.28},
+    "kling-v2-master": {"std": 0.19, "pro": 0.19, "4k": 0.42},
+    "kling-v2-1": {"std": 0.09, "pro": 0.16, "4k": 0.42},
+    "kling-v2-1-master": {"std": 0.19, "pro": 0.19, "4k": 0.42},
+    "kling-v2-5-turbo": {"std": 0.10, "pro": 0.18, "4k": 0.42},
+    "kling-v2-6": {"std": 0.10, "pro": 0.18, "4k": 0.42},
+    "kling-v3": {"std": 0.14, "pro": 0.21, "4k": 0.42},
 }
-_KLING_COST_FALLBACK = {"std": 0.10, "pro": 0.18}
+_KLING_COST_FALLBACK = {"std": 0.14, "pro": 0.21, "4k": 0.42}
 _KLING_PRO_ONLY = frozenset({"kling-v2-1-master"})
 
 
@@ -364,7 +399,7 @@ def kling_cost_per_sec(model: str, mode: str) -> float:
     feeds the cost preflight."""
     row = KLING_COST_PER_SEC.get(model, _KLING_COST_FALLBACK)
     eff = kling_effective_mode(model, mode)
-    return row["pro"] if eff == "pro" else row["std"]
+    return row.get(eff, row["pro"])
 
 
 def kling_billed_duration(requested_sec: float) -> int:
@@ -721,10 +756,15 @@ def args_signature(args: argparse.Namespace) -> str:
         # Kling model/mode/quality knobs change what every cut renders to, so
         # changing any of them must invalidate cached clips (otherwise a resume
         # mixes v1-6-std clips with v2-6-pro clips in one reproduction).
-        f"|kling_model={getattr(args, 'kling_model', 'kling-v2-6')}"
+        f"|kling_model={getattr(args, 'kling_model', 'kling-v3')}"
         f"|kling_mode={getattr(args, 'kling_mode', 'pro')}"
         f"|kling_neg={getattr(args, 'kling_negative_prompt', '') or ''}"
         f"|kling_cfg={getattr(args, 'kling_cfg_scale', None)}"
+        # sound:on bakes native audio into each cut — a sound-on clip and a
+        # silent clip aren't interchangeable. base_url changes which host
+        # rendered the cut; mixing hosts mid-run is also unsafe to resume.
+        f"|kling_sound={getattr(args, 'kling_sound', 'off')}"
+        f"|kling_base={getattr(args, 'kling_base_url', None) or ''}"
     )
 
 
@@ -1289,7 +1329,17 @@ def compose(args: argparse.Namespace) -> None:
     kling_mode = kling_effective_mode(kling_model, args.kling_mode)
     if kling_mode != args.kling_mode:
         print(f"[compose] note: {kling_model} is pro-only; using pro mode.")
-    print(f"[compose] kling model: {kling_model} ({kling_mode}) — ~${kling_cost_per_sec(kling_model, kling_mode):.3f}/sec")
+    sound_note = " + native audio (sound:on)" if args.kling_sound == "on" else ""
+    print(
+        f"[compose] kling model: {kling_model} ({kling_mode}){sound_note} — "
+        f"~${kling_cost_per_sec(kling_model, kling_mode):.3f}/sec"
+    )
+    # Env for the render subprocess — pass the Kling base URL override through
+    # so the TS render layer hits the chosen host.
+    render_env: dict[str, str] = {}
+    if args.kling_base_url:
+        render_env["KLING_BASE_URL"] = args.kling_base_url
+        print(f"[compose] kling base url override: {args.kling_base_url}")
 
     # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync.
     # Uses kling_billed_duration so the estimate matches what we'll actually
@@ -1421,6 +1471,10 @@ def compose(args: argparse.Namespace) -> None:
                 "model": kling_model,
                 "mode": kling_mode,
             }
+            # Native audio (v3): when on, the cut generates sound + lip-sync
+            # inline — no separate TTS/lipsync pass for this cut.
+            if args.kling_sound == "on":
+                clip_payload["sound"] = "on"
             # Quality knobs: negative_prompt steers away from artifacts;
             # cfg_scale tightens prompt adherence. Both optional.
             if args.kling_negative_prompt:
@@ -1430,7 +1484,7 @@ def compose(args: argparse.Namespace) -> None:
             if character_ref:
                 # image2video: lock the creator's face across cuts (#25).
                 clip_payload["first_frame"] = character_ref
-            result = call_render(args.ugcspy_bin, clip_payload)
+            result = call_render(args.ugcspy_bin, clip_payload, render_env)
             mp4 = Path(result["mp4_path"])
             if not mp4.exists():
                 fail(f"render returned mp4_path={mp4} but file doesn't exist", code=2)
@@ -1461,7 +1515,7 @@ def compose(args: argparse.Namespace) -> None:
                 print(f"[compose]   cut {i}: TTS cached (skipping OpenAI call)")
             else:
                 print(f"[compose]   rendering per-cut OpenAI TTS ({len(cut_transcript)} chars)...")
-                tts_result = call_render(args.ugcspy_bin, {"kind": "tts", "text": cut_transcript})
+                tts_result = call_render(args.ugcspy_bin, {"kind": "tts", "text": cut_transcript}, render_env)
                 tts_src = Path(tts_result["mp3_path"])
                 shutil.copy(tts_src, audio_path)
                 cost_this = float(tts_result["cost_usd"])
@@ -1527,7 +1581,7 @@ def compose(args: argparse.Namespace) -> None:
                         "video_id": cut_video_id,
                         "audio_path": str(audio_path),
                     }
-                lip_result = call_render(args.ugcspy_bin, lipsync_payload)
+                lip_result = call_render(args.ugcspy_bin, lipsync_payload, render_env)
                 lip_mp4 = Path(lip_result["mp4_path"])
                 if lip_mp4.exists():
                     # Overwrite the un-warped clip with the warped one

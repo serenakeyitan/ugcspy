@@ -11,7 +11,8 @@ User arguments: `$ARGUMENTS`
 
 This pipeline costs real money on real APIs. Tell the user upfront before doing anything:
 
-- **Per-clip video generation**: depends on the Kling model + mode (`--kling-model` / `--kling-mode`). Default is **`kling-v2-6` pro** — the best native-callable model (top fidelity + native audio) at ~**$0.18/sec** (≈ $0.90 for a 5s clip, $1.80 for 10s). Drop to `--kling-model kling-v1-6 --kling-mode std` for ~$0.05/sec (≈$0.25 / $0.50) when cost matters more than quality. (Note: Kling 3.0 is NOT available on the native API we use — it's reseller-only.)
+- **Per-clip video generation**: depends on the Kling model + mode (`--kling-model` / `--kling-mode`). Default is **`kling-v3` pro** (1080p) — the flagship model (native 4K, native audio, multi-shot) at ~**$0.21/sec** (≈ $1.05 for a 5s clip, $2.10 for 10s). `--kling-mode 4k` for native 4K at ~$0.42/sec (≈$2.10 / $4.20). Drop to `--kling-model kling-v1-6 --kling-mode std` for ~$0.05/sec (≈$0.25 / $0.50) when cost matters more than quality. Runs on the official API (`api-singapore.klingai.com`); override the host with `--kling-base-url`.
+- **Native audio (no separate TTS/lipsync)**: `--kling-sound on` makes kling-v3 generate sound + lip-sync inline per cut — for talking-head reproductions this can replace the separate TTS + `--lipsync` passes. Default off.
 - **TTS voiceover**: ~$0.01 per typical UGC ad script. Now rendered per-cut and aligned to each cut's spoken-text window (so audio events land at the right clips even if Kling clip lengths shift).
 - **Lip-sync warp (opt-in, talking-head only)**: ~$0.084/sec per cut warped, on top of text2video. Add `--lipsync` to the compose call for talking-head reproductions where the mouth needs to match the TTS (口型). Roughly doubles per-clip cost. Skip for greenscreen-kinetic and AI-montage formats — there's no face to sync.
 - **Quality knobs (free)**: a default `--kling-negative-prompt` (no blurry/warped-hands/text/watermark artifacts) is applied to every cut; override or disable with `''`. `--kling-cfg-scale 0..1` tightens prompt adherence. Neither costs extra.
@@ -84,7 +85,7 @@ cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budg
 cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budget 5 --kling-model kling-v1-6 --kling-mode std
 ```
 
-**Model & quality:** clips render with `--kling-model` (default `kling-v2-6`, the best native-callable model — top fidelity + native audio) in `--kling-mode` (default `pro`). A default `--kling-negative-prompt` steers away from artifacts (blurry, warped hands, text, watermark); `--kling-cfg-scale 0..1` tightens prompt adherence. Higher-quality model+mode costs more per second — see Step 0 and always `--dry-run` to confirm the estimate.
+**Model & quality:** clips render with `--kling-model` (default `kling-v3`, the flagship — native 4K + native audio + multi-shot) in `--kling-mode` (`std`=720p / `pro`=1080p default / `4k`=native 4K). `--kling-sound on` adds native audio (replaces TTS+lipsync for talking-head). A default `--kling-negative-prompt` steers away from artifacts (blurry, warped hands, text, watermark). `--kling-cfg-scale 0..1` tightens prompt adherence — but note kling-v2.x and kling-v3 don't support it (the render layer drops it; it only applies to kling-v1.x). Higher model+mode costs more per second — see Step 0 and always `--dry-run` to confirm.
 
 Pipeline (in order):
 1. For each cut, append the per-cut spoken text to the Kling prompt (L1 — gives diffusion a target for mouth movements, free improvement)

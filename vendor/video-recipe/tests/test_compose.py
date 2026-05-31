@@ -208,16 +208,20 @@ def test_kling_billed_duration_zero():
 
 
 def test_kling_cost_per_sec_known_models():
-    # v1-6 std is the cheap baseline; v2-6 pro is the default quality tier.
+    # v1-6 std is the cheap baseline; v3 pro is the default quality tier.
     assert compose.kling_cost_per_sec("kling-v1-6", "std") == 0.05
-    assert compose.kling_cost_per_sec("kling-v2-6", "pro") == 0.18
-    assert compose.kling_cost_per_sec("kling-v2-6", "std") == 0.10
+    assert compose.kling_cost_per_sec("kling-v3", "pro") == 0.21
+    assert compose.kling_cost_per_sec("kling-v3", "std") == 0.14
+    # 4k is the priciest tier.
+    assert compose.kling_cost_per_sec("kling-v3", "4k") == 0.42
+    assert compose.kling_cost_per_sec("kling-v2-6", "4k") == 0.42
 
 
 def test_kling_cost_per_sec_unknown_model_uses_fallback():
-    # An unrecognized model prices at the v2-6 tier so we never under-bill.
-    assert compose.kling_cost_per_sec("kling-vNEXT", "pro") == 0.18
-    assert compose.kling_cost_per_sec("kling-vNEXT", "std") == 0.10
+    # An unrecognized model prices at the v3 tier so we never under-bill.
+    assert compose.kling_cost_per_sec("kling-vNEXT", "pro") == 0.21
+    assert compose.kling_cost_per_sec("kling-vNEXT", "std") == 0.14
+    assert compose.kling_cost_per_sec("kling-vNEXT", "4k") == 0.42
 
 
 def test_kling_effective_mode_coerces_pro_only():
@@ -745,10 +749,12 @@ def _minimal_args():
         kling_voice_language="en",
         kling_voice_speed=1.0,
         character_ref=None,
-        kling_model="kling-v2-6",
+        kling_model="kling-v3",
         kling_mode="pro",
         kling_negative_prompt="",
         kling_cfg_scale=None,
+        kling_sound="off",
+        kling_base_url=None,
     )
 
 
@@ -883,8 +889,8 @@ def test_args_signature_changes_with_kling_model_mode_quality(_minimal_args):
     _minimal_args.kling_model = "kling-v1-6"
     assert compose.args_signature(_minimal_args) != base
 
-    _minimal_args.kling_model = "kling-v2-6"  # restore
-    _minimal_args.kling_mode = "std"
+    _minimal_args.kling_model = "kling-v3"  # restore to fixture default
+    _minimal_args.kling_mode = "4k"
     assert compose.args_signature(_minimal_args) != base
 
     _minimal_args.kling_mode = "pro"  # restore
@@ -893,6 +899,19 @@ def test_args_signature_changes_with_kling_model_mode_quality(_minimal_args):
 
     _minimal_args.kling_negative_prompt = ""  # restore
     _minimal_args.kling_cfg_scale = 0.7
+    assert compose.args_signature(_minimal_args) != base
+
+
+def test_args_signature_changes_with_sound_and_base_url(_minimal_args):
+    """sound:on bakes native audio into each cut; base_url changes the render
+    host — both must invalidate the resume cache."""
+    base = compose.args_signature(_minimal_args)
+
+    _minimal_args.kling_sound = "on"
+    assert compose.args_signature(_minimal_args) != base
+
+    _minimal_args.kling_sound = "off"  # restore
+    _minimal_args.kling_base_url = "https://api.klingai.com"
     assert compose.args_signature(_minimal_args) != base
 
 

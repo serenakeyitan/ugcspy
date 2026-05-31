@@ -34,39 +34,54 @@ import {
  * /v1/videos/text2video/<task_id> every 5s until task_status="succeed"
  * (typical 1-3 min for std mode).
  */
-// Native api.klingai.com model_name strings, VERIFIED against the native
-// schema (302.ai / klingapi.com mirrors, 2026). Use HYPHENS, not dots —
-// "kling-v2-6" is native; "kling-v2.6" is reseller-only and will fail here.
-// NOTE: "kling-v3" is NOT a native model — Kling 3.0 is reseller-only
-// (fal.ai/Vercel), reachable only via a different provider/auth. Don't add it
-// to this map; it would fail every native call.
-export const KLING_DEFAULT_MODEL = "kling-v2-6";
+// Native model_name strings, VERIFIED against the OFFICIAL kling.ai API docs
+// (apiReference/model/imageToVideo, read 2026). Use HYPHENS, not dots —
+// "kling-v3" is native; "kling-v3.0"/"kling-v2.6" are reseller formats and
+// fail here. The full official enum: kling-v1, kling-v1-5, kling-v1-6,
+// kling-v2-master, kling-v2-1, kling-v2-1-master, kling-v2-5-turbo,
+// kling-v2-6, kling-v3.
+export const KLING_DEFAULT_MODEL = "kling-v3";
 
-// Per-second USD by model + mode. Third-party-derived (Kling doesn't publish
-// per-second native USD); treat as estimates for the cost preflight — the
-// real Kling bill is authoritative. std/pro ≈ 1.8x; master is the ceiling.
-// Numbers chosen to NOT under-bill (the failure mode that burns users).
-const KLING_COST_PER_SEC: Record<string, { std: number; pro: number }> = {
-  "kling-v1": { std: 0.05, pro: 0.09 },
-  "kling-v1-5": { std: 0.05, pro: 0.09 },
-  "kling-v1-6": { std: 0.05, pro: 0.09 },
-  "kling-v2-master": { std: 0.19, pro: 0.19 }, // master is single-tier
-  "kling-v2-1": { std: 0.09, pro: 0.16 },
-  "kling-v2-1-master": { std: 0.19, pro: 0.19 }, // pro-only; price the ceiling
-  "kling-v2-5-turbo": { std: 0.10, pro: 0.18 },
-  "kling-v2-6": { std: 0.10, pro: 0.18 }, // pro adds native audio
+// Video generation mode. Per the official docs: std=720p, pro=1080p, 4k=4K.
+// 4k is Kling 3.0's native-4K mode (no upscaling loss).
+export type KlingMode = "std" | "pro" | "4k";
+
+// Per-second USD by model + mode. Kling doesn't publish per-second native USD,
+// so treat these as estimates for the cost preflight — the real Kling bill is
+// authoritative. Numbers chosen to NOT under-bill (the failure mode that burns
+// users). 4k > pro > std; v3/master are the ceiling tiers.
+const KLING_COST_PER_SEC: Record<string, { std: number; pro: number; "4k": number }> = {
+  "kling-v1": { std: 0.05, pro: 0.09, "4k": 0.28 },
+  "kling-v1-5": { std: 0.05, pro: 0.09, "4k": 0.28 },
+  "kling-v1-6": { std: 0.05, pro: 0.09, "4k": 0.28 },
+  "kling-v2-master": { std: 0.19, pro: 0.19, "4k": 0.42 },
+  "kling-v2-1": { std: 0.09, pro: 0.16, "4k": 0.42 },
+  "kling-v2-1-master": { std: 0.19, pro: 0.19, "4k": 0.42 },
+  "kling-v2-5-turbo": { std: 0.10, pro: 0.18, "4k": 0.42 },
+  "kling-v2-6": { std: 0.10, pro: 0.18, "4k": 0.42 }, // pro adds native audio
+  "kling-v3": { std: 0.14, pro: 0.21, "4k": 0.42 }, // 3.0: native audio + 4K
 };
 // Models that only run in pro mode — we coerce mode→pro and warn.
 const KLING_PRO_ONLY = new Set(["kling-v2-1-master"]);
-// Fallback pricing for an unknown model_name — priced at the v2-6 tier so an
+// Models that do NOT support cfg_scale (per official docs: kling-v2.x and v3).
+// For these we drop cfg_scale rather than send a field the API rejects.
+const KLING_NO_CFG_SCALE = new Set([
+  "kling-v2-master",
+  "kling-v2-1",
+  "kling-v2-1-master",
+  "kling-v2-5-turbo",
+  "kling-v2-6",
+  "kling-v3",
+]);
+// Fallback pricing for an unknown model_name — priced at the v3 tier so an
 // unrecognized (e.g. brand-new) model never under-bills the cost preflight.
-const KLING_COST_FALLBACK = { std: 0.10, pro: 0.18 };
+const KLING_COST_FALLBACK = { std: 0.14, pro: 0.21, "4k": 0.42 };
 // Cheapest baseline (v1-6 std), exposed as the interface-required static cost.
 const KLING_BASELINE_COST_PER_SEC = 0.05;
 
-function klingCostPerSec(model: string, mode: "std" | "pro"): number {
+function klingCostPerSec(model: string, mode: KlingMode): number {
   const row = KLING_COST_PER_SEC[model] ?? KLING_COST_FALLBACK;
-  return mode === "pro" ? row.pro : row.std;
+  return row[mode];
 }
 
 export class KlingProvider implements VideoGenProvider, LipSyncProvider {
@@ -80,16 +95,24 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
   readonly lipsync_cost_per_second_usd = 0.084;
 
   // Default model + mode for clip generation when the request doesn't specify.
-  // kling-v2-6 is the best native-callable model (2026): top fidelity + native
-  // audio. pro is its default mode (pro is where v2-6's audio lives).
+  // kling-v3 is the flagship (2026): native 4K, native audio, multi-shot.
+  // pro mode (1080p) is the default — solid quality without 4K's cost.
   readonly default_model = KLING_DEFAULT_MODEL;
-  readonly default_mode: "std" | "pro" = "pro";
+  readonly default_mode: KlingMode = "pro";
 
-  // Base URL is api.klingai.com (NOT api.kling.ai — that domain doesn't host
-  // the dev API). Verified empirically.
-  private readonly base = "https://api.klingai.com";
+  // Official API domain. Per the kling.ai docs, the endpoint moved from
+  // api.klingai.com to api-singapore.klingai.com for users outside China.
+  // Overridable via the constructor (env-driven from render.ts) so the old
+  // domain or a region-specific host can still be used.
+  private readonly base: string;
 
-  constructor(private accessKey: string, private secretKey: string) {}
+  constructor(
+    private accessKey: string,
+    private secretKey: string,
+    baseUrl?: string,
+  ) {
+    this.base = baseUrl && baseUrl.length > 0 ? baseUrl : "https://api-singapore.klingai.com";
+  }
 
   async generateClip(req: ClipGenRequest): Promise<ClipGenResult> {
     this.assertConfigured();
@@ -128,16 +151,27 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     // Resolve model + mode (request overrides → provider defaults). Coerce
     // pro-only models to pro and warn rather than failing on a std request.
     const model = req.model && req.model.length > 0 ? req.model : this.default_model;
-    let mode: "std" | "pro" = req.mode ?? this.default_mode;
+    let mode: KlingMode = req.mode ?? this.default_mode;
     if (KLING_PRO_ONLY.has(model) && mode !== "pro") {
-      console.warn(`[kling] model ${model} is pro-only; coercing mode std → pro.`);
+      console.warn(`[kling] model ${model} is pro-only; coercing mode ${mode} → pro.`);
       mode = "pro";
     }
-    // cfg_scale: Kling range is 0..1 (default 0.5). Clamp defensively.
-    const cfgScale =
+    // cfg_scale: Kling range is 0..1 (default 0.5). Per official docs, v2.x and
+    // v3 do NOT support it — sending it on those models is rejected, so drop it
+    // (with a warning) rather than fail the call.
+    let cfgScale =
       typeof req.cfg_scale === "number"
         ? Math.max(0, Math.min(1, req.cfg_scale))
         : undefined;
+    if (cfgScale !== undefined && KLING_NO_CFG_SCALE.has(model)) {
+      console.warn(`[kling] model ${model} doesn't support cfg_scale; dropping it.`);
+      cfgScale = undefined;
+    }
+
+    // sound: Kling 3.0 (and other audio-capable models) generate native audio
+    // inline when sound="on" — no separate lip-sync/TTS pass needed. Default
+    // off; the caller turns it on for talking-head cuts.
+    const sound: "on" | "off" = req.sound === "on" ? "on" : "off";
 
     // Branch: image-to-video when a first_frame reference image is given,
     // else text-to-video. image2video locks character identity across cuts
@@ -155,6 +189,11 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       duration: String(duration),
       mode,
     };
+    // Native audio toggle (v3 etc.). Only send "on" — omit when off so older
+    // models that don't know the field aren't handed an unexpected value.
+    if (sound === "on") {
+      body.sound = "on";
+    }
     // Shared quality knobs (both endpoints accept these).
     if (req.negative_prompt && req.negative_prompt.length > 0) {
       body.negative_prompt = req.negative_prompt;

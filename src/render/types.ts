@@ -21,16 +21,22 @@ export interface ClipGenRequest {
   // ignores this.
   aspect_ratio?: "9:16" | "16:9" | "1:1";
   // Provider model id. Defaults to the provider's best current model when
-  // unset. For Kling, the native model_name string (e.g. "kling-v2-6").
+  // unset. For Kling, the native model_name string (e.g. "kling-v3").
   model?: string;
-  // Quality mode. "pro" = higher fidelity, ~1.8x cost; "std" = cheaper.
-  mode?: "std" | "pro";
+  // Quality mode. For Kling: "std" = 720p (cheapest), "pro" = 1080p,
+  // "4k" = native 4K (Kling 3.0). Provider default when unset.
+  mode?: "std" | "pro" | "4k";
   // Things to keep OUT of the generation (artifacts, text, watermarks).
   // Providers that support it pass this through; others ignore it.
   negative_prompt?: string;
   // Prompt-adherence strength, 0..1 (Kling's cfg_scale). Higher = stricter
   // adherence to the prompt, less model freedom. Provider default when unset.
+  // Note: Kling v2.x and v3 don't support this — the adapter drops it there.
   cfg_scale?: number;
+  // Native audio generation. "on" makes audio-capable models (Kling 3.0)
+  // produce sound + lip-sync inline, removing the need for a separate
+  // lip-sync/TTS pass. Default off. Ignored by models that lack native audio.
+  sound?: "on" | "off";
 }
 
 export interface ClipGenResult {

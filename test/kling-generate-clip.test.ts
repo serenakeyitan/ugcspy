@@ -176,15 +176,15 @@ describe("KlingProvider.generateClip image2video (character consistency)", () =>
     expect(body.prompt).toBe("she gestures to camera");
     // image2video infers ratio from the reference; no aspect_ratio sent.
     expect(body.aspect_ratio).toBeUndefined();
-    // Default model + mode: best native-callable (v2-6) in pro.
-    expect(body.model_name).toBe("kling-v2-6");
+    // Default model + mode: flagship kling-v3 in pro.
+    expect(body.model_name).toBe("kling-v3");
     expect(body.mode).toBe("pro");
 
     // Poll hits the image2video status endpoint, not text2video.
     expect(captured.some((r) => r.url.includes("/v1/videos/image2video/img-task-1"))).toBe(true);
     expect(result.external_id).toBe("img-task-1");
-    // 5s * v2-6 pro ($0.18/s) = $0.90.
-    expect(result.cost_usd).toBeCloseTo(0.9, 5);
+    // 5s * v3 pro ($0.21/s) = $1.05.
+    expect(result.cost_usd).toBeCloseTo(1.05, 5);
   }, 15000);
 
   test("passes an http(s) first_frame URL through unchanged", async () => {
@@ -274,14 +274,14 @@ describe("KlingProvider.generateClip quality params", () => {
     return JSON.parse(submit!.body) as Record<string, unknown>;
   }
 
-  test("text2video defaults to kling-v2-6 pro", async () => {
+  test("text2video defaults to kling-v3 pro", async () => {
     mockOnce();
     const result = await new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5 });
     const body = submitBody();
-    expect(body.model_name).toBe("kling-v2-6");
+    expect(body.model_name).toBe("kling-v3");
     expect(body.mode).toBe("pro");
-    // 5s * v2-6 pro ($0.18/s) = $0.90.
-    expect(result.cost_usd).toBeCloseTo(0.9, 5);
+    // 5s * v3 pro ($0.21/s) = $1.05.
+    expect(result.cost_usd).toBeCloseTo(1.05, 5);
   }, 15000);
 
   test("honors an explicit model + std mode and prices it accordingly", async () => {
@@ -299,6 +299,29 @@ describe("KlingProvider.generateClip quality params", () => {
     expect(result.cost_usd).toBeCloseTo(0.25, 5);
   }, 15000);
 
+  test("supports 4k mode and prices it at the 4k tier", async () => {
+    mockOnce();
+    const result = await new KlingProvider("a", "s").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+      mode: "4k",
+    });
+    expect(submitBody().mode).toBe("4k");
+    // 5s * v3 4k ($0.42/s) = $2.10.
+    expect(result.cost_usd).toBeCloseTo(2.1, 5);
+  }, 15000);
+
+  test("sends sound:on for native audio when requested, omits it otherwise", async () => {
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5, sound: "on" });
+    expect(submitBody().sound).toBe("on");
+
+    captured = []; // reset so submitBody() finds the SECOND call's POST
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5, sound: "off" });
+    expect(submitBody().sound).toBeUndefined();
+  }, 15000);
+
   test("coerces a pro-only model (v2-1-master) to pro even when std is asked", async () => {
     mockOnce();
     await new KlingProvider("a", "s").generateClip({
@@ -310,17 +333,48 @@ describe("KlingProvider.generateClip quality params", () => {
     expect(submitBody().mode).toBe("pro");
   }, 15000);
 
-  test("passes negative_prompt and clamped cfg_scale into the body", async () => {
+  test("passes negative_prompt and clamped cfg_scale on a cfg-capable model", async () => {
     mockOnce();
     await new KlingProvider("a", "s").generateClip({
       prompt: "p",
       duration_sec: 5,
+      model: "kling-v1-6", // v1.x supports cfg_scale
       negative_prompt: "blurry, warped hands, watermark",
       cfg_scale: 1.7, // out of range → clamped to 1
     });
     const body = submitBody();
     expect(body.negative_prompt).toBe("blurry, warped hands, watermark");
     expect(body.cfg_scale).toBe(1);
+  }, 15000);
+
+  test("drops cfg_scale on models that don't support it (v3 / v2.x)", async () => {
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+      model: "kling-v3",
+      cfg_scale: 0.7,
+    });
+    expect(submitBody().cfg_scale).toBeUndefined();
+  }, 15000);
+
+  test("defaults to the official Singapore domain; honors a base-URL override", async () => {
+    // Check the SIGNED API calls (submit + poll) — the download hits the CDN
+    // URL, not the API host, so we filter to /v1/videos/ requests.
+    const apiCalls = (host: string) =>
+      captured.filter((r) => r.url.includes("/v1/videos/")).every((r) => r.url.startsWith(host));
+
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5 });
+    expect(apiCalls("https://api-singapore.klingai.com/")).toBe(true);
+
+    captured = [];
+    mockOnce();
+    await new KlingProvider("a", "s", "https://api.klingai.com").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+    });
+    expect(apiCalls("https://api.klingai.com/")).toBe(true);
   }, 15000);
 
   test("omits negative_prompt and cfg_scale when not provided", async () => {
