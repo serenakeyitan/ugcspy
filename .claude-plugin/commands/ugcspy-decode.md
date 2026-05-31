@@ -52,14 +52,18 @@ Read decode.json and present it to the user as a focused breakdown. Don't dump t
 - First mention at: <first_mention_at_sec>s (<first_mention_pct_of_duration * 100>% through the video)
 - Placement: <brand_pitch.placement>
 
-### Spoken narrative (Whisper transcript)
+### Spoken narrative (transcript)
 If `audio_transcript` is present in decode.json, show the spoken transcript FIRST — this is what the creator actually says to camera, the primary content for most UGC formats. Format as a clean italic blockquote of `audio_transcript.full_text`:
 
 > <audio_transcript.full_text — wrap at 80 chars, italic blockquote>
 
-Note the language (`audio_transcript.language`) and word count (`len(audio_transcript.words)`) underneath in dim text.
+Note the language (`audio_transcript.language`), word count (`len(audio_transcript.words)`), and **transcript source** (`audio_transcript.source`) underneath in dim text. Source is one of:
+- `embedded_subs` — the platform's own caption track (creator- or auto-generated). Preferred: near-verbatim and not fighting a music bed.
+- `whisper` — our ASR fallback, used when the platform served no caption track. Slightly noisier, especially on accents or music.
 
-If `audio_transcript` is missing (older decode.json, or `--no-audio` was passed), skip this block entirely and tell the user "audio transcript not captured — re-run decode without `--no-audio` to get it" instead.
+**Non-speech audio:** check `audio_transcript.has_speech` / `audio_transcript.audio_kind`. If `audio_kind` is `"music"` (no spoken words — the video rides a background track only), say so explicitly and DON'T present an empty spoken block as if the creator said nothing meaningful — tell the user "this video has no spoken narrative — it's music/visual only, so the on-screen overlay text below is the primary message." For `"mixed"`, note that some segments are music/non-speech and only the spoken segments are in `full_text`.
+
+If `audio_transcript` is missing entirely (older decode.json, or `--no-audio` was passed), skip this block and tell the user "audio transcript not captured — re-run decode without `--no-audio` to get it (it prefers the platform caption track, falling back to Whisper)."
 
 ### On-screen overlay text (reconstructed from OCR)
 This is what the creator BURNS INTO the video as visible text — usually a summary or supporting cue, not the full read. Quote the cleaned `full_narrative` (the HTML renderer already scrubs OCR noise; in chat you can quote the cleaned version directly).
@@ -103,6 +107,6 @@ After the summary, suggest one of these depending on what the user seems to want
 ## Honest scope
 
 - The OCR-driven overlay reconstruction is approximate. Heavy kinetic typography loses 20-40% of characters per frame; the chunking algorithm partially compensates but the result is more like "what the overlay roughly says" than verbatim.
-- The Whisper-driven spoken transcript is generally accurate for clear English speech but degrades on heavy background music, multiple speakers, or strong accents. Word-timestamps are accurate to ~200ms. Defaults to whisper-base; bump with `--whisper-model small` (or higher) on tricky audio.
+- The spoken transcript prefers the platform's own caption track (`source: embedded_subs`) when available — near-verbatim and music-proof. When the platform serves no captions, it falls back to Whisper (`source: whisper`), which is generally accurate for clear English speech but degrades on heavy background music, multiple speakers, or strong accents. Whisper word-timestamps are accurate to ~200ms; embedded-caption timing is cue-granular (coarser, but the text is more accurate). Whisper defaults to whisper-base; bump with `--whisper-model small` (or higher) on tricky audio. Music-only / non-speech audio is detected and reported via `has_speech` / `audio_kind` rather than filled with hallucinated lyrics.
 - Format classification is heuristic with ~75% accuracy on common UGC patterns. The `signals[]` array is more trustworthy than the `kind` label for ambiguous videos.
 - Brand-pitch detection prefers caption-anchored signals (@mentions, campaign-coded hashtags like #brand_NNNN) over generic words to avoid false positives like picking "purple" over "befreed". (Brand detection currently runs against overlay text only — extending it to spoken transcript is a future improvement.)
