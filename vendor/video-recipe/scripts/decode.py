@@ -257,10 +257,13 @@ def ocr_all_frames(frames_dir: Path, ocr_dir: Path) -> dict[str, str]:
     for jpg in sorted(frames_dir.glob("*.jpg")):
         base = jpg.stem
         out_txt = ocr_dir / base
+        # NOTE: capture as bytes (no text=True). Some tesseract builds emit
+        # non-UTF-8 bytes on stderr, and text=True would crash the whole
+        # decode on UnicodeDecodeError. We never read stdout/stderr here —
+        # the OCR result is read from the .txt output file below.
         subprocess.run(
             ["tesseract", str(jpg), str(out_txt), "-l", "eng", "--psm", "6", "quiet"],
             capture_output=True,
-            text=True,
             check=False,
         )
         text_path = out_txt.with_suffix(".txt")
