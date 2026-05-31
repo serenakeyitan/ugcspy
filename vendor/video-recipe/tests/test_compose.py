@@ -18,6 +18,7 @@ No Kling, no OpenAI, no real Whisper, no real money spent.
 from __future__ import annotations
 
 import subprocess
+import sys
 
 import pytest
 
@@ -1337,6 +1338,28 @@ def test_disclosure_filter_styling_smaller_than_caption_burnin():
     out = compose.build_disclosure_filter("AI", "bottom-right")
     assert "fontsize=28" in out  # smaller than caption's 42
     assert "boxborderw=8" in out  # smaller than caption's 12
+
+
+def test_disclosure_is_opt_in_by_default(monkeypatch):
+    """The AI-disclosure watermark is OFF by default — the user must pass
+    --disclosure to enable it. This locks the behavior the project owner
+    asked for (no watermark unless explicitly requested) and guards against
+    a regression back to the PR #23 default-on behavior."""
+    monkeypatch.setattr(sys, "argv", ["compose", "some_recipe_dir"])
+    args = compose.parse_args()
+    assert args.disclosure is False
+    # The legacy opt-out flag must be gone — passing it should error out.
+    assert not hasattr(args, "no_disclosure")
+
+
+def test_disclosure_flag_enables_watermark(monkeypatch):
+    """Passing --disclosure flips the watermark on; the text/position
+    options still default sensibly."""
+    monkeypatch.setattr(sys, "argv", ["compose", "some_recipe_dir", "--disclosure"])
+    args = compose.parse_args()
+    assert args.disclosure is True
+    assert args.disclosure_text == "AI-generated"
+    assert args.disclosure_position == "bottom-right"
 
 
 @pytest.mark.skipif(not compose.drawtext_available(), reason="ffmpeg lacks libfreetype")

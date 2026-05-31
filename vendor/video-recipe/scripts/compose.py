@@ -83,22 +83,25 @@ def parse_args() -> argparse.Namespace:
         help="Discard any previous compose_state.json and re-run from scratch. By default, compose resumes: cuts whose API calls succeeded previously are skipped and their cached outputs reused (so a Kling 502 mid-pipeline doesn't force you to re-pay for completed cuts). Use this when you want a clean run.",
     )
     p.add_argument(
-        "--no-disclosure",
+        "--disclosure",
         action="store_true",
-        help="Skip the AI-generated disclosure watermark on the final reproduction. Default behavior burns 'AI-generated' bottom-right of the output, required by FTC + EU AI Act + TikTok ToS for AIGC content. Using this flag prints a loud warning — most platforms now enforce labeling of synthetic content.",
+        help="Burn an AI-generated disclosure watermark onto the final reproduction. OFF by default. "
+        "Turn this on to label synthetic content — FTC, the EU AI Act, and TikTok/Instagram/YouTube ToS "
+        "require AIGC labeling, so enable it before posting AI output publicly. When off, compose prints a "
+        "one-line reminder that the output is unlabeled.",
     )
     p.add_argument(
         "--disclosure-text",
         type=str,
         default="AI-generated",
-        help="Override the default disclosure text. Keep it short — long text dominates the frame. Default: 'AI-generated'.",
+        help="Disclosure watermark text (only used when --disclosure is set). Keep it short — long text dominates the frame. Default: 'AI-generated'.",
     )
     p.add_argument(
         "--disclosure-position",
         type=str,
         choices=["bottom-right", "bottom-left", "top-right", "top-left"],
         default="bottom-right",
-        help="Where to place the disclosure watermark. Default: bottom-right (matches platform conventions for AI-labels).",
+        help="Where to place the disclosure watermark (only used when --disclosure is set). Default: bottom-right (matches platform conventions for AI-labels).",
     )
     p.add_argument(
         "--tts",
@@ -577,7 +580,7 @@ def args_signature(args: argparse.Namespace) -> str:
       - --dry-run: never reaches the render layer
       - --no-resume: this IS the cache control; doesn't go in the signature
       - --ugcspy-bin: tool path, doesn't affect outputs
-      - --disclosure-* + --no-disclosure: applied at the FINAL watermark step,
+      - --disclosure + --disclosure-*: applied at the FINAL watermark step,
         not per-cut. Changing these on resume re-writes only the final mp4.
         (Strictly we could include them, but the cost is one ffmpeg pass,
         not a re-render. Keep them out to allow cheap watermark iteration.)
@@ -1001,7 +1004,8 @@ def build_drawtext_filter(burnin_text: str, clip_dur: float) -> str:
 # FTC + EU AI Act + TikTok ToS all require labeling of AI-generated content.
 # Unlabeled output of this tool is a compliance gap — especially for lipsync
 # warps where the synthetic mouth is on a face resembling a real creator.
-# We burn a disclosure watermark on the final reproduction by default.
+# The watermark is OFF by default (opt in via --disclosure); when it's absent
+# compose prints a reminder so the user labels the content before posting.
 #
 # Position uses corner-anchored placement to match how platforms typically
 # render their own AI-label badges (TikTok's "AI-Generated" badge sits
@@ -1544,19 +1548,22 @@ def compose(args: argparse.Namespace) -> None:
     stitched = out_dir / "stitched.mp4"
     run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(stitched)])
 
-    # Apply AI-disclosure watermark unless explicitly opted out. Required
-    # by FTC + EU AI Act + TikTok ToS for AI-generated content.
+    # Apply AI-disclosure watermark only when the user opts in via --disclosure.
+    # OFF by default. Labeling synthetic content is still required by FTC + the
+    # EU AI Act + TikTok/Instagram/YouTube ToS, so we print a one-line reminder
+    # when the watermark is absent — the user is responsible for labeling before
+    # posting publicly.
     disclosure_status: str
-    if args.no_disclosure:
+    if not args.disclosure:
         print(
-            "[compose] ⚠ WARNING: --no-disclosure was set. The reproduction will NOT carry an AI-generated label. "
-            "Most platforms (TikTok, Instagram, YouTube) require AIGC labeling under their ToS, "
-            "and FTC + EU AI Act require disclosure of synthetic content. "
-            "Use this flag only when you have a specific reason (e.g. you're applying a different label downstream).",
+            "[compose] note: no AI-disclosure watermark (default). The reproduction is UNLABELED. "
+            "Most platforms (TikTok, Instagram, YouTube) require AIGC labeling under their ToS, and "
+            "FTC + the EU AI Act require disclosure of synthetic content — add a label before posting "
+            "publicly, or re-run with --disclosure to burn one in.",
             file=sys.stderr,
         )
         shutil.move(str(stitched), str(final))
-        disclosure_status = "skipped (--no-disclosure)"
+        disclosure_status = "skipped (default; pass --disclosure to enable)"
     elif not drawtext_available():
         # ffmpeg without libfreetype can't render the watermark either. We
         # already warned earlier about caption burn-in being skipped; surface
