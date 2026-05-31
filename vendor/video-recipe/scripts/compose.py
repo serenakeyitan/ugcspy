@@ -264,6 +264,17 @@ def fail(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
+def check_running_budget(total_cost: float, budget: float, stage_label: str) -> None:
+    """Abort (exit 4) when the accumulated spend crosses the budget cap mid-run.
+    Called after each paid stage; `stage_label` names where we stopped so the
+    user knows how far the run got before hitting the cap."""
+    if total_cost > budget:
+        fail(
+            f"running cost ${total_cost:.2f} exceeded budget ${budget:.2f} after {stage_label}",
+            code=4,
+        )
+
+
 # ─── Render adapter ─────────────────────────────────────────────────────────
 
 
@@ -420,6 +431,10 @@ KLING_COST_PER_SEC: dict[str, dict[str, float]] = {
 }
 _KLING_COST_FALLBACK = {"std": 0.14, "pro": 0.21, "4k": 0.42}
 _KLING_PRO_ONLY = frozenset({"kling-v2-1-master"})
+# Kling lip-sync std rate (USD/sec), mirrors lipsync_cost_per_second_usd in
+# src/render/kling.ts. Named so it's greppable against the TS side and not a
+# bare magic number in the cost preflight.
+KLING_LIPSYNC_COST_PER_SEC = 0.084
 
 
 def kling_effective_mode(model: str, mode: str) -> str:
@@ -448,34 +463,45 @@ def kling_billed_duration(requested_sec: float) -> int:
 # ─── Character reference (image2video, issue #25) ──────────────────────────
 
 
-def resolve_character_ref(raw: str | None, recipe_dir: Path) -> str | None:
-    """Resolve --character-ref into a value to pass as the render
-    `first_frame`. Returns None when unset.
-
-    - http(s) URL → returned unchanged (Kling fetches it server-side; the
-      TS adapter passes URLs straight through).
-    - absolute or relative file path → resolved (relative paths resolve
-      against the recipe dir, where decode writes reference.jpg) and
+def _resolve_ref_token(token: str, recipe_dir: Path, *, flag: str, hint: str) -> str:
+    """Resolve a single image reference into a usable value:
+    - http(s) URL → returned unchanged (Kling fetches it server-side).
+    - file path → resolved relative to the recipe dir if not absolute, then
       validated to exist. Returns the absolute path string.
 
-    Fails loudly with code 1 on a missing local file — better than
-    discovering a typo'd path after paying for the first cut."""
-    if not raw:
-        return None
-    if raw.startswith(("http://", "https://")):
-        return raw
-    p = Path(raw)
+    Fails loudly with code 1 on a missing local file — better than discovering
+    a typo'd path after paying for the first cut. `flag`/`hint` flavor the error
+    message for the specific CLI flag the token came from."""
+    if token.startswith(("http://", "https://")):
+        return token
+    p = Path(token)
     if not p.is_absolute():
-        p = recipe_dir / raw
+        p = recipe_dir / token
     if not p.exists():
         fail(
-            f"--character-ref points at {p}, which doesn't exist. Pass an http(s) URL, an "
-            f"absolute path, or a path relative to the recipe dir. /ugcspy-decode writes the "
-            f"character video's reference frame to <recipe_dir>/reference.jpg — decode the "
-            f"character video first (or drop --character-ref to use plain text2video).",
+            f"{flag} points at {p}, which doesn't exist. Pass an http(s) URL, an absolute "
+            f"path, or a path relative to the recipe dir. {hint}",
             code=1,
         )
     return str(p)
+
+
+def resolve_character_ref(raw: str | None, recipe_dir: Path) -> str | None:
+    """Resolve --character-ref into a value to pass as the render
+    `first_frame` (or None when unset). See `_resolve_ref_token` for the
+    URL-passthrough / path-resolve / existence rules."""
+    if not raw:
+        return None
+    return _resolve_ref_token(
+        raw,
+        recipe_dir,
+        flag="--character-ref",
+        hint=(
+            "/ugcspy-decode writes the character video's reference frame to "
+            "<recipe_dir>/reference.jpg — decode the character video first (or drop "
+            "--character-ref to use plain text2video)."
+        ),
+    )
 
 
 # ─── Per-cut background imagery (Pinterest/web composite) ──────────────────
@@ -576,7 +602,6 @@ def resolve_background_refs(raw: str | None, recipe_dir: Path) -> list[str]:
     missing local file/dir — better than discovering it after paying."""
     if not raw:
         return []
-    candidates: list[str] = []
     # Directory?
     dir_path = Path(raw)
     if not dir_path.is_absolute():
@@ -586,24 +611,13 @@ def resolve_background_refs(raw: str | None, recipe_dir: Path) -> list[str]:
         if not imgs:
             fail(f"--background-ref dir {dir_path} has no .jpg/.jpeg/.png images.", code=1)
         return [str(p) for p in imgs[:4]]  # frontal + up to 3
-    # Comma list (or single).
-    for token in (s.strip() for s in raw.split(",")):
-        if not token:
-            continue
-        if token.startswith(("http://", "https://")):
-            candidates.append(token)
-            continue
-        p = Path(token)
-        if not p.is_absolute():
-            p = recipe_dir / token
-        if not p.exists():
-            fail(
-                f"--background-ref points at {p}, which doesn't exist. Pass an http(s) URL, an "
-                f"image path, a comma-list, or a directory of images (relative paths resolve "
-                f"against the recipe dir).",
-                code=1,
-            )
-        candidates.append(str(p))
+    # Comma list (or single) — each token shares the character-ref resolution.
+    hint = "Pass a comma-list or a directory of images for multiple background references."
+    candidates = [
+        _resolve_ref_token(token.strip(), recipe_dir, flag="--background-ref", hint=hint)
+        for token in raw.split(",")
+        if token.strip()
+    ]
     return candidates[:4]  # frontal + up to 3 refer images
 
 
@@ -1424,11 +1438,12 @@ def drawtext_available() -> bool:
     return _DRAWTEXT_AVAILABLE
 
 
-def build_drawtext_filter(burnin_text: str, clip_dur: float) -> str:
+def build_drawtext_filter(burnin_text: str) -> str:
     """Build a drawtext filter expression for static-overlay burn-in.
 
     Returns an ffmpeg filtergraph string ready to drop into -vf or
-    -filter_complex."""
+    -filter_complex. (Static overlay shows for the whole clip, so no duration
+    arg is needed.)"""
     escaped = escape_drawtext(burnin_text)
     # Position: top-center, with padding from the top. Mobile UGC overlays
     # typically sit in the upper third of the frame to avoid the captions
@@ -1634,7 +1649,7 @@ def compose(args: argparse.Namespace) -> None:
         lipsync_total = 0.0
         for cut in cuts_with_audio:
             billed = kling_billed_duration(float(cut.get("duration_sec") or 0))
-            lipsync_total += 0.084 * billed
+            lipsync_total += KLING_LIPSYNC_COST_PER_SEC * billed
         cost_estimate += lipsync_total
         if lipsync_total > 0:
             label = "lipsync+kling-tts" if tts_provider == "kling" else "lipsync"
@@ -1782,11 +1797,7 @@ def compose(args: argparse.Namespace) -> None:
             # still saves the work we just paid for. The next run can
             # resume this cut even though we exited 4.
             record_stage(state, args.recipe_dir, cut_idx, "text2video", cost_this, cut_video_id)
-            if total_cost > args.budget:
-                fail(
-                    f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i}",
-                    code=4,
-                )
+            check_running_budget(total_cost, args.budget, f"cut {i}")
 
         # Background composite (#: per-cut Pinterest/web backdrop). Runs on
         # the finalized text2video clip BEFORE TTS/lipsync so the lipsync
@@ -1823,11 +1834,7 @@ def compose(args: argparse.Namespace) -> None:
                 cost_this = float(tts_result["cost_usd"])
                 total_cost += cost_this
                 record_stage(state, args.recipe_dir, cut_idx, "tts", cost_this)
-                if total_cost > args.budget:
-                    fail(
-                        f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} TTS",
-                        code=4,
-                    )
+                check_running_budget(total_cost, args.budget, f"cut {i} TTS")
         cut_audio_paths.append(audio_path)
 
         # L3: optional lipsync warp — replaces dst with a face-synced version.
@@ -1963,11 +1970,7 @@ def compose(args: argparse.Namespace) -> None:
                 print(
                     f"[compose]   lipsync failed for cut {i} — keeping un-warped clip + TTS fallback (paid $0 for warp)"
                 )
-            if total_cost > args.budget:
-                fail(
-                    f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i} lipsync",
-                    code=4,
-                )
+            check_running_budget(total_cost, args.budget, f"cut {i} lipsync")
         lipsync_statuses.append((i, lipsync_status))
         clip_paths.append(dst)
 
@@ -2030,7 +2033,7 @@ def compose(args: argparse.Namespace) -> None:
             burnin_text, presentation = resolve_cut_burnin(cuts[i], recipe)
             if burnin_text:
                 wrapped = wrap_burnin_text(burnin_text)
-                burnin_filter = build_drawtext_filter(wrapped, clip_dur)
+                burnin_filter = build_drawtext_filter(wrapped)
                 burnin_summary.append(
                     (cuts_idx, f"burned {len(burnin_text)} chars ({presentation})")
                 )

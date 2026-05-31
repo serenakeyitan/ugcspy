@@ -102,6 +102,11 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
   readonly default_model = KLING_DEFAULT_MODEL;
   readonly default_mode: KlingMode = "pro";
 
+  // Shared async-job lifecycle timing — Kling jobs submit immediately then
+  // poll. 5s between polls (matches Kling's rate-limit guidance), 8min ceiling.
+  private static readonly POLL_INTERVAL_MS = 5000;
+  private static readonly POLL_TIMEOUT_MS = 8 * 60 * 1000;
+
   // Official API domain. Per the kling.ai docs, the endpoint moved from
   // api.klingai.com to api-singapore.klingai.com for users outside China.
   // Overridable via the constructor (env-driven from render.ts) so the old
@@ -236,37 +241,14 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       // text2video uses aspect_ratio (image2video derives it from the image).
       body.aspect_ratio = aspect;
     }
-    const submitRes = await this.fetchSigned(endpoint, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    if (!submitRes.ok) {
-      throw new RenderError(
-        `Kling submit failed (${useImage ? "image2video" : "text2video"}): ${submitRes.status} ${await submitRes.text()}`,
-        this.name,
-      );
-    }
-    const submitJson = (await submitRes.json()) as {
-      code?: number;
-      message?: string;
-      data?: { task_id?: string };
-    };
-    if (submitJson.code !== 0) {
-      throw new RenderError(
-        `Kling submit returned code=${submitJson.code} message="${submitJson.message}"`,
-        this.name,
-      );
-    }
-    const taskId = submitJson.data?.task_id;
-    if (!taskId) throw new RenderError("Kling response missing data.task_id", this.name);
+    const label = useImage ? "image2video" : "text2video";
+    const taskId = await this.submitTask(endpoint, body, label);
 
-    // 2. Poll until done — same status endpoint shape for both kinds.
+    // 2. Poll until done.
     const startedAt = Date.now();
-    const POLL_INTERVAL_MS = 5000;
-    const TIMEOUT_MS = 8 * 60 * 1000;
     let videoUrl: string | null = null;
-    while (Date.now() - startedAt < TIMEOUT_MS) {
-      await sleep(POLL_INTERVAL_MS);
+    while (Date.now() - startedAt < KlingProvider.POLL_TIMEOUT_MS) {
+      await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`${endpoint}/${taskId}`);
       if (!statusRes.ok) continue; // transient — retry on next tick
       const statusJson = (await statusRes.json()) as {
@@ -293,16 +275,8 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       throw new RenderError(`Kling job ${taskId} timed out after 8min`, this.name);
     }
 
-    // 3. Download to local temp
-    const outDir = join(tmpdir(), "ugcspy-renders");
-    await mkdir(outDir, { recursive: true });
-    const outPath = join(outDir, `kling-${taskId}.mp4`);
-    const dl = await fetch(videoUrl);
-    if (!dl.ok) {
-      throw new RenderError(`Kling download failed: ${dl.status}`, this.name);
-    }
-    const buf = Buffer.from(await dl.arrayBuffer());
-    writeFileSync(outPath, buf);
+    // 3. Download to local temp.
+    const outPath = await this.downloadToTemp(videoUrl, `kling-${taskId}`, label);
 
     return {
       mp4_path: outPath,
@@ -346,37 +320,13 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     }
 
     // 1. Submit
-    const submitRes = await this.fetchSigned("/v1/general/advanced-custom-elements", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    if (!submitRes.ok) {
-      throw new RenderError(
-        `Kling createElement submit failed: ${submitRes.status} ${await submitRes.text()}`,
-        this.name,
-      );
-    }
-    const submitJson = (await submitRes.json()) as {
-      code?: number;
-      message?: string;
-      data?: { task_id?: string };
-    };
-    if (submitJson.code !== 0) {
-      throw new RenderError(
-        `Kling createElement returned code=${submitJson.code} message="${submitJson.message}"`,
-        this.name,
-      );
-    }
-    const taskId = submitJson.data?.task_id;
-    if (!taskId) throw new RenderError("Kling createElement response missing data.task_id", this.name);
+    const taskId = await this.submitTask("/v1/general/advanced-custom-elements", body, "createElement");
 
     // 2. Poll until the element is built.
     const startedAt = Date.now();
-    const POLL_INTERVAL_MS = 5000;
-    const TIMEOUT_MS = 8 * 60 * 1000;
     let elementId: number | null = null;
-    while (Date.now() - startedAt < TIMEOUT_MS) {
-      await sleep(POLL_INTERVAL_MS);
+    while (Date.now() - startedAt < KlingProvider.POLL_TIMEOUT_MS) {
+      await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`/v1/general/advanced-custom-elements/${taskId}`);
       if (!statusRes.ok) continue;
       const statusJson = (await statusRes.json()) as {
@@ -470,47 +420,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     const audioB64 = audioBuf.toString("base64");
 
     // 2. Submit lipsync job
-    const submitRes = await this.fetchSigned("/v1/videos/lip-sync", {
-      method: "POST",
-      body: JSON.stringify({
-        input: {
-          video_id: req.video_id,
-          mode: "audio2video",
-          audio_type: "file",
-          audio_file: audioB64,
-        },
-      }),
-    });
-    if (!submitRes.ok) {
-      throw new RenderError(
-        `Kling lipsync submit failed: ${submitRes.status} ${await submitRes.text()}`,
-        this.name,
-      );
-    }
-    const submitJson = (await submitRes.json()) as {
-      code?: number;
-      message?: string;
-      data?: { task_id?: string };
-    };
-    if (submitJson.code !== 0) {
-      throw new RenderError(
-        `Kling lipsync submit returned code=${submitJson.code} message="${submitJson.message}"`,
-        this.name,
-      );
-    }
-    const taskId = submitJson.data?.task_id;
-    if (!taskId) {
-      throw new RenderError("Kling lipsync response missing data.task_id", this.name);
-    }
+    const taskId = await this.submitTask(
+      "/v1/videos/lip-sync",
+      { input: { video_id: req.video_id, mode: "audio2video", audio_type: "file", audio_file: audioB64 } },
+      "lipsync",
+    );
 
     // 3. Poll for completion — same lifecycle as text2video
     const startedAt = Date.now();
-    const POLL_INTERVAL_MS = 5000;
-    const TIMEOUT_MS = 8 * 60 * 1000;
     let videoUrl: string | null = null;
     let durationSec = 0;
-    while (Date.now() - startedAt < TIMEOUT_MS) {
-      await sleep(POLL_INTERVAL_MS);
+    while (Date.now() - startedAt < KlingProvider.POLL_TIMEOUT_MS) {
+      await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`/v1/videos/lip-sync/${taskId}`);
       if (!statusRes.ok) continue;
       const statusJson = (await statusRes.json()) as {
@@ -548,26 +469,10 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     }
 
     // 4. Download warped MP4 to local temp
-    const outDir = join(tmpdir(), "ugcspy-renders");
-    await mkdir(outDir, { recursive: true });
-    const outPath = join(outDir, `kling-lipsync-${taskId}.mp4`);
-    const dl = await fetch(videoUrl);
-    if (!dl.ok) {
-      throw new RenderError(`Kling lipsync download failed: ${dl.status}`, this.name);
-    }
-    writeFileSync(outPath, Buffer.from(await dl.arrayBuffer()));
+    const outPath = await this.downloadToTemp(videoUrl, `kling-lipsync-${taskId}`, "lipsync");
 
-    // Defensive billing — issue #30. See lipSyncWithText for full rationale.
-    // Over-attribute (10s, Kling's max) when duration is missing so we
-    // don't silently under-count cost.
-    const billableSeconds = durationSec > 0 ? durationSec : 10;
-    if (durationSec <= 0) {
-      console.warn(
-        `[kling] lipsync succeed response missing duration for task ${taskId}; ` +
-          `billing the safe upper bound (10s = $${(10 * this.lipsync_cost_per_second_usd).toFixed(2)}). ` +
-          `Real Kling bill is authoritative.`,
-      );
-    }
+    // Defensive billing — issue #30.
+    const billableSeconds = this.resolveBillableSeconds(durationSec, taskId, "lipsync");
     return {
       mp4_path: outPath,
       external_id: taskId,
@@ -638,40 +543,14 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     if (req.voice_id) {
       (submitBody.input as Record<string, unknown>).voice_id = req.voice_id;
     }
-    const submitRes = await this.fetchSigned("/v1/videos/lip-sync", {
-      method: "POST",
-      body: JSON.stringify(submitBody),
-    });
-    if (!submitRes.ok) {
-      throw new RenderError(
-        `Kling lipsync text2video submit failed: ${submitRes.status} ${await submitRes.text()}`,
-        this.name,
-      );
-    }
-    const submitJson = (await submitRes.json()) as {
-      code?: number;
-      message?: string;
-      data?: { task_id?: string };
-    };
-    if (submitJson.code !== 0) {
-      throw new RenderError(
-        `Kling lipsync text2video submit returned code=${submitJson.code} message="${submitJson.message}"`,
-        this.name,
-      );
-    }
-    const taskId = submitJson.data?.task_id;
-    if (!taskId) {
-      throw new RenderError("Kling lipsync text2video response missing data.task_id", this.name);
-    }
+    const taskId = await this.submitTask("/v1/videos/lip-sync", submitBody, "lipsync text2video");
 
     // 2. Poll for completion — same lifecycle as lipSyncClip
     const startedAt = Date.now();
-    const POLL_INTERVAL_MS = 5000;
-    const TIMEOUT_MS = 8 * 60 * 1000;
     let videoUrl: string | null = null;
     let durationSec = 0;
-    while (Date.now() - startedAt < TIMEOUT_MS) {
-      await sleep(POLL_INTERVAL_MS);
+    while (Date.now() - startedAt < KlingProvider.POLL_TIMEOUT_MS) {
+      await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`/v1/videos/lip-sync/${taskId}`);
       if (!statusRes.ok) continue;
       const statusJson = (await statusRes.json()) as {
@@ -713,31 +592,10 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     }
 
     // 3. Download warped MP4 to local temp
-    const outDir = join(tmpdir(), "ugcspy-renders");
-    await mkdir(outDir, { recursive: true });
-    const outPath = join(outDir, `kling-lipsync-t2v-${taskId}.mp4`);
-    const dl = await fetch(videoUrl);
-    if (!dl.ok) {
-      throw new RenderError(`Kling lipsync text2video download failed: ${dl.status}`, this.name);
-    }
-    writeFileSync(outPath, Buffer.from(await dl.arrayBuffer()));
+    const outPath = await this.downloadToTemp(videoUrl, `kling-lipsync-t2v-${taskId}`, "lipsync text2video");
 
-    // Defensive billing: if Kling didn't return a duration field in the
-    // succeed response (issue #30), we can't know the actual clip
-    // length. Two options: under-attribute (5s hardcode, the old
-    // behavior) or over-attribute (10s, Kling's max). Over-attribute
-    // is safer for the user — they see inflated internal cost, but
-    // their actual Kling bill (which they'll see independently) is the
-    // truth. Under-attribute would silently let total_cost drift below
-    // the real bill, which is the failure mode that bites users.
-    const billableSeconds = durationSec > 0 ? durationSec : 10;
-    if (durationSec <= 0) {
-      console.warn(
-        `[kling] lipsync text2video succeed response missing duration for task ${taskId}; ` +
-          `billing the safe upper bound (10s = $${(10 * this.lipsync_cost_per_second_usd).toFixed(2)}). ` +
-          `Real Kling bill is authoritative.`,
-      );
-    }
+    // Defensive billing — issue #30.
+    const billableSeconds = this.resolveBillableSeconds(durationSec, taskId, "lipsync text2video");
     return {
       mp4_path: outPath,
       external_id: taskId,
@@ -815,6 +673,59 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       headers.set("Content-Type", "application/json");
     }
     return fetch(`${this.base}${path}`, { ...init, headers });
+  }
+
+  /**
+   * Submit an async Kling job: POST the body, validate the envelope
+   * ({code,message,data.task_id}), and return the task_id. Every Kling
+   * generation/element endpoint shares this submit shape; `label` only
+   * flavors the error messages. Polling + result extraction stay per-endpoint
+   * (their status payloads differ).
+   */
+  private async submitTask(endpoint: string, body: unknown, label: string): Promise<string> {
+    const res = await this.fetchSigned(endpoint, { method: "POST", body: JSON.stringify(body) });
+    if (!res.ok) {
+      throw new RenderError(`Kling ${label} submit failed: ${res.status} ${await res.text()}`, this.name);
+    }
+    const json = (await res.json()) as { code?: number; message?: string; data?: { task_id?: string } };
+    if (json.code !== 0) {
+      throw new RenderError(`Kling ${label} submit returned code=${json.code} message="${json.message}"`, this.name);
+    }
+    const taskId = json.data?.task_id;
+    if (!taskId) throw new RenderError(`Kling ${label} response missing data.task_id`, this.name);
+    return taskId;
+  }
+
+  /**
+   * Defensive lipsync billing (issue #30). When Kling's succeed response omits
+   * the clip duration, over-attribute to the 10s max rather than silently
+   * under-counting — the real Kling bill is authoritative. Warns on the
+   * fallback so the inflated internal cost is explainable.
+   */
+  private resolveBillableSeconds(durationSec: number, taskId: string, label: string): number {
+    if (durationSec > 0) return durationSec;
+    console.warn(
+      `[kling] ${label} succeed response missing duration for task ${taskId}; ` +
+        `billing the safe upper bound (10s = $${(10 * this.lipsync_cost_per_second_usd).toFixed(2)}). ` +
+        `Real Kling bill is authoritative.`,
+    );
+    return 10;
+  }
+
+  /**
+   * Download a finished video to the shared temp dir and return its path.
+   * `prefix` namespaces the filename per job kind (e.g. "kling", "kling-lipsync").
+   */
+  private async downloadToTemp(url: string, prefix: string, label: string): Promise<string> {
+    const outDir = join(tmpdir(), "ugcspy-renders");
+    await mkdir(outDir, { recursive: true });
+    const outPath = join(outDir, `${prefix}.mp4`);
+    const dl = await fetch(url);
+    if (!dl.ok) {
+      throw new RenderError(`Kling ${label} download failed: ${dl.status}`, this.name);
+    }
+    writeFileSync(outPath, Buffer.from(await dl.arrayBuffer()));
+    return outPath;
   }
 }
 
