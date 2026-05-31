@@ -204,6 +204,30 @@ def test_kling_billed_duration_zero():
     assert compose.kling_billed_duration(0) == 5
 
 
+# ─── kling cost model (mirror of src/render/kling.ts) ───────────────────────
+
+
+def test_kling_cost_per_sec_known_models():
+    # v1-6 std is the cheap baseline; v2-6 pro is the default quality tier.
+    assert compose.kling_cost_per_sec("kling-v1-6", "std") == 0.05
+    assert compose.kling_cost_per_sec("kling-v2-6", "pro") == 0.18
+    assert compose.kling_cost_per_sec("kling-v2-6", "std") == 0.10
+
+
+def test_kling_cost_per_sec_unknown_model_uses_fallback():
+    # An unrecognized model prices at the v2-6 tier so we never under-bill.
+    assert compose.kling_cost_per_sec("kling-vNEXT", "pro") == 0.18
+    assert compose.kling_cost_per_sec("kling-vNEXT", "std") == 0.10
+
+
+def test_kling_effective_mode_coerces_pro_only():
+    # Pro-only model ignores a std request; everything else passes through.
+    assert compose.kling_effective_mode("kling-v2-1-master", "std") == "pro"
+    assert compose.kling_effective_mode("kling-v1-6", "std") == "std"
+    # And cost reflects the coercion (master is priced at the pro/ceiling rate).
+    assert compose.kling_cost_per_sec("kling-v2-1-master", "std") == 0.19
+
+
 # ─── validate_durations ────────────────────────────────────────────────────
 
 
@@ -721,6 +745,10 @@ def _minimal_args():
         kling_voice_language="en",
         kling_voice_speed=1.0,
         character_ref=None,
+        kling_model="kling-v2-6",
+        kling_mode="pro",
+        kling_negative_prompt="",
+        kling_cfg_scale=None,
     )
 
 
@@ -844,6 +872,28 @@ def test_args_signature_changes_with_character_ref(_minimal_args):
     sig_other = compose.args_signature(_minimal_args)
     assert sig_none != sig_ref
     assert sig_ref != sig_other
+
+
+def test_args_signature_changes_with_kling_model_mode_quality(_minimal_args):
+    """Switching Kling model/mode/negative-prompt/cfg between runs changes what
+    every cut renders to, so each must invalidate the resume cache (otherwise a
+    resume mixes e.g. v1-6-std and v2-6-pro clips in one reproduction)."""
+    base = compose.args_signature(_minimal_args)
+
+    _minimal_args.kling_model = "kling-v1-6"
+    assert compose.args_signature(_minimal_args) != base
+
+    _minimal_args.kling_model = "kling-v2-6"  # restore
+    _minimal_args.kling_mode = "std"
+    assert compose.args_signature(_minimal_args) != base
+
+    _minimal_args.kling_mode = "pro"  # restore
+    _minimal_args.kling_negative_prompt = "blurry, watermark"
+    assert compose.args_signature(_minimal_args) != base
+
+    _minimal_args.kling_negative_prompt = ""  # restore
+    _minimal_args.kling_cfg_scale = 0.7
+    assert compose.args_signature(_minimal_args) != base
 
 
 # ─── resolve_character_ref (#25) ────────────────────────────────────────────

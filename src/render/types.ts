@@ -11,8 +11,26 @@ export interface ClipGenRequest {
   // generates an image-to-video; otherwise text-to-video. Not all providers
   // support both — adapters that don't will throw a clear error.
   first_frame?: string;
-  // Output aspect ratio. We default to 9:16 for TikTok/Reels.
+  // Optional END-frame image (file path or URL). When set alongside
+  // first_frame, the provider interpolates motion from first_frame → end_frame
+  // (Kling's `image_tail`). Tighter control over the clip's final pose/scene.
+  // Ignored by providers that don't support it.
+  end_frame?: string;
+  // Output aspect ratio. We default to 9:16 for TikTok/Reels. Note: for
+  // image2video the provider derives the ratio from the input image and
+  // ignores this.
   aspect_ratio?: "9:16" | "16:9" | "1:1";
+  // Provider model id. Defaults to the provider's best current model when
+  // unset. For Kling, the native model_name string (e.g. "kling-v2-6").
+  model?: string;
+  // Quality mode. "pro" = higher fidelity, ~1.8x cost; "std" = cheaper.
+  mode?: "std" | "pro";
+  // Things to keep OUT of the generation (artifacts, text, watermarks).
+  // Providers that support it pass this through; others ignore it.
+  negative_prompt?: string;
+  // Prompt-adherence strength, 0..1 (Kling's cfg_scale). Higher = stricter
+  // adherence to the prompt, less model freedom. Provider default when unset.
+  cfg_scale?: number;
 }
 
 export interface ClipGenResult {

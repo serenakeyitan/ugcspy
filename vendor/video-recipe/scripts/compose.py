@@ -86,6 +86,46 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--kling-model",
+        type=str,
+        default="kling-v2-6",
+        help=(
+            "Kling model_name for clip generation (native api.klingai.com string, HYPHENS not dots). "
+            "Default 'kling-v2-6' is the best native-callable model (top fidelity + native audio). "
+            "Cheaper option: 'kling-v1-6'. Others: kling-v2-1, kling-v2-1-master (pro-only), "
+            "kling-v2-5-turbo. NOTE: 'kling-v3' is NOT native (reseller-only) and will fail."
+        ),
+    )
+    p.add_argument(
+        "--kling-mode",
+        type=str,
+        choices=["std", "pro"],
+        default="pro",
+        help=(
+            "Kling quality mode. 'pro' (default) = higher fidelity, ~1.8x cost (and where v2-6's "
+            "native audio lives); 'std' = cheaper. Pro-only models (kling-v2-1-master) coerce to pro."
+        ),
+    )
+    p.add_argument(
+        "--kling-negative-prompt",
+        type=str,
+        default=DEFAULT_KLING_NEGATIVE_PROMPT,
+        help=(
+            "Things to keep OUT of generation (artifacts/text/watermarks). Applied to every cut's "
+            "text2video/image2video call. A sensible default is used; pass '' to disable, or override "
+            "with your own."
+        ),
+    )
+    p.add_argument(
+        "--kling-cfg-scale",
+        type=float,
+        default=None,
+        help=(
+            "Kling cfg_scale, 0..1 (Kling default 0.5). Higher = stricter prompt adherence, less "
+            "model freedom. Left unset = Kling's own default. Clamped to [0,1]."
+        ),
+    )
+    p.add_argument(
         "--no-burnin",
         action="store_true",
         help="Skip burning OCR'd overlay text into the reproduction. By default, overlay text from recipe.title_cards / cut.ocr_text / cut.caption is rendered as on-screen text per cut. Use this for testing or when the source's overlay is undesirable in the reproduction.",
@@ -286,6 +326,45 @@ def validate_compose_ready(cuts: list[dict]) -> None:
 # don't expose Pro yet (recipe.v0.5 has no `mode` field per cut).
 KLING_SUPPORTED_DURATIONS: tuple[int, ...] = (5, 10)
 KLING_MAX_DURATION_SEC: int = max(KLING_SUPPORTED_DURATIONS)
+
+# Default negative prompt applied to every Kling clip. Steers diffusion away
+# from the artifacts that most often wreck UGC reproductions. Overridable via
+# --kling-negative-prompt (pass '' to disable). Kept in sync conceptually with
+# what a reviewer would hand-tune; not model-version-specific.
+DEFAULT_KLING_NEGATIVE_PROMPT = (
+    "blurry, low quality, distorted, deformed, warped hands, extra fingers, "
+    "extra limbs, text, watermark, logo, subtitles, jpeg artifacts, oversaturated"
+)
+
+# Per-second USD by model + mode. MUST stay in sync with KLING_COST_PER_SEC in
+# src/render/kling.ts — the TS adapter computes the authoritative cost; this
+# mirror only powers compose's pre-spend estimate. Chosen to not under-bill.
+KLING_COST_PER_SEC: dict[str, dict[str, float]] = {
+    "kling-v1": {"std": 0.05, "pro": 0.09},
+    "kling-v1-5": {"std": 0.05, "pro": 0.09},
+    "kling-v1-6": {"std": 0.05, "pro": 0.09},
+    "kling-v2-master": {"std": 0.19, "pro": 0.19},
+    "kling-v2-1": {"std": 0.09, "pro": 0.16},
+    "kling-v2-1-master": {"std": 0.19, "pro": 0.19},
+    "kling-v2-5-turbo": {"std": 0.10, "pro": 0.18},
+    "kling-v2-6": {"std": 0.10, "pro": 0.18},
+}
+_KLING_COST_FALLBACK = {"std": 0.10, "pro": 0.18}
+_KLING_PRO_ONLY = frozenset({"kling-v2-1-master"})
+
+
+def kling_effective_mode(model: str, mode: str) -> str:
+    """Pro-only models coerce to pro (matches the TS adapter)."""
+    return "pro" if model in _KLING_PRO_ONLY else mode
+
+
+def kling_cost_per_sec(model: str, mode: str) -> float:
+    """Estimated per-second USD for a model+mode. Mirror of klingCostPerSec
+    in src/render/kling.ts. The real Kling bill is authoritative; this only
+    feeds the cost preflight."""
+    row = KLING_COST_PER_SEC.get(model, _KLING_COST_FALLBACK)
+    eff = kling_effective_mode(model, mode)
+    return row["pro"] if eff == "pro" else row["std"]
 
 
 def kling_billed_duration(requested_sec: float) -> int:
@@ -639,6 +718,13 @@ def args_signature(args: argparse.Namespace) -> str:
         # so it MUST invalidate the cache — resuming a text2video run with a
         # character ref (or vice versa) would mix two render modes.
         f"|character_ref={getattr(args, 'character_ref', None) or ''}"
+        # Kling model/mode/quality knobs change what every cut renders to, so
+        # changing any of them must invalidate cached clips (otherwise a resume
+        # mixes v1-6-std clips with v2-6-pro clips in one reproduction).
+        f"|kling_model={getattr(args, 'kling_model', 'kling-v2-6')}"
+        f"|kling_mode={getattr(args, 'kling_mode', 'pro')}"
+        f"|kling_neg={getattr(args, 'kling_negative_prompt', '') or ''}"
+        f"|kling_cfg={getattr(args, 'kling_cfg_scale', None)}"
     )
 
 
@@ -1197,20 +1283,30 @@ def compose(args: argparse.Namespace) -> None:
     if character_ref:
         print(f"[compose] character reference: {character_ref} — cuts use image2video (face locked across cuts)")
 
+    # 2e. Resolve Kling model + mode for clip generation. Drives both the cost
+    # preflight and the per-cut render payload. Pro-only models coerce to pro.
+    kling_model = args.kling_model
+    kling_mode = kling_effective_mode(kling_model, args.kling_mode)
+    if kling_mode != args.kling_mode:
+        print(f"[compose] note: {kling_model} is pro-only; using pro mode.")
+    print(f"[compose] kling model: {kling_model} ({kling_mode}) — ~${kling_cost_per_sec(kling_model, kling_mode):.3f}/sec")
+
     # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync.
     # Uses kling_billed_duration so the estimate matches what we'll actually
-    # pay (Kling rounds 6-9s cuts UP to 10s; cost preflight has to know that).
+    # pay (Kling rounds 6-9s cuts UP to 10s; cost preflight has to know that)
+    # and the model+mode per-second rate (v2-6 pro costs ~3.6x v1-6 std).
     full_transcript = resolve_recipe_full_transcript(recipe)
     cuts_with_audio = [c for c in cuts if (c.get("transcript") or "").strip()]
     cost_estimate = 0.0
     cost_breakdown: list[str] = []
-    # Kling text2video — billed by the rounded-up duration. Always runs
-    # regardless of TTS provider (we need a base video for lipsync to warp,
+    clip_cost_per_sec = kling_cost_per_sec(kling_model, kling_mode)
+    # Kling text2video/image2video — billed by the rounded-up duration. Always
+    # runs regardless of TTS provider (we need a base video for lipsync to warp,
     # or for the OpenAI TTS to be mixed over).
     kling_total = 0.0
     for cut in cuts:
         billed = kling_billed_duration(float(cut.get("duration_sec") or 0))
-        kling_total += 0.10 * billed
+        kling_total += clip_cost_per_sec * billed
     cost_estimate += kling_total
     cost_breakdown.append(f"text2video {len(cuts)} cuts: ${kling_total:.2f}")
     # TTS cost — depends on provider:
@@ -1318,7 +1414,19 @@ def compose(args: argparse.Namespace) -> None:
                 )
             else:
                 print(f"[compose] rendering cut {i}/{len(cuts) - 1} ({billed_dur}s)...")
-            clip_payload = {"kind": "clip", "prompt": prompt, "duration_sec": billed_dur}
+            clip_payload: dict = {
+                "kind": "clip",
+                "prompt": prompt,
+                "duration_sec": billed_dur,
+                "model": kling_model,
+                "mode": kling_mode,
+            }
+            # Quality knobs: negative_prompt steers away from artifacts;
+            # cfg_scale tightens prompt adherence. Both optional.
+            if args.kling_negative_prompt:
+                clip_payload["negative_prompt"] = args.kling_negative_prompt
+            if args.kling_cfg_scale is not None:
+                clip_payload["cfg_scale"] = max(0.0, min(1.0, float(args.kling_cfg_scale)))
             if character_ref:
                 # image2video: lock the creator's face across cuts (#25).
                 clip_payload["first_frame"] = character_ref
