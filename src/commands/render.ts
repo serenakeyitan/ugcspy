@@ -59,13 +59,16 @@ export async function runRender(): Promise<void> {
   // Empty string → the provider's built-in default.
   const klingBase = process.env.KLING_BASE_URL ?? "";
 
+  // Kling provider is shared across the clip/element/lipsync kinds — construct
+  // once. (OpenAI TTS uses its own provider below.)
+  const kling = new KlingProvider(klingAccess, klingSecret, klingBase);
+
   try {
     if (req.kind === "clip") {
-      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
       const mode =
         req.mode === "std" || req.mode === "pro" || req.mode === "4k" ? req.mode : undefined;
       const sound = req.sound === "on" ? "on" : req.sound === "off" ? "off" : undefined;
-      const result = await provider.generateClip({
+      const result = await kling.generateClip({
         prompt: String(req.prompt ?? ""),
         duration_sec: Number(req.duration_sec ?? 5),
         aspect_ratio: (req.aspect_ratio as "9:16" | "16:9" | "1:1") ?? "9:16",
@@ -80,38 +83,31 @@ export async function runRender(): Promise<void> {
           ? (req.element_ids as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n))
           : undefined,
       });
-      console.log(
-        JSON.stringify({
-          ok: true,
-          mp4_path: result.mp4_path,
-          external_id: result.external_id,
-          cost_usd: result.cost_usd,
-        }),
-      );
+      emitOk({
+        mp4_path: result.mp4_path,
+        external_id: result.external_id,
+        cost_usd: result.cost_usd,
+      });
       return;
     }
     if (req.kind === "create_element") {
       // Register a multi-image reference element; returns element_id for a
       // later clip's element_ids (Kling v3 multi-reference).
-      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
       const referImages = Array.isArray(req.refer_images)
         ? (req.refer_images as unknown[]).map((s) => String(s))
         : undefined;
-      const result = await provider.createElement({
+      const result = await kling.createElement({
         name: String(req.name ?? "ref"),
         description: String(req.description ?? ""),
         frontal_image: String(req.frontal_image ?? ""),
         refer_images: referImages,
         tag_id: req.tag_id ? String(req.tag_id) : undefined,
       });
-      console.log(
-        JSON.stringify({
-          ok: true,
-          element_id: result.element_id,
-          external_id: result.external_id,
-          cost_usd: result.cost_usd,
-        }),
-      );
+      emitOk({
+        element_id: result.element_id,
+        external_id: result.external_id,
+        cost_usd: result.cost_usd,
+      });
       return;
     }
     if (req.kind === "tts") {
@@ -121,53 +117,42 @@ export async function runRender(): Promise<void> {
         voice_id: req.voice as string | undefined,
         speed: req.speed as number | undefined,
       });
-      console.log(
-        JSON.stringify({
-          ok: true,
-          mp3_path: result.mp3_path,
-          duration_sec: result.duration_sec,
-          cost_usd: result.cost_usd,
-        }),
-      );
+      emitOk({
+        mp3_path: result.mp3_path,
+        duration_sec: result.duration_sec,
+        cost_usd: result.cost_usd,
+      });
       return;
     }
     if (req.kind === "lipsync") {
-      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
-      const result = await provider.lipSyncClip({
+      const result = await kling.lipSyncClip({
         video_id: String(req.video_id ?? ""),
         audio_path: String(req.audio_path ?? ""),
       });
-      console.log(
-        JSON.stringify({
-          ok: true,
-          mp4_path: result.mp4_path,
-          external_id: result.external_id,
-          cost_usd: result.cost_usd,
-        }),
-      );
+      emitOk({
+        mp4_path: result.mp4_path,
+        external_id: result.external_id,
+        cost_usd: result.cost_usd,
+      });
       return;
     }
     if (req.kind === "lipsync_text2video") {
       // Bundled TTS + lipsync. Kling generates the TTS internally; the
       // returned mp4 has the synced audio embedded. No separate audio
       // file needed on the caller side.
-      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
       const lang = req.voice_language as "en" | "zh" | undefined;
-      const result = await provider.lipSyncWithText({
+      const result = await kling.lipSyncWithText({
         video_id: String(req.video_id ?? ""),
         text: String(req.text ?? ""),
         voice_id: req.voice_id ? String(req.voice_id) : undefined,
         voice_language: lang === "en" || lang === "zh" ? lang : undefined,
         voice_speed: typeof req.voice_speed === "number" ? req.voice_speed : undefined,
       });
-      console.log(
-        JSON.stringify({
-          ok: true,
-          mp4_path: result.mp4_path,
-          external_id: result.external_id,
-          cost_usd: result.cost_usd,
-        }),
-      );
+      emitOk({
+        mp4_path: result.mp4_path,
+        external_id: result.external_id,
+        cost_usd: result.cost_usd,
+      });
       return;
     }
     emitError(`unknown kind: ${req.kind}`);
@@ -184,6 +169,13 @@ export async function runRender(): Promise<void> {
 
 function emitError(msg: string): void {
   console.log(JSON.stringify({ ok: false, error: msg }));
+}
+
+// Emit a success result on stdout. Every render kind returns `ok: true` plus
+// a kind-specific payload (mp4_path / mp3_path / element_id / ...); this just
+// stamps the ok flag so the per-kind blocks only spell out their own fields.
+function emitOk(payload: Record<string, unknown>): void {
+  console.log(JSON.stringify({ ok: true, ...payload }));
 }
 
 async function readStdin(): Promise<string> {
