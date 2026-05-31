@@ -757,6 +757,7 @@ def _minimal_args():
         kling_cfg_scale=None,
         kling_sound="off",
         kling_base_url=None,
+        character_element=False,
     )
 
 
@@ -927,6 +928,54 @@ def test_args_signature_changes_with_sound_and_base_url(_minimal_args):
     _minimal_args.kling_sound = "off"  # restore
     _minimal_args.kling_base_url = "https://api.klingai.com"
     assert compose.args_signature(_minimal_args) != base
+
+
+def test_args_signature_changes_with_character_element(_minimal_args):
+    """--character-element switches each cut between element_list and
+    first_frame — a different render path, so it must invalidate the cache."""
+    base = compose.args_signature(_minimal_args)
+    _minimal_args.character_element = True
+    assert compose.args_signature(_minimal_args) != base
+
+
+# ─── register_character_element (v3 element_list, PR B) ─────────────────────
+
+
+def test_register_character_element_creates_and_caches(tmp_path, monkeypatch):
+    """First call hits create_element via call_render and caches the id; a
+    second call reuses the cache without re-calling the API."""
+    calls = {"n": 0}
+
+    def fake_call_render(ugcspy_bin, payload, env_extra=None):
+        calls["n"] += 1
+        assert payload["kind"] == "create_element"
+        assert payload["frontal_image"] == "/tmp/ref.jpg"
+        return {"ok": True, "element_id": 4242, "external_id": "el-1", "cost_usd": 0}
+
+    monkeypatch.setattr(compose, "call_render", fake_call_render)
+    state: dict = {}
+    eid = compose.register_character_element("ugcspy", "/tmp/ref.jpg", state, tmp_path)
+    assert eid == 4242
+    assert state["character_element_id"] == 4242
+    assert calls["n"] == 1
+
+    # Second call: cached, no new API call.
+    eid2 = compose.register_character_element("ugcspy", "/tmp/ref.jpg", state, tmp_path)
+    assert eid2 == 4242
+    assert calls["n"] == 1
+
+
+def test_register_character_element_none_on_bad_response(tmp_path, monkeypatch, capsys):
+    """A create_element response without a usable element_id → None (caller
+    falls back to first_frame), not a crash."""
+
+    def fake_call_render(ugcspy_bin, payload, env_extra=None):
+        return {"ok": True, "element_id": None, "external_id": "el-x", "cost_usd": 0}
+
+    monkeypatch.setattr(compose, "call_render", fake_call_render)
+    state: dict = {}
+    assert compose.register_character_element("ugcspy", "/tmp/ref.jpg", state, tmp_path) is None
+    assert "character_element_id" not in state
 
 
 # ─── resolve_character_ref (#25) ────────────────────────────────────────────

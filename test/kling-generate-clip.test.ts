@@ -403,4 +403,135 @@ describe("KlingProvider.generateClip quality params", () => {
     // Distinct images → distinct base64.
     expect(body.image).not.toBe(body.image_tail);
   }, 15000);
+
+  test("sends element_list and routes to image2video when element_ids given", async () => {
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+      element_ids: [101, 202],
+    });
+    // Routes to image2video even without a first_frame image.
+    const submit = captured.find((r) => r.url.endsWith("/v1/videos/image2video"));
+    expect(submit).toBeDefined();
+    const body = JSON.parse(submit!.body) as { element_list: { element_id: number }[]; image?: string };
+    expect(body.element_list).toEqual([{ element_id: 101 }, { element_id: 202 }]);
+    expect(body.image).toBeUndefined(); // no first_frame → no image field
+  }, 15000);
+
+  test("rejects more than 3 element_ids", async () => {
+    await expect(
+      new KlingProvider("a", "s").generateClip({
+        prompt: "p",
+        duration_sec: 5,
+        element_ids: [1, 2, 3, 4],
+      }),
+    ).rejects.toThrow(/at most 3 elements/);
+  });
+});
+
+/**
+ * createElement — register a multi-image reference element and read back the
+ * element_id from the async submit→poll lifecycle.
+ */
+describe("KlingProvider.createElement", () => {
+  let originalFetch: typeof fetch;
+  const imgDir = join(tmpdir(), "ugcspy-test-element");
+  const frontal = join(imgDir, "frontal.jpg");
+
+  beforeEach(() => {
+    captured = [];
+    originalFetch = global.fetch;
+    mkdirSync(imgDir, { recursive: true });
+    writeFileSync(frontal, Buffer.alloc(150, 0x33));
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+    try {
+      rmSync(imgDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  });
+
+  test("submits to advanced-custom-elements and returns the element_id", async () => {
+    global.fetch = makeMockFetch([
+      // submit
+      { status: 200, json: { code: 0, data: { task_id: "el-task-1" } } },
+      // poll → succeed with element_id
+      {
+        status: 200,
+        json: {
+          data: {
+            task_status: "succeed",
+            task_result: { elements: [{ element_id: 777 }] },
+          },
+        },
+      },
+    ]) as typeof fetch;
+
+    const refer = join(imgDir, "side.jpg");
+    writeFileSync(refer, Buffer.alloc(150, 0x44));
+    const result = await new KlingProvider("a", "s").createElement({
+      name: "creator-face-which-is-a-very-long-name-over-twenty-chars",
+      description: "the creator",
+      frontal_image: frontal,
+      refer_images: [refer],
+      tag_id: "o_102",
+    });
+
+    const submit = captured.find((r) => r.url.endsWith("/v1/general/advanced-custom-elements"));
+    expect(submit).toBeDefined();
+    const body = JSON.parse(submit!.body) as {
+      element_name: string;
+      reference_type: string;
+      element_image_list: { frontal_image: string; refer_images: { image_url: string }[] };
+      tag_list: { tag_id: string }[];
+    };
+    expect(body.reference_type).toBe("image_refer");
+    expect(body.element_name.length).toBeLessThanOrEqual(20); // truncated
+    expect(body.element_image_list.frontal_image).toBeDefined();
+    expect(body.element_image_list.refer_images).toHaveLength(1);
+    expect(body.tag_list).toEqual([{ tag_id: "o_102" }]);
+    // Polls the element status endpoint.
+    expect(
+      captured.some((r) => r.url.includes("/v1/general/advanced-custom-elements/el-task-1")),
+    ).toBe(true);
+    expect(result.element_id).toBe(777);
+    expect(result.external_id).toBe("el-task-1");
+  }, 15000);
+
+  test("throws when the succeed payload has no element_id", async () => {
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "el-2" } } },
+      { status: 200, json: { data: { task_status: "succeed", task_result: { elements: [] } } } },
+    ]) as typeof fetch;
+    await expect(
+      new KlingProvider("a", "s").createElement({
+        name: "x",
+        description: "y",
+        frontal_image: frontal,
+      }),
+    ).rejects.toThrow(/no element_id/);
+  }, 15000);
+
+  test("requires a frontal_image", async () => {
+    await expect(
+      new KlingProvider("a", "s").createElement({ name: "x", description: "y", frontal_image: "" }),
+    ).rejects.toThrow(/frontal_image/);
+  });
+
+  test("surfaces a failed element-creation task", async () => {
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "el-3" } } },
+      { status: 200, json: { data: { task_status: "failed", task_status_msg: "bad image" } } },
+    ]) as typeof fetch;
+    await expect(
+      new KlingProvider("a", "s").createElement({
+        name: "x",
+        description: "y",
+        frontal_image: frontal,
+      }),
+    ).rejects.toThrow(/bad image/);
+  }, 15000);
 });

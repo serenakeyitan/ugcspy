@@ -130,12 +130,22 @@ cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<target-id> \
 
 What this does (per Issue #25):
 - Every cut is generated via Kling **image2video** from the SAME reference image — so the creator's identity is consistent across all cuts, instead of plain text2video inventing a different "young woman" per cut.
-- The cut PROMPTS come from the TARGET recipe (format/scene). Background is **prompt-driven** in v1 — the target's scene description rides in each cut's prompt; it is NOT locked to a second reference image (that needs Kling's multi-image2video endpoint, a documented v2 follow-up).
-- Cost is the same per-second as text2video ($0.10/s std). Always `--dry-run` first and confirm the estimate before the real spend.
+- The cut PROMPTS come from the TARGET recipe (format/scene). Background is **prompt-driven** by default — the target's scene description rides in each cut's prompt.
+- Cost follows the chosen model/mode (default kling-v3 pro ~$0.21/s). Always `--dry-run` first and confirm the estimate before the real spend.
 
 Before rendering, sanity-check the reference: `open recipes/<source-id>/reference.jpg`. Decode auto-picks the sharpest, clearest-face frame from the source's middle band (OpenCV scoring), so it's usually a clean face shot — but face detection isn't perfect, so if the chosen frame is still off (e.g. the source has no clear frontal face anywhere), tell the user to hand-pick a frame and pass its path to `--character-ref`. A bad reference produces a bad identity lock.
 
-Then run for real (drop `--dry-run`). Add `--lipsync` only if the target is talking-head and you want mouth-sync to the TTS.
+**Stronger identity lock (Kling v3 elements):** add `--character-element` to register the reference as a Kling Element Library element (created once, cached in `compose_state`) and reference it via `element_list` on every cut, instead of passing it as a first-frame image. This is the v3-native multi-reference path and gives a tighter identity lock. Requires `kling-v3` (the default); ignored on other models.
+
+```bash
+cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<target-id> \
+  --character-ref recipes/<source-id>/reference.jpg --character-element \
+  --budget 15 --dry-run
+```
+
+Before rendering, sanity-check the reference: `open recipes/<source-id>/reference.jpg`. Decode auto-picks the sharpest, clearest-face frame from the source's middle band — usually clean, but if face detection missed (e.g. no frontal face anywhere), hand-pick a frame and pass its path to `--character-ref`. A bad reference produces a bad identity lock.
+
+Then run for real (drop `--dry-run`). For talking-head with mouth-synced audio, prefer `--kling-sound on` (kling-v3 generates native audio + lip-sync inline) over the separate `--lipsync` pass.
 
 ## When NOT to use this
 
