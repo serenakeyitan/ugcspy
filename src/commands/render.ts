@@ -9,7 +9,8 @@ import { RenderError } from "../render/types.ts";
  * Stdin (JSON): one of
  *   { "kind": "clip",               "prompt": str, "duration_sec": int, "aspect_ratio"?: str,
  *                                   "first_frame"?: str, "end_frame"?: str, "model"?: str,
- *                                   "mode"?: "std"|"pro", "negative_prompt"?: str, "cfg_scale"?: float }
+ *                                   "mode"?: "std"|"pro"|"4k", "negative_prompt"?: str,
+ *                                   "cfg_scale"?: float, "sound"?: "on"|"off" }
  *   { "kind": "tts",                "text": str,   "voice"?: str, "speed"?: float }
  *   { "kind": "lipsync",            "video_id": str, "audio_path": str }
  *   { "kind": "lipsync_text2video", "video_id": str, "text": str (≤120 chars),
@@ -49,11 +50,17 @@ export async function runRender(): Promise<void> {
   // still required separately.
   const klingAccess = process.env.KLING_ACCESS_KEY ?? process.env.KLING_API_KEY ?? "";
   const klingSecret = process.env.KLING_SECRET_KEY ?? "";
+  // Official API domain moved to api-singapore.klingai.com (non-China). Allow
+  // overriding via KLING_BASE_URL for region-specific hosts or the old domain.
+  // Empty string → the provider's built-in default.
+  const klingBase = process.env.KLING_BASE_URL ?? "";
 
   try {
     if (req.kind === "clip") {
-      const provider = new KlingProvider(klingAccess, klingSecret);
-      const mode = req.mode === "std" || req.mode === "pro" ? req.mode : undefined;
+      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
+      const mode =
+        req.mode === "std" || req.mode === "pro" || req.mode === "4k" ? req.mode : undefined;
+      const sound = req.sound === "on" ? "on" : req.sound === "off" ? "off" : undefined;
       const result = await provider.generateClip({
         prompt: String(req.prompt ?? ""),
         duration_sec: Number(req.duration_sec ?? 5),
@@ -64,6 +71,7 @@ export async function runRender(): Promise<void> {
         mode,
         negative_prompt: req.negative_prompt ? String(req.negative_prompt) : undefined,
         cfg_scale: typeof req.cfg_scale === "number" ? req.cfg_scale : undefined,
+        sound,
       });
       console.log(
         JSON.stringify({
@@ -93,7 +101,7 @@ export async function runRender(): Promise<void> {
       return;
     }
     if (req.kind === "lipsync") {
-      const provider = new KlingProvider(klingAccess, klingSecret);
+      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
       const result = await provider.lipSyncClip({
         video_id: String(req.video_id ?? ""),
         audio_path: String(req.audio_path ?? ""),
@@ -112,7 +120,7 @@ export async function runRender(): Promise<void> {
       // Bundled TTS + lipsync. Kling generates the TTS internally; the
       // returned mp4 has the synced audio embedded. No separate audio
       // file needed on the caller side.
-      const provider = new KlingProvider(klingAccess, klingSecret);
+      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
       const lang = req.voice_language as "en" | "zh" | undefined;
       const result = await provider.lipSyncWithText({
         video_id: String(req.video_id ?? ""),
