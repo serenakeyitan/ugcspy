@@ -133,10 +133,13 @@ What this does (per Issue #25):
 
 **Stronger identity lock (Kling v3 elements):** add `--character-element` to register the reference as a Kling Element Library element (created once, cached in `compose_state`) and reference it via `element_list` on every cut, instead of passing it as a first-frame image. This is the v3-native multi-reference path and gives a tighter identity lock. Requires `kling-v3` (the default); ignored on other models.
 
+**Lock the BACKGROUND too (face + scene in one call):** add `--background-ref` to register scene images as a *second* element. Every cut then anchors to BOTH the character element AND the background element via `element_list` — one v3 call locks the creator's face and the setting, the native answer to the Pinterest-collage backdrop (no ffmpeg composite). Accepts a single image, a comma-list (first = frontal, up to 3 detail refs), or a directory of images. Requires `--character-element` + `kling-v3`.
+
 ```bash
 cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<target-id> \
   --character-ref recipes/<source-id>/reference.jpg --character-element \
-  --budget 15 --dry-run
+  --background-ref recipes/<target-id>/backgrounds/ \
+  --budget 20 --dry-run
 ```
 
 Before rendering, sanity-check the reference: `open recipes/<source-id>/reference.jpg`. Decode auto-picks the sharpest, clearest-face frame from the source's middle band — usually clean, but if face detection missed (e.g. no frontal face anywhere), hand-pick a frame and pass its path to `--character-ref`. A bad reference produces a bad identity lock.
