@@ -57,6 +57,8 @@ Compose a markdown brief with these exact sections. Use BOTH decode.json files a
 
 If `target.audio_transcript` is missing (e.g. decoded with `--no-audio` or from an older schema), fall back to overlay-only but flag it as ⚠ "no spoken transcript available — the brief below is overlay-only, the actual script the creator needs to read aloud will need to be inferred." Tell the user they can re-decode without `--no-audio` to get the proper transcript.
 
+If `target.audio_transcript.has_speech` is `false` or `audio_kind` is `"music"`, the target has NO spoken narrative — it's a music/visual-only video. Don't invent a spoken script: flag it ⚠ "target has no spoken narrative (music/visual only) — the remix script should be built from the on-screen overlay text, and there's no 口型/lip-sync to match." The overlay (`full_narrative`) becomes the primary content layer in that case. Also note `target.audio_transcript.source` — an `embedded_subs` transcript is near-verbatim (trust it), a `whisper` transcript may have ASR noise (sanity-check brand names + proper nouns before quoting them as the script).
+
 ```
 # Remix Brief: <source.uploader> shoots <target.format.kind> for <target.brand_pitch.brand>
 

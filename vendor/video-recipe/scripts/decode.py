@@ -84,11 +84,19 @@ class Decode:
     brand_pitch: dict  # detected brand mention, where it lands, soft vs hard
     shot_list: list[dict]  # one entry per scene segment for the new creator
     reproduction_notes: dict  # technique notes, what to use (CapCut filter, etc)
-    # v0.2: spoken-audio transcript via Whisper. None means transcription was
-    # skipped (--no-audio) or whisper wasn't importable. Schema shape:
-    #   {"language": "en", "full_text": "...", "segments": [...], "words": [...]}
+    # v0.2: spoken-audio transcript. None means transcription was skipped
+    # (--no-audio) or no source was available. Schema shape:
+    #   {"language": "en", "full_text": "...", "segments": [...], "words": [...],
+    #    "source": "embedded_subs" | "whisper", "audio_kind": "speech"|"music"|"mixed",
+    #    "has_speech": bool}
     # where each word has start/end/word and each segment has start/end/text.
     # Word-timestamps power /ugcspy-remix briefs and future lip-sync alignment.
+    #
+    # SOURCE PRIORITY (v0.3): the platform's own caption track (embedded_subs)
+    # is preferred over Whisper when available — it's near-verbatim, free, and
+    # doesn't hallucinate lyrics over a music bed. Whisper is the fallback.
+    # When the audio is music-only / non-speech, has_speech is False and the
+    # spoken-narrative fields are empty rather than filled with ASR noise.
     audio_transcript: dict | None = None
 
 
@@ -714,6 +722,83 @@ def build_shot_list(
 # ─── Stage 9: audio transcription (Whisper) ────────────────────────────────
 
 
+def _doc_to_audio_transcript(doc: dict, model_name: str | None) -> dict:
+    """Flatten a transcribe/embedded-subs doc into the decode.json
+    audio_transcript shape. Builds full_text from SPEECH segments only —
+    non-speech (music) and non-lexical (filler) segments are excluded from
+    the spoken narrative but remain in `segments` with their kind tag."""
+    segs = doc.get("segments", []) or []
+    speech_segs = [
+        s for s in segs
+        # embedded_subs has no per-seg kind (all caption text is speech);
+        # whisper tags each segment. Treat missing kind as speech.
+        if (s.get("kind", "speech") == "speech") and (s.get("text") or "").strip()
+    ]
+    full_text = " ".join((s.get("text") or "").strip() for s in speech_segs).strip()
+    out = {
+        "language": doc.get("language"),
+        "duration_sec": doc.get("duration_sec"),
+        "full_text": full_text,
+        "segments": segs,
+        "words": doc.get("words", []),
+        "source": doc.get("source"),
+        "audio_kind": doc.get("audio_kind", "speech"),
+        "has_speech": doc.get("has_speech", bool(full_text)),
+    }
+    if model_name and doc.get("source") == "whisper":
+        out["model"] = model_name
+    return out
+
+
+def obtain_audio_transcript(
+    source_url: str | None,
+    mp4: Path,
+    recipe_dir: Path,
+    model_name: str = "base",
+) -> dict | None:
+    """Get the spoken narrative, preferring the platform's caption track.
+
+    Priority:
+      1. Embedded caption track (yt-dlp --write-subs) when we have a URL
+         and the platform serves one — near-verbatim, free, music-proof.
+      2. Whisper transcription of the extracted audio — fallback.
+      3. None — no URL + no Whisper, or both failed.
+
+    Returns the decode.json audio_transcript dict, or None.
+    """
+    # 1. Try the embedded caption track first (only possible with a URL).
+    if source_url:
+        try:
+            from scripts.embedded_subs import fetch_embedded_subs, parse_vtt
+        except ImportError as e:
+            print(f"[decode] audio: embedded-subs module unavailable ({e}); trying Whisper.", file=sys.stderr)
+        else:
+            try:
+                found = fetch_embedded_subs(source_url, recipe_dir)
+            except Exception as e:  # never let sub-fetch kill decode
+                print(f"[decode] audio: embedded-subs fetch failed ({e}); trying Whisper.", file=sys.stderr)
+                found = None
+            if found:
+                vtt_path, lang = found
+                try:
+                    doc = parse_vtt(vtt_path, language=lang)
+                except Exception as e:
+                    print(f"[decode] audio: embedded VTT parse failed ({e}); trying Whisper.", file=sys.stderr)
+                    doc = None
+                if doc and (doc.get("segments")):
+                    # Persist a transcript.json so downstream stages see it.
+                    (recipe_dir / "transcript.json").write_text(json.dumps(doc, indent=2))
+                    print(
+                        f"[decode] audio: using embedded caption track "
+                        f"({len(doc.get('segments') or [])} cues, lang={doc.get('language')}) "
+                        f"— skipping Whisper."
+                    )
+                    return _doc_to_audio_transcript(doc, model_name=None)
+
+    # 2. Fall back to Whisper.
+    return transcribe_source_audio(mp4, recipe_dir, model_name=model_name)
+
+
 def transcribe_source_audio(
     mp4: Path,
     recipe_dir: Path,
@@ -721,6 +806,10 @@ def transcribe_source_audio(
 ) -> dict | None:
     """Extract mono 16kHz WAV from mp4, run Whisper with word timestamps,
     persist transcript.json next to source.mp4, return the transcript dict.
+
+    This is the FALLBACK path — obtain_audio_transcript() prefers the
+    platform's embedded caption track and only calls this when no caption
+    track is available.
 
     Returns None (with a printed warning) if Whisper isn't importable —
     keeps decode runnable for users who haven't yet re-run install-deps
@@ -767,17 +856,17 @@ def transcribe_source_audio(
         print(f"[decode] audio: whisper failed ({e}); skipping transcription.", file=sys.stderr)
         return None
 
-    # Flatten to the decode.json shape: keep full_text for the human-readable
-    # block, segments + words for downstream alignment tools.
-    full_text = " ".join((s.get("text") or "").strip() for s in doc.get("segments", [])).strip()
-    return {
-        "language": doc.get("language"),
-        "duration_sec": doc.get("duration_sec"),
-        "full_text": full_text,
-        "segments": doc.get("segments", []),
-        "words": doc.get("words", []),
-        "model": model_name,
-    }
+    # Flatten to the decode.json shape via the shared helper so non-speech
+    # (music) + non-lexical (filler) segments are excluded from full_text
+    # but preserved in `segments` with their kind tag.
+    result = _doc_to_audio_transcript(doc, model_name=model_name)
+    if result.get("audio_kind") == "music":
+        print(
+            "[decode] audio: detected music-only / no-speech audio — "
+            "marked has_speech=false, spoken narrative left empty (no hallucinated lyrics).",
+            file=sys.stderr,
+        )
+    return result
 
 
 # ─── Stage 10: HTML viewer for skimming ────────────────────────────────────
@@ -995,18 +1084,36 @@ def run(args: argparse.Namespace) -> None:
     # failure doesn't lose the OCR work. Skippable via --no-audio for fast
     # iteration on overlay-only changes. Must happen BEFORE detect_brand_pitch
     # so the brand-placement classifier can score spoken mentions too.
+    #
+    # Source priority: the platform's own caption track (preferred, free,
+    # near-verbatim) → Whisper (fallback). The URL needed to fetch captions
+    # comes from the yt-dlp sidecar, or from the original CLI arg when the
+    # user passed a URL directly.
     audio_transcript: dict | None = None
     if not getattr(args, "no_audio", False):
-        print(f"[decode] transcribing audio (whisper-{args.whisper_model})...")
-        audio_transcript = transcribe_source_audio(mp4, recipe_dir, model_name=args.whisper_model)
+        source_url = (
+            source_meta.get("webpage_url")
+            or source_meta.get("original_url")
+            or (args.input if "://" in str(args.input) else None)
+        )
+        print(f"[decode] resolving spoken narrative (embedded captions → whisper-{args.whisper_model} fallback)...")
+        audio_transcript = obtain_audio_transcript(
+            source_url, mp4, recipe_dir, model_name=args.whisper_model
+        )
         if audio_transcript:
-            print(f"[decode] transcribed {len(audio_transcript.get('words') or [])} words ({audio_transcript.get('language')})")
+            src = audio_transcript.get("source") or "?"
+            kind = audio_transcript.get("audio_kind") or "?"
+            print(
+                f"[decode] transcript via {src}: "
+                f"{len(audio_transcript.get('words') or [])} word-units, "
+                f"lang={audio_transcript.get('language')}, audio_kind={kind}"
+            )
 
     pitch = detect_brand_pitch(overlays, source_meta, tech["duration_sec"], audio_transcript)
     shot_list = build_shot_list(cuts, overlays, tech["duration_sec"], fmt["kind"])
 
     decode = Decode(
-        schema_version="0.2",
+        schema_version="0.3",
         video_id=recipe_dir.name,
         source_url=source_meta.get("webpage_url") or source_meta.get("original_url") or "",
         source_meta={

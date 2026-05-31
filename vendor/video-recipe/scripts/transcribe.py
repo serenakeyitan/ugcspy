@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -34,19 +35,88 @@ def _load_whisper(model_name: str = "base") -> Any:
     return whisper.load_model(model_name)
 
 
+# A Whisper segment with no_speech_prob above this is treated as
+# non-speech (background music, ambience, silence). Whisper hallucinates
+# plausible-sounding text on music beds, so we DROP the text for these
+# segments rather than letting fake lyrics leak into briefs. 0.6 is
+# conservative: Whisper's own decoder uses 0.6 as its default no-speech
+# threshold for suppressing output, so we match it.
+NO_SPEECH_PROB_THRESHOLD = 0.6
+
+# Non-lexical vocalizations Whisper emits for sighs / "mmm" / "uh" / breaths.
+# We keep these (they're real audio events worth marking in a brief) but tag
+# the segment as non-lexical so downstream consumers know it isn't a scripted
+# line to lip-sync.
+_NON_LEXICAL_RE = re.compile(
+    r"^[\s\W]*(?:"
+    r"u+h+|u+m+|m+h+m+|h+m+|m+m+|a+h+|o+h+|e+r+|hmm+|uh-huh|mm-hmm|"
+    r"\[.*?\]|\(.*?\)|♪+|"  # bracketed cues like [Music], (sighs), and ♪
+    r")[\s\W]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_non_lexical(text: str) -> bool:
+    """True when a segment's text is only a filler sound / bracketed cue
+    (语气助词: sighs, 'mmm', 'uh') rather than scripted speech."""
+    return bool(text) and bool(_NON_LEXICAL_RE.match(text))
+
+
 def _result_to_doc(result: dict[str, Any]) -> dict[str, Any]:
-    """Normalize Whisper's raw result dict into our transcript.json schema."""
+    """Normalize Whisper's raw result dict into our transcript.json schema.
+
+    Non-speech handling (issue: BGM / 语气助词):
+      - Segments whose no_speech_prob exceeds NO_SPEECH_PROB_THRESHOLD are
+        treated as non-speech. We KEEP the segment (with its timing + a
+        kind tag) but blank its text so Whisper's hallucinated lyrics over
+        a music bed never reach the spoken-narrative field.
+      - Segments whose text is only a filler sound / bracketed cue are
+        tagged kind="non_lexical" but their text is preserved.
+      - A top-level `audio_kind` summarizes the whole track: "speech",
+        "music" (no speech segments at all), or "mixed".
+    """
     segments_in = result.get("segments") or []
     segments: list[dict[str, Any]] = []
     words: list[dict[str, Any]] = []
     duration = 0.0
+    speech_seg_count = 0
+    nonspeech_seg_count = 0
     for seg in segments_in:
         start = float(seg.get("start", 0.0))
         end = float(seg.get("end", start))
         text = str(seg.get("text", "")).strip()
+        no_speech_prob = float(seg.get("no_speech_prob", 0.0) or 0.0)
         if end > duration:
             duration = end
-        segments.append({"start": round(start, 3), "end": round(end, 3), "text": text})
+
+        if no_speech_prob >= NO_SPEECH_PROB_THRESHOLD:
+            # Non-speech (music / ambience / silence). Drop the text —
+            # whatever Whisper "heard" here is a hallucination over the bed.
+            nonspeech_seg_count += 1
+            segments.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": "",
+                "kind": "non_speech",
+                "no_speech_prob": round(no_speech_prob, 3),
+            })
+            continue
+
+        kind = "non_lexical" if _is_non_lexical(text) else "speech"
+        if kind == "speech":
+            speech_seg_count += 1
+        segments.append({
+            "start": round(start, 3),
+            "end": round(end, 3),
+            "text": text,
+            "kind": kind,
+            "no_speech_prob": round(no_speech_prob, 3),
+        })
+        # Only real scripted speech contributes word entries used for
+        # lip-sync / cut pairing — non-lexical filler shouldn't become a
+        # "word" the new creator is told to say.
+        if kind != "speech":
+            continue
         for w in seg.get("words", []) or []:
             wstart = float(w.get("start", w.get("startTime", start)))
             wend = float(w.get("end", w.get("endTime", end)))
@@ -54,11 +124,22 @@ def _result_to_doc(result: dict[str, Any]) -> dict[str, Any]:
             if not wtext:
                 continue
             words.append({"start": round(wstart, 3), "end": round(wend, 3), "word": wtext})
+
+    if speech_seg_count == 0 and nonspeech_seg_count > 0:
+        audio_kind = "music"  # nothing but a bed — no spoken narrative
+    elif nonspeech_seg_count > 0:
+        audio_kind = "mixed"
+    else:
+        audio_kind = "speech"
+
     return {
         "language": result.get("language"),
         "duration_sec": round(duration, 3),
         "segments": segments,
         "words": words,
+        "audio_kind": audio_kind,
+        "has_speech": speech_seg_count > 0,
+        "source": "whisper",
     }
 
 
