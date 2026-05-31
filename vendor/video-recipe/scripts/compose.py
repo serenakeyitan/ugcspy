@@ -73,6 +73,20 @@ def parse_args() -> argparse.Namespace:
         help="Apply Kling lip-sync warp to cuts that have audio. Roughly doubles cost (~+$0.084/sec per cut warped). Recommended for talking-head reproductions; pointless for greenscreen-kinetic or AI-montage.",
     )
     p.add_argument(
+        "--backgrounds",
+        type=str,
+        choices=["off", "pinterest", "web"],
+        default="off",
+        help=(
+            "Search the web for a topic-matching background image per cut and composite it "
+            "behind the cut as a blurred backdrop (ffmpeg overlay — no video-gen API cost). "
+            "'pinterest' searches Pinterest first then falls back to generic web image search; "
+            "'web' uses generic image search only; 'off' (default) skips backgrounds entirely. "
+            "Best-effort: a search miss keeps the un-composited clip. Auto-gated to collage / "
+            "greenscreen-kinetic formats (where a backdrop helps) when decode.json is present."
+        ),
+    )
+    p.add_argument(
         "--no-burnin",
         action="store_true",
         help="Skip burning OCR'd overlay text into the reproduction. By default, overlay text from recipe.title_cards / cut.ocr_text / cut.caption is rendered as on-screen text per cut. Use this for testing or when the source's overlay is undesirable in the reproduction.",
@@ -282,6 +296,79 @@ def kling_billed_duration(requested_sec: float) -> int:
     if requested_sec <= 5:
         return 5
     return 10
+
+
+# ─── Per-cut background imagery (Pinterest/web composite) ──────────────────
+#
+# Formats where a searched backdrop actually helps. Greenscreen-kinetic /
+# collage UGC is built ON a background image layer; reproducing it flat
+# looks empty. Talking-head / AI-montage don't benefit (the frame is the
+# subject), so we skip them unless decode.json is absent (then we trust the
+# user's explicit --backgrounds opt-in and apply to every cut).
+_BACKGROUND_ELIGIBLE_FORMATS: frozenset[str] = frozenset({
+    "greenscreen_kinetic_listicle",
+    "collage_voiceover",
+    "ai_montage_kinetic",
+})
+
+
+def backgrounds_eligible(decode: dict | None) -> tuple[bool, str]:
+    """Decide whether --backgrounds should run, given decode signals.
+
+    - decode None (no decode.json) → trust the user's explicit opt-in,
+      apply to all cuts.
+    - decode present with an eligible format.kind → enabled.
+    - decode present with an ineligible kind → disabled (a backdrop would
+      just sit behind a talking head pointlessly)."""
+    if decode is None:
+        return True, "no decode signal (decode.json missing) — applying backgrounds as requested"
+    kind = (decode.get("format") or {}).get("kind")
+    if not kind:
+        return True, "decode present but no format.kind — applying as requested"
+    if kind in _BACKGROUND_ELIGIBLE_FORMATS:
+        return True, f"enabled — format.kind = {kind!r}"
+    return False, (
+        f"disabled — format.kind = {kind!r} is not background-eligible "
+        f"({sorted(_BACKGROUND_ELIGIBLE_FORMATS)}); a backdrop wouldn't help this format."
+    )
+
+
+def _cut_background_query(cut: dict) -> str:
+    """Build the image-search query for a cut from its overlay/caption +
+    scene text. Imported lazily so compose stays importable without the
+    backgrounds module's optional deps."""
+    from scripts.backgrounds import derive_query
+
+    overlay = (cut.get("caption") or cut.get("ocr_text") or "").strip()
+    scene = (resolve_cut_prompt(cut) or "").strip()
+    return derive_query(overlay_text=overlay, scene_description=scene)
+
+
+def _apply_cut_background(
+    cut: dict,
+    dst: Path,
+    out_dir: Path,
+    cut_idx: int,
+    width: int,
+    height: int,
+    sources: list,
+) -> None:
+    """Search for + composite a background behind the cut clip at `dst`,
+    in place. Best-effort: any miss/failure leaves `dst` untouched."""
+    from scripts.backgrounds import composite_background, fetch_background
+
+    query = _cut_background_query(cut)
+    if not query:
+        return
+    bg_img = fetch_background(query, out_dir / f"bg-{cut_idx:02d}.jpg", sources)
+    if not bg_img:
+        return
+    composited = out_dir / f"cut-{cut_idx:02d}-bg.mp4"
+    if composite_background(dst, bg_img, composited, width, height):
+        # Replace the clip in place so downstream stitch/lipsync see the
+        # composited frame.
+        shutil.move(str(composited), str(dst))
+        print(f"[compose] cut {cut_idx}: composited background ('{query}')")
 
 
 # ─── decode.json signal loading + gating ───────────────────────────────────
@@ -589,6 +676,10 @@ def args_signature(args: argparse.Namespace) -> str:
         f"|kling_voice_id={getattr(args, 'kling_voice_id', None) or ''}"
         f"|kling_voice_lang={getattr(args, 'kling_voice_language', 'en')}"
         f"|kling_voice_speed={getattr(args, 'kling_voice_speed', 1.0):.2f}"
+        # backgrounds composites a backdrop into each cut's clip — a cached
+        # plain clip and a cached composited clip aren't interchangeable, so
+        # toggling this must invalidate the resume cache.
+        f"|backgrounds={getattr(args, 'backgrounds', 'off')}"
     )
 
 
@@ -1137,6 +1228,27 @@ def compose(args: argparse.Namespace) -> None:
     tts_provider, tts_reason = pick_tts_provider(cuts, args.tts, lipsync_on)
     print(f"[compose] tts provider: {tts_provider} ({tts_reason})")
 
+    # 2d. Decide whether per-cut background compositing runs. Gated to
+    # backdrop-friendly formats via decode.json. No API cost (pure ffmpeg),
+    # so this is purely an output-quality knob — but it does add wall time
+    # (a web search + download + an ffmpeg re-encode per cut).
+    backgrounds_on = False
+    bg_sources: list = []
+    tech_width = 1080
+    tech_height = 1920
+    if args.backgrounds != "off":
+        backgrounds_on, bg_reason = backgrounds_eligible(decode_signals)
+        print(f"[compose] backgrounds ({args.backgrounds}): {bg_reason}")
+        if backgrounds_on:
+            from scripts.backgrounds import pick_sources
+
+            bg_sources = pick_sources(args.backgrounds)
+            # Output frame size: prefer the source's real dimensions from
+            # decode.json so the backdrop matches the reproduction aspect.
+            tech = (decode_signals or {}).get("technical") or {}
+            tech_width = int(tech.get("width") or 1080) or 1080
+            tech_height = int(tech.get("height") or 1920) or 1920
+
     # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync.
     # Uses kling_billed_duration so the estimate matches what we'll actually
     # pay (Kling rounds 6-9s cuts UP to 10s; cost preflight has to know that).
@@ -1280,6 +1392,23 @@ def compose(args: argparse.Namespace) -> None:
                     f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i}",
                     code=4,
                 )
+
+        # Background composite (#: per-cut Pinterest/web backdrop). Runs on
+        # the finalized text2video clip BEFORE TTS/lipsync so the lipsync
+        # warp (if any) operates on the composited frame. No video-gen API
+        # cost — pure ffmpeg overlay. Best-effort: a search miss or composite
+        # failure keeps the un-composited clip and moves on. Gated to formats
+        # where a backdrop helps (collage/greenscreen); skipped otherwise.
+        if backgrounds_on:
+            _apply_cut_background(
+                cut=cut,
+                dst=dst,
+                out_dir=out_dir,
+                cut_idx=cut_idx,
+                width=int(tech_width),
+                height=int(tech_height),
+                sources=bg_sources,
+            )
 
         # L2: per-cut TTS, aligned to this cut's spoken window.
         # Only renders OpenAI TTS when tts_provider == "openai". When

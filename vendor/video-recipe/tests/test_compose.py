@@ -720,6 +720,7 @@ def _minimal_args():
         kling_voice_id=None,
         kling_voice_language="en",
         kling_voice_speed=1.0,
+        backgrounds="off",
     )
 
 
@@ -829,6 +830,43 @@ def test_args_signature_changes_with_kling_voice_language(_minimal_args):
     _minimal_args.kling_voice_language = "zh"
     sig_zh = compose.args_signature(_minimal_args)
     assert sig_en != sig_zh
+
+
+def test_args_signature_changes_with_backgrounds(_minimal_args):
+    """A cached plain clip and a cached composited-backdrop clip aren't
+    interchangeable, so toggling --backgrounds must invalidate the cache."""
+    sig_off = compose.args_signature(_minimal_args)
+    _minimal_args.backgrounds = "pinterest"
+    sig_pin = compose.args_signature(_minimal_args)
+    _minimal_args.backgrounds = "web"
+    sig_web = compose.args_signature(_minimal_args)
+    assert sig_off != sig_pin
+    assert sig_pin != sig_web
+
+
+# ─── backgrounds_eligible (format gating) ───────────────────────────────────
+
+
+def test_backgrounds_eligible_trusts_user_when_no_decode():
+    on, reason = compose.backgrounds_eligible(None)
+    assert on is True
+    assert "missing" in reason
+
+
+def test_backgrounds_eligible_enabled_for_greenscreen():
+    on, _ = compose.backgrounds_eligible({"format": {"kind": "greenscreen_kinetic_listicle"}})
+    assert on is True
+
+
+def test_backgrounds_eligible_disabled_for_talking_head():
+    on, reason = compose.backgrounds_eligible({"format": {"kind": "talking_head_floating_card"}})
+    assert on is False
+    assert "not background-eligible" in reason
+
+
+def test_backgrounds_eligible_trusts_user_when_kind_absent():
+    on, _ = compose.backgrounds_eligible({"format": {}})
+    assert on is True
 
 
 def test_args_signature_changes_with_kling_voice_speed(_minimal_args):

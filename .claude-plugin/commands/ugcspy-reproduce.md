@@ -78,16 +78,20 @@ cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budg
 
 # Talking-head with lip-sync — adds Kling lipsync warp per cut so mouth matches TTS:
 cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budget 10 --lipsync
+
+# Greenscreen-kinetic / collage — add searched background imagery behind each cut:
+cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budget 10 --backgrounds pinterest
 ```
 
 Pipeline (in order):
 1. For each cut, append the per-cut spoken text to the Kling prompt (L1 — gives diffusion a target for mouth movements, free improvement)
 2. Render each cut via Kling text2video (1-3 min per cut)
-3. For cuts with `transcript`, render per-cut TTS via OpenAI (~1s each)
-4. If `--lipsync` AND the cut has audio: POST the cut to Kling `/v1/videos/lip-sync` with the per-cut TTS as base64 audio → returns a warped MP4 with mouth synced to TTS. Falls back silently to the un-warped clip if Kling rejects (e.g. no face detected).
-5. Mix per-cut TTS into each clip (when not using lipsync — lipsync already bakes audio in)
-6. Concat clips with ffmpeg
-7. Output `vendor/video-recipe/recipes/<videoId>/reproduction.mp4`
+3. If `--backgrounds pinterest|web`: search for a topic-matching image per cut (Pinterest first, generic web fallback) and composite it behind the cut as a blurred backdrop via ffmpeg. No video-gen API cost. Best-effort — a search miss keeps the plain clip. Auto-gated to backdrop-friendly formats (greenscreen-kinetic / collage / ai-montage) when decode.json is present; pointless for talking-head.
+4. For cuts with `transcript`, render per-cut TTS via OpenAI (~1s each)
+5. If `--lipsync` AND the cut has audio: POST the cut to Kling `/v1/videos/lip-sync` with the per-cut TTS as base64 audio → returns a warped MP4 with mouth synced to TTS. Falls back silently to the un-warped clip if Kling rejects (e.g. no face detected).
+6. Mix per-cut TTS into each clip (when not using lipsync — lipsync already bakes audio in)
+7. Concat clips with ffmpeg
+8. Output `vendor/video-recipe/recipes/<videoId>/reproduction.mp4`
 
 Wall time: roughly `cut_count × 90 seconds` for text2video, plus another ~90 seconds per cut for lipsync if `--lipsync`. A 5-cut talking-head with lipsync is ~15 min.
 
@@ -105,6 +109,7 @@ After compose completes, tell the user where reproduction.mp4 lives and offer to
 - **Quality varies wildly per prompt.** Kling and similar models still produce wonky hands, weird motion, and inconsistent characters across cuts. Expect iteration — first try is rarely the keeper.
 - **Lip-sync (`--lipsync`) only works on clear-face cuts.** Kling rejects cuts with no detectable face (e.g. background-only montage, hands-only product shots) with code `1006` "no face detected". Our compose pipeline catches that and silently keeps the un-warped clip rather than aborting — but you'll spend ~$0.084/sec on cuts that fall back. If your source is purely b-roll, omit `--lipsync` entirely.
 - **Lipsync source-video freshness window**: Kling's lipsync only accepts source clips ≤30 days old. We just generated them ourselves so this is fine, but if you re-run lipsync standalone weeks later on cached cuts, it'll fail.
+- **`--backgrounds` is best-effort, and Pinterest is flaky.** Pinterest has no public search API and blocks scrapers aggressively, so `--backgrounds pinterest` frequently returns nothing and silently falls back to generic web image search (which is more reliable). A cut whose search finds nothing keeps its plain clip — no error. Treat searched backgrounds as a bonus, not a guarantee, and eyeball the result. Backgrounds only apply to backdrop-friendly formats (greenscreen-kinetic / collage / ai-montage); they're skipped for talking-head even if you pass the flag.
 - **`B-FREED` and other camelCase brand pronunciations**: Whisper sometimes transcribes BeFreed as "B-FREED" (verified on real Mya video). The per-cut TTS reads that literally as "B dash freed" — sounds awkward. Edit the cut's `transcript` field in recipe.json to "BeFreed" (or your preferred pronunciation) before composing.
 - **Sora 2 is being discontinued Sep 2026.** Don't build workflows depending on it. Kling, Runway, Veo, and Luma are the durable options.
 - **AI-disclosure watermark is burned by default.** Final reproduction.mp4 carries a small "AI-generated" tag bottom-right (configurable via `--disclosure-text` and `--disclosure-position`). Required by FTC + EU AI Act + TikTok ToS for AIGC content; using `--no-disclosure` prints a loud warning. Most platforms now enforce labeling of synthetic content.
