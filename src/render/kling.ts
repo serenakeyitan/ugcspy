@@ -81,20 +81,48 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     const duration = req.duration_sec <= 5 ? 5 : 10;
     const aspect = req.aspect_ratio ?? "9:16";
 
+    // Branch: image-to-video when a first_frame reference image is given,
+    // else text-to-video. image2video locks character identity across cuts
+    // (issue #25) — every cut generated from the SAME reference image keeps
+    // the same face, instead of text2video inventing a new "young woman"
+    // per cut. The two endpoints share the submit/poll/download lifecycle;
+    // only the submit path + body differ.
+    const useImage = typeof req.first_frame === "string" && req.first_frame.length > 0;
+    const endpoint = useImage ? "/v1/videos/image2video" : "/v1/videos/text2video";
+
     // 1. Submit job
-    const submitRes = await this.fetchSigned("/v1/videos/text2video", {
-      method: "POST",
-      body: JSON.stringify({
+    let body: Record<string, unknown>;
+    if (useImage) {
+      // Kling's `image` field accepts either a public URL or a raw
+      // base64-encoded image (no data: prefix per their docs). We accept
+      // both: an http(s) first_frame is passed through; a local file path
+      // is read + base64-encoded inline so the caller doesn't need to host
+      // it anywhere. image2video does NOT take aspect_ratio — the output
+      // ratio is inferred from the reference image.
+      const image = this.resolveImageField(req.first_frame as string);
+      body = {
+        model_name: "kling-v1-6",
+        image,
+        prompt: req.prompt,
+        duration: String(duration),
+        mode: "std",
+      };
+    } else {
+      body = {
         model_name: "kling-v1-6",
         prompt: req.prompt,
         duration: String(duration),
         aspect_ratio: aspect,
         mode: "std", // "pro" is ~2x cost for marginal quality
-      }),
+      };
+    }
+    const submitRes = await this.fetchSigned(endpoint, {
+      method: "POST",
+      body: JSON.stringify(body),
     });
     if (!submitRes.ok) {
       throw new RenderError(
-        `Kling submit failed: ${submitRes.status} ${await submitRes.text()}`,
+        `Kling submit failed (${useImage ? "image2video" : "text2video"}): ${submitRes.status} ${await submitRes.text()}`,
         this.name,
       );
     }
@@ -112,14 +140,14 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     const taskId = submitJson.data?.task_id;
     if (!taskId) throw new RenderError("Kling response missing data.task_id", this.name);
 
-    // 2. Poll until done
+    // 2. Poll until done — same status endpoint shape for both kinds.
     const startedAt = Date.now();
     const POLL_INTERVAL_MS = 5000;
     const TIMEOUT_MS = 8 * 60 * 1000;
     let videoUrl: string | null = null;
     while (Date.now() - startedAt < TIMEOUT_MS) {
       await sleep(POLL_INTERVAL_MS);
-      const statusRes = await this.fetchSigned(`/v1/videos/text2video/${taskId}`);
+      const statusRes = await this.fetchSigned(`${endpoint}/${taskId}`);
       if (!statusRes.ok) continue; // transient — retry on next tick
       const statusJson = (await statusRes.json()) as {
         data?: {
@@ -488,6 +516,48 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       external_id: taskId,
       cost_usd: billableSeconds * this.lipsync_cost_per_second_usd,
     };
+  }
+
+  /**
+   * Resolve a `first_frame` reference into Kling's `image` field value.
+   *
+   *  - http(s) URL → passed through unchanged (Kling fetches it server-side).
+   *  - local file path → read + base64-encoded inline (no data: prefix,
+   *    per Kling's image2video docs).
+   *
+   * Kling caps the inline image at 10MB base64. We check the post-encode
+   * size and reject upfront with a clear remediation rather than burning a
+   * round-trip on a too-large reference. The decode-side keyframe extractor
+   * writes a JPEG at source resolution, which is comfortably under the cap
+   * (a 1080x1920 JPEG is ~200-500KB), but a user could hand-pass anything.
+   */
+  private resolveImageField(firstFrame: string): string {
+    if (/^https?:\/\//i.test(firstFrame)) {
+      return firstFrame;
+    }
+    let imgBuf: Buffer;
+    try {
+      imgBuf = readFileSync(firstFrame);
+    } catch (e) {
+      throw new RenderError(
+        `image2video: failed to read reference image at ${firstFrame}: ${(e as Error).message}. ` +
+          `Pass an http(s) URL or a readable local file path.`,
+        this.name,
+      );
+    }
+    const b64 = imgBuf.toString("base64");
+    const B64_CAP_BYTES = 10 * 1024 * 1024;
+    if (b64.length > B64_CAP_BYTES) {
+      const rawMB = (imgBuf.length / 1024 / 1024).toFixed(1);
+      const b64MB = (b64.length / 1024 / 1024).toFixed(1);
+      throw new RenderError(
+        `image2video: reference image ${firstFrame} is ${imgBuf.length} bytes ` +
+          `(${rawMB}MB raw → ${b64MB}MB base64), over Kling's 10MB inline cap. ` +
+          `Downscale the reference (e.g. re-extract at ≤1080px) or host it and pass a URL instead.`,
+        this.name,
+      );
+    }
+    return b64;
   }
 
   /** Fail fast with an actionable message if keys are unconfigured. */

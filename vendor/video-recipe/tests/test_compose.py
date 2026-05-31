@@ -720,6 +720,7 @@ def _minimal_args():
         kling_voice_id=None,
         kling_voice_language="en",
         kling_voice_speed=1.0,
+        character_ref=None,
     )
 
 
@@ -829,6 +830,54 @@ def test_args_signature_changes_with_kling_voice_language(_minimal_args):
     _minimal_args.kling_voice_language = "zh"
     sig_zh = compose.args_signature(_minimal_args)
     assert sig_en != sig_zh
+
+
+def test_args_signature_changes_with_character_ref(_minimal_args):
+    """character_ref switches every cut between text2video and image2video.
+    Resuming a text2video run after adding a character ref (or vice versa)
+    would mix two render modes in one reproduction — so it MUST invalidate
+    the cache."""
+    sig_none = compose.args_signature(_minimal_args)
+    _minimal_args.character_ref = "reference.jpg"
+    sig_ref = compose.args_signature(_minimal_args)
+    _minimal_args.character_ref = "other.jpg"
+    sig_other = compose.args_signature(_minimal_args)
+    assert sig_none != sig_ref
+    assert sig_ref != sig_other
+
+
+# ─── resolve_character_ref (#25) ────────────────────────────────────────────
+
+
+def test_resolve_character_ref_none_when_unset(tmp_path):
+    assert compose.resolve_character_ref(None, tmp_path) is None
+    assert compose.resolve_character_ref("", tmp_path) is None
+
+
+def test_resolve_character_ref_passes_url_through(tmp_path):
+    url = "https://cdn.example.com/face.jpg"
+    assert compose.resolve_character_ref(url, tmp_path) == url
+
+
+def test_resolve_character_ref_relative_resolves_against_recipe_dir(tmp_path):
+    ref = tmp_path / "reference.jpg"
+    ref.write_bytes(b"\xff\xd8\xff")  # tiny fake jpeg header
+    out = compose.resolve_character_ref("reference.jpg", tmp_path)
+    assert out == str(ref)
+
+
+def test_resolve_character_ref_absolute_path(tmp_path):
+    ref = tmp_path / "abs.jpg"
+    ref.write_bytes(b"\xff\xd8\xff")
+    out = compose.resolve_character_ref(str(ref), tmp_path)
+    assert out == str(ref)
+
+
+def test_resolve_character_ref_missing_file_fails_loudly(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        compose.resolve_character_ref("nope.jpg", tmp_path)
+    assert exc.value.code == 1
+    assert "doesn't exist" in capsys.readouterr().err
 
 
 def test_args_signature_changes_with_kling_voice_speed(_minimal_args):
