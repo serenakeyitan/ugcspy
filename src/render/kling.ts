@@ -34,12 +34,56 @@ import {
  * /v1/videos/text2video/<task_id> every 5s until task_status="succeed"
  * (typical 1-3 min for std mode).
  */
+// Native api.klingai.com model_name strings, VERIFIED against the native
+// schema (302.ai / klingapi.com mirrors, 2026). Use HYPHENS, not dots —
+// "kling-v2-6" is native; "kling-v2.6" is reseller-only and will fail here.
+// NOTE: "kling-v3" is NOT a native model — Kling 3.0 is reseller-only
+// (fal.ai/Vercel), reachable only via a different provider/auth. Don't add it
+// to this map; it would fail every native call.
+export const KLING_DEFAULT_MODEL = "kling-v2-6";
+
+// Per-second USD by model + mode. Third-party-derived (Kling doesn't publish
+// per-second native USD); treat as estimates for the cost preflight — the
+// real Kling bill is authoritative. std/pro ≈ 1.8x; master is the ceiling.
+// Numbers chosen to NOT under-bill (the failure mode that burns users).
+const KLING_COST_PER_SEC: Record<string, { std: number; pro: number }> = {
+  "kling-v1": { std: 0.05, pro: 0.09 },
+  "kling-v1-5": { std: 0.05, pro: 0.09 },
+  "kling-v1-6": { std: 0.05, pro: 0.09 },
+  "kling-v2-master": { std: 0.19, pro: 0.19 }, // master is single-tier
+  "kling-v2-1": { std: 0.09, pro: 0.16 },
+  "kling-v2-1-master": { std: 0.19, pro: 0.19 }, // pro-only; price the ceiling
+  "kling-v2-5-turbo": { std: 0.10, pro: 0.18 },
+  "kling-v2-6": { std: 0.10, pro: 0.18 }, // pro adds native audio
+};
+// Models that only run in pro mode — we coerce mode→pro and warn.
+const KLING_PRO_ONLY = new Set(["kling-v2-1-master"]);
+// Fallback pricing for an unknown model_name — priced at the v2-6 tier so an
+// unrecognized (e.g. brand-new) model never under-bills the cost preflight.
+const KLING_COST_FALLBACK = { std: 0.10, pro: 0.18 };
+// Cheapest baseline (v1-6 std), exposed as the interface-required static cost.
+const KLING_BASELINE_COST_PER_SEC = 0.05;
+
+function klingCostPerSec(model: string, mode: "std" | "pro"): number {
+  const row = KLING_COST_PER_SEC[model] ?? KLING_COST_FALLBACK;
+  return mode === "pro" ? row.pro : row.std;
+}
+
 export class KlingProvider implements VideoGenProvider, LipSyncProvider {
   readonly name = "kling";
-  readonly cost_per_second_usd = 0.10;
+  // Interface-required baseline (cheapest path: v1-6 std). Actual per-call
+  // cost is computed from the chosen model+mode in generateClip — this static
+  // value is only a fallback for callers that read it generically.
+  readonly cost_per_second_usd = KLING_BASELINE_COST_PER_SEC;
   // Kling lip-sync Std pricing per fal.ai mirror (verified May 2026).
   // Roughly doubles per-clip cost when used.
   readonly lipsync_cost_per_second_usd = 0.084;
+
+  // Default model + mode for clip generation when the request doesn't specify.
+  // kling-v2-6 is the best native-callable model (2026): top fidelity + native
+  // audio. pro is its default mode (pro is where v2-6's audio lives).
+  readonly default_model = KLING_DEFAULT_MODEL;
+  readonly default_mode: "std" | "pro" = "pro";
 
   // Base URL is api.klingai.com (NOT api.kling.ai — that domain doesn't host
   // the dev API). Verified empirically.
@@ -81,6 +125,20 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     const duration = req.duration_sec <= 5 ? 5 : 10;
     const aspect = req.aspect_ratio ?? "9:16";
 
+    // Resolve model + mode (request overrides → provider defaults). Coerce
+    // pro-only models to pro and warn rather than failing on a std request.
+    const model = req.model && req.model.length > 0 ? req.model : this.default_model;
+    let mode: "std" | "pro" = req.mode ?? this.default_mode;
+    if (KLING_PRO_ONLY.has(model) && mode !== "pro") {
+      console.warn(`[kling] model ${model} is pro-only; coercing mode std → pro.`);
+      mode = "pro";
+    }
+    // cfg_scale: Kling range is 0..1 (default 0.5). Clamp defensively.
+    const cfgScale =
+      typeof req.cfg_scale === "number"
+        ? Math.max(0, Math.min(1, req.cfg_scale))
+        : undefined;
+
     // Branch: image-to-video when a first_frame reference image is given,
     // else text-to-video. image2video locks character identity across cuts
     // (issue #25) — every cut generated from the SAME reference image keeps
@@ -91,30 +149,32 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     const endpoint = useImage ? "/v1/videos/image2video" : "/v1/videos/text2video";
 
     // 1. Submit job
-    let body: Record<string, unknown>;
+    const body: Record<string, unknown> = {
+      model_name: model,
+      prompt: req.prompt,
+      duration: String(duration),
+      mode,
+    };
+    // Shared quality knobs (both endpoints accept these).
+    if (req.negative_prompt && req.negative_prompt.length > 0) {
+      body.negative_prompt = req.negative_prompt;
+    }
+    if (cfgScale !== undefined) {
+      body.cfg_scale = cfgScale;
+    }
     if (useImage) {
       // Kling's `image` field accepts either a public URL or a raw
-      // base64-encoded image (no data: prefix per their docs). We accept
-      // both: an http(s) first_frame is passed through; a local file path
-      // is read + base64-encoded inline so the caller doesn't need to host
-      // it anywhere. image2video does NOT take aspect_ratio — the output
-      // ratio is inferred from the reference image.
-      const image = this.resolveImageField(req.first_frame as string);
-      body = {
-        model_name: "kling-v1-6",
-        image,
-        prompt: req.prompt,
-        duration: String(duration),
-        mode: "std",
-      };
+      // base64-encoded image (no data: prefix per their docs). A local file
+      // path is read + base64-encoded inline. image2video does NOT take
+      // aspect_ratio — the output ratio is inferred from the reference image.
+      body.image = this.resolveImageField(req.first_frame as string);
+      // Optional end frame (image_tail): motion interpolates first→tail.
+      if (req.end_frame && req.end_frame.length > 0) {
+        body.image_tail = this.resolveImageField(req.end_frame);
+      }
     } else {
-      body = {
-        model_name: "kling-v1-6",
-        prompt: req.prompt,
-        duration: String(duration),
-        aspect_ratio: aspect,
-        mode: "std", // "pro" is ~2x cost for marginal quality
-      };
+      // text2video uses aspect_ratio (image2video derives it from the image).
+      body.aspect_ratio = aspect;
     }
     const submitRes = await this.fetchSigned(endpoint, {
       method: "POST",
@@ -187,7 +247,9 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     return {
       mp4_path: outPath,
       external_id: taskId,
-      cost_usd: duration * this.cost_per_second_usd,
+      // Model+mode-aware cost (not the static baseline) so the running total
+      // reflects what v2-6/pro actually bills, not v1-6/std.
+      cost_usd: duration * klingCostPerSec(model, mode),
     };
   }
 

@@ -163,18 +163,28 @@ describe("KlingProvider.generateClip image2video (character consistency)", () =>
     expect(submit).toBeDefined();
     expect(submit!.method).toBe("POST");
     expect(submit!.headers.authorization).toMatch(/^Bearer eyJ/);
-    const body = JSON.parse(submit!.body) as { image: string; prompt: string; aspect_ratio?: string };
+    const body = JSON.parse(submit!.body) as {
+      image: string;
+      prompt: string;
+      aspect_ratio?: string;
+      model_name: string;
+      mode: string;
+    };
     // Local file → base64 (300 bytes → 400 base64 chars), not a URL.
     expect(body.image).not.toMatch(/^https?:/);
     expect(body.image.length).toBe(400);
     expect(body.prompt).toBe("she gestures to camera");
     // image2video infers ratio from the reference; no aspect_ratio sent.
     expect(body.aspect_ratio).toBeUndefined();
+    // Default model + mode: best native-callable (v2-6) in pro.
+    expect(body.model_name).toBe("kling-v2-6");
+    expect(body.mode).toBe("pro");
 
     // Poll hits the image2video status endpoint, not text2video.
     expect(captured.some((r) => r.url.includes("/v1/videos/image2video/img-task-1"))).toBe(true);
     expect(result.external_id).toBe("img-task-1");
-    expect(result.cost_usd).toBeCloseTo(0.5, 5); // 5s * $0.10
+    // 5s * v2-6 pro ($0.18/s) = $0.90.
+    expect(result.cost_usd).toBeCloseTo(0.9, 5);
   }, 15000);
 
   test("passes an http(s) first_frame URL through unchanged", async () => {
@@ -217,4 +227,126 @@ describe("KlingProvider.generateClip image2video (character consistency)", () =>
       provider.generateClip({ prompt: "p", duration_sec: 5, first_frame: bigPath }),
     ).rejects.toThrow(/10MB/);
   });
+});
+
+/**
+ * Quality params (v2-6 upgrade): model selection, std/pro mode, negative_prompt,
+ * cfg_scale, and the image_tail end-frame.
+ */
+describe("KlingProvider.generateClip quality params", () => {
+  // Reuse the module-level `captured` array that makeMockFetch writes to —
+  // declaring a local one here would shadow it and stay empty.
+  let originalFetch: typeof fetch;
+  const imgDir = join(tmpdir(), "ugcspy-test-quality");
+
+  beforeEach(() => {
+    captured = [];
+    originalFetch = global.fetch;
+    mkdirSync(imgDir, { recursive: true });
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+    try {
+      rmSync(imgDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  });
+
+  function mockOnce() {
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "q-1" } } },
+      {
+        status: 200,
+        json: {
+          data: {
+            task_status: "succeed",
+            task_result: { videos: [{ url: "https://kling.cdn/v.mp4", duration: "5" }] },
+          },
+        },
+      },
+      { status: 200, bodyBuffer: new ArrayBuffer(10) },
+    ]) as typeof fetch;
+  }
+
+  function submitBody() {
+    const submit = captured.find((r) => r.method === "POST" && r.url.includes("/v1/videos/"));
+    return JSON.parse(submit!.body) as Record<string, unknown>;
+  }
+
+  test("text2video defaults to kling-v2-6 pro", async () => {
+    mockOnce();
+    const result = await new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5 });
+    const body = submitBody();
+    expect(body.model_name).toBe("kling-v2-6");
+    expect(body.mode).toBe("pro");
+    // 5s * v2-6 pro ($0.18/s) = $0.90.
+    expect(result.cost_usd).toBeCloseTo(0.9, 5);
+  }, 15000);
+
+  test("honors an explicit model + std mode and prices it accordingly", async () => {
+    mockOnce();
+    const result = await new KlingProvider("a", "s").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+      model: "kling-v1-6",
+      mode: "std",
+    });
+    const body = submitBody();
+    expect(body.model_name).toBe("kling-v1-6");
+    expect(body.mode).toBe("std");
+    // 5s * v1-6 std ($0.05/s) = $0.25.
+    expect(result.cost_usd).toBeCloseTo(0.25, 5);
+  }, 15000);
+
+  test("coerces a pro-only model (v2-1-master) to pro even when std is asked", async () => {
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+      model: "kling-v2-1-master",
+      mode: "std",
+    });
+    expect(submitBody().mode).toBe("pro");
+  }, 15000);
+
+  test("passes negative_prompt and clamped cfg_scale into the body", async () => {
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+      negative_prompt: "blurry, warped hands, watermark",
+      cfg_scale: 1.7, // out of range → clamped to 1
+    });
+    const body = submitBody();
+    expect(body.negative_prompt).toBe("blurry, warped hands, watermark");
+    expect(body.cfg_scale).toBe(1);
+  }, 15000);
+
+  test("omits negative_prompt and cfg_scale when not provided", async () => {
+    mockOnce();
+    await new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5 });
+    const body = submitBody();
+    expect(body.negative_prompt).toBeUndefined();
+    expect(body.cfg_scale).toBeUndefined();
+  }, 15000);
+
+  test("sends image_tail (end frame) alongside image for image2video", async () => {
+    mockOnce();
+    const start = join(imgDir, "start.jpg");
+    const end = join(imgDir, "end.jpg");
+    writeFileSync(start, Buffer.alloc(120, 0x11));
+    writeFileSync(end, Buffer.alloc(120, 0x22));
+    await new KlingProvider("a", "s").generateClip({
+      prompt: "p",
+      duration_sec: 5,
+      first_frame: start,
+      end_frame: end,
+    });
+    const body = submitBody();
+    expect(body.image).toBeDefined();
+    expect(body.image_tail).toBeDefined();
+    // Distinct images → distinct base64.
+    expect(body.image).not.toBe(body.image_tail);
+  }, 15000);
 });

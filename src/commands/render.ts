@@ -7,7 +7,9 @@ import { RenderError } from "../render/types.ts";
  * Subcommand contract for the Python composer.
  *
  * Stdin (JSON): one of
- *   { "kind": "clip",               "prompt": str, "duration_sec": int, "aspect_ratio"?: str }
+ *   { "kind": "clip",               "prompt": str, "duration_sec": int, "aspect_ratio"?: str,
+ *                                   "first_frame"?: str, "end_frame"?: str, "model"?: str,
+ *                                   "mode"?: "std"|"pro", "negative_prompt"?: str, "cfg_scale"?: float }
  *   { "kind": "tts",                "text": str,   "voice"?: str, "speed"?: float }
  *   { "kind": "lipsync",            "video_id": str, "audio_path": str }
  *   { "kind": "lipsync_text2video", "video_id": str, "text": str (≤120 chars),
@@ -51,11 +53,17 @@ export async function runRender(): Promise<void> {
   try {
     if (req.kind === "clip") {
       const provider = new KlingProvider(klingAccess, klingSecret);
+      const mode = req.mode === "std" || req.mode === "pro" ? req.mode : undefined;
       const result = await provider.generateClip({
         prompt: String(req.prompt ?? ""),
         duration_sec: Number(req.duration_sec ?? 5),
         aspect_ratio: (req.aspect_ratio as "9:16" | "16:9" | "1:1") ?? "9:16",
         first_frame: req.first_frame as string | undefined,
+        end_frame: req.end_frame as string | undefined,
+        model: req.model ? String(req.model) : undefined,
+        mode,
+        negative_prompt: req.negative_prompt ? String(req.negative_prompt) : undefined,
+        cfg_scale: typeof req.cfg_scale === "number" ? req.cfg_scale : undefined,
       });
       console.log(
         JSON.stringify({
