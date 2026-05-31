@@ -343,81 +343,7 @@ def fetch_backgrounds(
     return out
 
 
-# ─── ffmpeg composite ────────────────────────────────────────────────────────
-
-
-def build_background_filter(width: int, height: int) -> str:
-    """filter_complex graph: blurred/darkened full-frame background image
-    with the foreground clip scaled to ~78% and centered on top.
-
-    Inputs (caller wires): [0:v] = foreground clip, [1:v] = background image.
-    Output label: [out].
-
-      - background: scale to cover the frame, crop to exact WxH, gaussian
-        blur, darken so the foreground reads clearly.
-      - foreground: scale to fit within ~78% of the frame (preserves the
-        AI clip's aspect), centered.
-
-    Returned as a single -filter_complex string."""
-    fg_w = int(width * 0.78)
-    return (
-        f"[1:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},boxblur=20:2,eq=brightness=-0.18[bg];"
-        f"[0:v]scale={fg_w}:-2[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2[out]"
-    )
-
-
-def composite_background(
-    clip: Path,
-    background_image: Path,
-    out_path: Path,
-    width: int,
-    height: int,
-) -> bool:
-    """Composite `background_image` behind `clip` via ffmpeg, writing
-    `out_path`. Returns True on success, False on ffmpeg failure (caller
-    keeps the un-composited clip). Audio is stream-copied from the clip."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-i",
-            str(clip),
-            "-i",
-            str(background_image),
-            "-filter_complex",
-            build_background_filter(width, height),
-            "-map",
-            "[out]",
-            "-map",
-            "0:a?",  # copy clip audio if present
-            "-c:a",
-            "copy",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-pix_fmt",
-            "yuv420p",
-            str(out_path),
-        ],
-        capture_output=True,
-        check=False,
-    )
-    if proc.returncode != 0 or not out_path.exists():
-        print(
-            f"[backgrounds] composite failed (rc={proc.returncode}); keeping un-composited clip.",
-            file=sys.stderr,
-        )
-        return False
-    return True
-
-
-# ─── Multi-image collage background ─────────────────────────────────────────
+# ─── ffmpeg composite (multi-image collage background) ─────────────────────
 #
 # Greenscreen-kinetic / collage UGC (the Mya pattern) uses a GRID of distinct
 # photos behind the creator — typically a 2x2 (4-image Canva collage), not a
@@ -465,8 +391,8 @@ def build_collage_filter(width: int, height: int, n_images: int) -> str:
       - The assembled grid is blurred + darkened so the foreground reads.
       - The foreground clip is scaled to ~78% width and overlaid centered.
 
-    For n_images == 1 this degrades to the single-image backdrop (same look
-    as build_background_filter), so callers can use one code path."""
+    For n_images == 1 this degrades to a single full-frame blurred backdrop
+    (no grid), so callers can use one code path for any tile count."""
     if n_images < 1:
         raise ValueError("n_images must be >= 1")
     cols, rows = grid_dimensions(n_images)
@@ -521,8 +447,8 @@ def composite_collage_background(
     `out_path`. Returns True on success, False on ffmpeg failure or when no
     images are given (caller keeps the un-composited clip).
 
-    With a single image this produces the same backdrop as
-    composite_background; with 4 it reconstructs the 2x2 Canva-collage look."""
+    With a single image this produces one full-frame blurred backdrop; with 4
+    it reconstructs the 2x2 Canva-collage look."""
     images = [p for p in background_images if p and Path(p).exists()]
     if not images:
         return False

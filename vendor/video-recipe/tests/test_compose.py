@@ -630,13 +630,13 @@ def test_escape_drawtext_handles_backslashes_first():
 
 
 def test_build_drawtext_filter_includes_text():
-    out = compose.build_drawtext_filter("Hello", clip_dur=5.0)
+    out = compose.build_drawtext_filter("Hello")
     assert "Hello" in out
     assert out.startswith("drawtext=")
 
 
 def test_build_drawtext_filter_escapes_special_chars():
-    out = compose.build_drawtext_filter("it's: 50%", clip_dur=5.0)
+    out = compose.build_drawtext_filter("it's: 50%")
     # The output should not contain the raw special chars in a way that
     # would break filtergraph parsing. Specifically: apostrophe + colon
     # + percent should be escaped.
@@ -646,7 +646,7 @@ def test_build_drawtext_filter_escapes_special_chars():
 
 
 def test_build_drawtext_filter_renders_styling():
-    out = compose.build_drawtext_filter("Hi", clip_dur=5.0)
+    out = compose.build_drawtext_filter("Hi")
     # Verify the key styling args are present so a regression in
     # render style breaks the test
     assert "fontcolor=white" in out
@@ -696,7 +696,7 @@ def test_burnin_produces_video_with_correct_duration(synthetic_clip, tmp_path):
     drawtext call actually completes."""
     out = tmp_path / "burned.mp4"
     text = compose.wrap_burnin_text("TOP 5 TIPS\nfor better conversation", columns=30)
-    filter_spec = compose.build_drawtext_filter(text, clip_dur=5.0)
+    filter_spec = compose.build_drawtext_filter(text)
     compose.mix_clip_with_silence(synthetic_clip, out, clip_dur=5.0, burnin=filter_spec)
     assert out.exists()
     duration = compose.ffprobe_duration(out)
@@ -710,7 +710,7 @@ def test_burnin_handles_apostrophes_and_special_chars(synthetic_clip, tmp_path):
     out = tmp_path / "burned-special.mp4"
     tricky_text = "Save 50% off — it's a steal, today only!"
     wrapped = compose.wrap_burnin_text(tricky_text)
-    filter_spec = compose.build_drawtext_filter(wrapped, clip_dur=5.0)
+    filter_spec = compose.build_drawtext_filter(wrapped)
     # Should not raise — the escape function is doing its job
     compose.mix_clip_with_silence(synthetic_clip, out, clip_dur=5.0, burnin=filter_spec)
     assert out.exists()

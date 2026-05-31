@@ -132,56 +132,7 @@ def test_fetch_background_none_when_all_sources_empty(tmp_path):
     assert not (tmp_path / "bg.jpg").exists()
 
 
-# ─── ffmpeg composite ────────────────────────────────────────────────────────
-
-
-def test_build_background_filter_shape():
-    f = backgrounds.build_background_filter(1080, 1920)
-    # Background scaled+cropped to frame, blurred, darkened; fg overlaid centered.
-    assert "scale=1080:1920" in f
-    assert "crop=1080:1920" in f
-    assert "boxblur" in f
-    assert "overlay=(W-w)/2:(H-h)/2[out]" in f
-    # Foreground scaled to 78% width (1080 * 0.78 = 842, even).
-    assert "scale=842:-2[fg]" in f
-
-
-@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg not on PATH")
-def test_composite_background_produces_video(tmp_path):
-    # Synthetic foreground clip + synthetic background image.
-    clip = tmp_path / "cut.mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-         "-i", "color=teal:320x568:duration=2:rate=24", "-pix_fmt", "yuv420p", str(clip)],
-        check=True,
-    )
-    bg = tmp_path / "bg.jpg"
-    subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-         "-i", "color=orange:640x640:duration=1", "-frames:v", "1", str(bg)],
-        check=True,
-    )
-    out = tmp_path / "composited.mp4"
-    ok = backgrounds.composite_background(clip, bg, out, 320, 568)
-    assert ok is True
-    assert out.exists() and out.stat().st_size > 0
-    # Output is a valid 320x568 video.
-    probe = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(out)],
-        capture_output=True, text=True, check=True,
-    )
-    assert probe.stdout.strip().replace(" ", "") == "320,568"
-
-
-def test_composite_background_returns_false_on_bad_input(tmp_path):
-    ok = backgrounds.composite_background(
-        tmp_path / "nope.mp4", tmp_path / "nope.jpg", tmp_path / "out.mp4", 320, 568
-    )
-    assert ok is False
-
-
-# ─── multi-image collage ─────────────────────────────────────────────────────
+# ─── ffmpeg composite (multi-image collage) ────────────────────────────────
 
 
 @pytest.mark.parametrize(
