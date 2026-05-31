@@ -721,6 +721,7 @@ def _minimal_args():
         kling_voice_language="en",
         kling_voice_speed=1.0,
         backgrounds="off",
+        backgrounds_tiles=4,
     )
 
 

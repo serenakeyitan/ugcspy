@@ -78,12 +78,26 @@ def parse_args() -> argparse.Namespace:
         choices=["off", "pinterest", "web"],
         default="off",
         help=(
-            "Search the web for a topic-matching background image per cut and composite it "
-            "behind the cut as a blurred backdrop (ffmpeg overlay — no video-gen API cost). "
+            "Search the web for topic-matching background imagery per cut and composite it "
+            "behind the cut (ffmpeg overlay — no video-gen API cost). "
             "'pinterest' searches Pinterest first then falls back to generic web image search; "
             "'web' uses generic image search only; 'off' (default) skips backgrounds entirely. "
-            "Best-effort: a search miss keeps the un-composited clip. Auto-gated to collage / "
-            "greenscreen-kinetic formats (where a backdrop helps) when decode.json is present."
+            "By default builds a multi-image collage grid (see --backgrounds-tiles) matching the "
+            "Canva-collage look of greenscreen-kinetic UGC. Best-effort: a search miss keeps the "
+            "un-composited clip. Auto-gated to collage / greenscreen-kinetic formats when "
+            "decode.json is present."
+        ),
+    )
+    p.add_argument(
+        "--backgrounds-tiles",
+        type=int,
+        default=4,
+        help=(
+            "How many distinct images to tile into the per-cut background collage. "
+            "4 (default) reconstructs the classic 2x2 Canva-collage look; 1 = a single blurred "
+            "full-frame backdrop; 2/3/6/9 etc. pick near-square grids. Only used when "
+            "--backgrounds is pinterest/web. Fewer images are found than requested → the grid "
+            "uses whatever was fetched."
         ),
     )
     p.add_argument(
@@ -352,23 +366,31 @@ def _apply_cut_background(
     width: int,
     height: int,
     sources: list,
+    tiles: int = 4,
 ) -> None:
     """Search for + composite a background behind the cut clip at `dst`,
-    in place. Best-effort: any miss/failure leaves `dst` untouched."""
-    from scripts.backgrounds import composite_background, fetch_background
+    in place. Builds a multi-image collage grid of `tiles` images (the
+    Canva-collage look of greenscreen-kinetic UGC); tiles=1 produces a
+    single blurred backdrop. Best-effort: any miss/failure leaves `dst`
+    untouched."""
+    from scripts.backgrounds import composite_collage_background, fetch_backgrounds
 
     query = _cut_background_query(cut)
     if not query:
         return
-    bg_img = fetch_background(query, out_dir / f"bg-{cut_idx:02d}.jpg", sources)
-    if not bg_img:
+    n = max(1, int(tiles))
+    bg_imgs = fetch_backgrounds(
+        query, out_dir, sources, count=n, prefix=f"bg-{cut_idx:02d}"
+    )
+    if not bg_imgs:
         return
     composited = out_dir / f"cut-{cut_idx:02d}-bg.mp4"
-    if composite_background(dst, bg_img, composited, width, height):
+    if composite_collage_background(dst, bg_imgs, composited, width, height):
         # Replace the clip in place so downstream stitch/lipsync see the
         # composited frame.
         shutil.move(str(composited), str(dst))
-        print(f"[compose] cut {cut_idx}: composited background ('{query}')")
+        layout = "1-image backdrop" if len(bg_imgs) == 1 else f"{len(bg_imgs)}-image collage"
+        print(f"[compose] cut {cut_idx}: composited {layout} ('{query}')")
 
 
 # ─── decode.json signal loading + gating ───────────────────────────────────
@@ -678,8 +700,10 @@ def args_signature(args: argparse.Namespace) -> str:
         f"|kling_voice_speed={getattr(args, 'kling_voice_speed', 1.0):.2f}"
         # backgrounds composites a backdrop into each cut's clip — a cached
         # plain clip and a cached composited clip aren't interchangeable, so
-        # toggling this must invalidate the resume cache.
+        # toggling this (or the tile count, which changes the collage layout)
+        # must invalidate the resume cache.
         f"|backgrounds={getattr(args, 'backgrounds', 'off')}"
+        f"|backgrounds_tiles={getattr(args, 'backgrounds_tiles', 4)}"
     )
 
 
@@ -1408,6 +1432,7 @@ def compose(args: argparse.Namespace) -> None:
                 width=int(tech_width),
                 height=int(tech_height),
                 sources=bg_sources,
+                tiles=int(getattr(args, "backgrounds_tiles", 4)),
             )
 
         # L2: per-cut TTS, aligned to this cut's spoken window.

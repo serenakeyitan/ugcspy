@@ -282,6 +282,67 @@ def fetch_background(
     return None
 
 
+def fetch_backgrounds(
+    query: str,
+    dest_dir: Path,
+    sources: list[ImageSource],
+    *,
+    count: int = 4,
+    prefix: str = "bg",
+    timeout_sec: int = 20,
+) -> list[Path]:
+    """Download up to `count` DISTINCT images for `query` into `dest_dir`,
+    named `<prefix>-0.jpg`, `<prefix>-1.jpg`, … Returns the paths actually
+    written (may be fewer than `count`, or empty).
+
+    This is the collage source: a multi-image grid (e.g. Mya's 4-image
+    Canva background) needs several different photos, not the same one
+    tiled. We walk the source chain, dedupe by URL, and keep going across
+    sources until we have `count` images or run out of candidates.
+
+    Best-effort by contract — never raises on network/source failure."""
+    if not query or count < 1:
+        return []
+    try:
+        import requests
+    except ImportError:
+        return []
+
+    out: list[Path] = []
+    seen_urls: set[str] = set()
+    for src in sources:
+        if len(out) >= count:
+            break
+        # Ask for more than we need so dedupe + fetch failures still leave
+        # enough to fill the grid.
+        candidates = src.search(query, limit=max(count * 2, 8))
+        for img_url in candidates:
+            if len(out) >= count:
+                break
+            if img_url in seen_urls:
+                continue
+            seen_urls.add(img_url)
+            dest = dest_dir / f"{prefix}-{len(out)}.jpg"
+            try:
+                r = requests.get(img_url, timeout=timeout_sec, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code != 200 or not r.content:
+                    continue
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(r.content)
+                if dest.stat().st_size > 0:
+                    out.append(dest)
+            except Exception:
+                continue
+    if out:
+        print(f"[backgrounds] fetched {len(out)}/{count} images for '{query}' (collage)")
+    else:
+        print(
+            f"[backgrounds] no images found for '{query}' (tried {', '.join(s.name for s in sources)})",
+            file=sys.stderr,
+        )
+    return out
+
+
 # ─── ffmpeg composite ────────────────────────────────────────────────────────
 
 
@@ -350,6 +411,147 @@ def composite_background(
     if proc.returncode != 0 or not out_path.exists():
         print(
             f"[backgrounds] composite failed (rc={proc.returncode}); keeping un-composited clip.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+# ─── Multi-image collage background ─────────────────────────────────────────
+#
+# Greenscreen-kinetic / collage UGC (the Mya pattern) uses a GRID of distinct
+# photos behind the creator — typically a 2x2 (4-image Canva collage), not a
+# single backdrop. This reconstructs that look: tile N images into a grid,
+# blur + darken the whole grid, then overlay the foreground clip centered.
+
+
+def grid_dimensions(n: int) -> tuple[int, int]:
+    """Pick (cols, rows) for an n-tile grid, biased to near-square layouts
+    that read well behind a 9:16 frame.
+
+      1 -> 1x1, 2 -> 2x1, 3 -> 3x1, 4 -> 2x2, 5/6 -> 3x2,
+      7/8/9 -> 3x3, more -> ceil(sqrt) square-ish.
+
+    Returns (cols, rows) such that cols*rows >= n."""
+    if n <= 1:
+        return 1, 1
+    if n == 2:
+        return 2, 1
+    if n == 3:
+        return 3, 1
+    if n == 4:
+        return 2, 2
+    if n <= 6:
+        return 3, 2
+    # General fallback: as square as possible.
+    import math
+
+    cols = math.ceil(math.sqrt(n))
+    rows = math.ceil(n / cols)
+    return cols, rows
+
+
+def build_collage_filter(width: int, height: int, n_images: int) -> str:
+    """filter_complex graph for an N-image collage backdrop behind the clip.
+
+    Input wiring (caller must match): [0:v] = foreground clip, then
+    [1:v]..[N:v] = the N background images in order.
+    Output label: [out].
+
+    Pipeline:
+      - Each image i is scaled to cover its grid cell and cropped to the
+        exact cell size (no letterboxing inside a tile).
+      - The cells are assembled with xstack into the full WxH grid.
+      - The assembled grid is blurred + darkened so the foreground reads.
+      - The foreground clip is scaled to ~78% width and overlaid centered.
+
+    For n_images == 1 this degrades to the single-image backdrop (same look
+    as build_background_filter), so callers can use one code path."""
+    if n_images < 1:
+        raise ValueError("n_images must be >= 1")
+    cols, rows = grid_dimensions(n_images)
+    cell_w = width // cols
+    cell_h = height // rows
+
+    parts: list[str] = []
+    # Scale + crop each image input to its cell. Image inputs start at [1:v].
+    for i in range(n_images):
+        src = f"[{i + 1}:v]"
+        parts.append(
+            f"{src}scale={cell_w}:{cell_h}:force_original_aspect_ratio=increase,"
+            f"crop={cell_w}:{cell_h},setsar=1[t{i}]"
+        )
+
+    if n_images == 1:
+        grid_label = "t0"
+    else:
+        # xstack layout string: one "x_y" per input, in row-major order.
+        layout_cells: list[str] = []
+        for idx in range(n_images):
+            r = idx // cols
+            c = idx % cols
+            layout_cells.append(f"{c * cell_w}_{r * cell_h}")
+        inputs = "".join(f"[t{i}]" for i in range(n_images))
+        layout = "|".join(layout_cells)
+        parts.append(
+            f"{inputs}xstack=inputs={n_images}:layout={layout}:fill=black[grid]"
+        )
+        grid_label = "grid"
+
+    # The grid may not exactly fill WxH when width/height aren't divisible by
+    # cols/rows — pad to the exact frame, then blur + darken.
+    parts.append(
+        f"[{grid_label}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},boxblur=20:2,eq=brightness=-0.18[bg]"
+    )
+    fg_w = int(width * 0.78)
+    parts.append(f"[0:v]scale={fg_w}:-2[fg]")
+    parts.append("[bg][fg]overlay=(W-w)/2:(H-h)/2[out]")
+    return ";".join(parts)
+
+
+def composite_collage_background(
+    clip: Path,
+    background_images: list[Path],
+    out_path: Path,
+    width: int,
+    height: int,
+) -> bool:
+    """Composite an N-image collage grid behind `clip` via ffmpeg, writing
+    `out_path`. Returns True on success, False on ffmpeg failure or when no
+    images are given (caller keeps the un-composited clip).
+
+    With a single image this produces the same backdrop as
+    composite_background; with 4 it reconstructs the 2x2 Canva-collage look."""
+    images = [p for p in background_images if p and Path(p).exists()]
+    if not images:
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(clip)]
+    for img in images:
+        cmd += ["-i", str(img)]
+    cmd += [
+        "-filter_complex",
+        build_collage_filter(width, height, len(images)),
+        "-map",
+        "[out]",
+        "-map",
+        "0:a?",  # copy clip audio if present
+        "-c:a",
+        "copy",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-pix_fmt",
+        "yuv420p",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, check=False)
+    if proc.returncode != 0 or not out_path.exists():
+        print(
+            f"[backgrounds] collage composite failed (rc={proc.returncode}); "
+            f"keeping un-composited clip.",
             file=sys.stderr,
         )
         return False

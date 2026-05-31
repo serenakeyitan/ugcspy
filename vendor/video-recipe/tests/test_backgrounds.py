@@ -179,3 +179,135 @@ def test_composite_background_returns_false_on_bad_input(tmp_path):
         tmp_path / "nope.mp4", tmp_path / "nope.jpg", tmp_path / "out.mp4", 320, 568
     )
     assert ok is False
+
+
+# ─── multi-image collage ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "n,expected",
+    [
+        (1, (1, 1)),
+        (2, (2, 1)),
+        (3, (3, 1)),
+        (4, (2, 2)),
+        (5, (3, 2)),
+        (6, (3, 2)),
+        (9, (3, 3)),
+    ],
+)
+def test_grid_dimensions(n, expected):
+    assert backgrounds.grid_dimensions(n) == expected
+
+
+def test_grid_dimensions_covers_n():
+    # cols*rows must always be >= n so every image gets a cell.
+    for n in range(1, 17):
+        cols, rows = backgrounds.grid_dimensions(n)
+        assert cols * rows >= n
+
+
+def test_build_collage_filter_single_image_has_no_xstack():
+    f = backgrounds.build_collage_filter(1080, 1920, 1)
+    assert "xstack" not in f  # 1 tile degrades to a plain backdrop
+    assert "[0:v]scale=842:-2[fg]" in f
+    assert "overlay=(W-w)/2:(H-h)/2[out]" in f
+
+
+def test_build_collage_filter_four_images_makes_2x2_grid():
+    f = backgrounds.build_collage_filter(1080, 1920, 4)
+    # 4 image inputs scaled to 540x960 cells (1080/2 x 1920/2).
+    assert "[1:v]scale=540:960" in f
+    assert "[4:v]scale=540:960" in f
+    # xstack assembles 4 inputs in a 2x2 layout (row-major cell offsets).
+    assert "xstack=inputs=4:layout=0_0|540_0|0_960|540_960" in f
+    assert "[out]" in f
+
+
+def test_build_collage_filter_two_images_side_by_side():
+    f = backgrounds.build_collage_filter(1080, 1920, 2)
+    assert "[1:v]scale=540:1920" in f  # 2 cols, 1 row -> 540 wide, full height
+    assert "xstack=inputs=2:layout=0_0|540_0" in f
+
+
+def test_build_collage_filter_rejects_zero():
+    with pytest.raises(ValueError):
+        backgrounds.build_collage_filter(1080, 1920, 0)
+
+
+def test_fetch_backgrounds_dedupes_and_caps(tmp_path, monkeypatch):
+    """fetch_backgrounds should collect up to `count` DISTINCT images across
+    the source chain, deduping repeated URLs."""
+
+    class FakeSource:
+        name = "fake"
+
+        def __init__(self, urls):
+            self._urls = urls
+
+        def search(self, query, *, limit=5):
+            return self._urls
+
+    # Two sources; second repeats one URL from the first (should dedupe).
+    sources = [
+        FakeSource(["https://x/a.jpg", "https://x/b.jpg"]),
+        FakeSource(["https://x/b.jpg", "https://x/c.jpg", "https://x/d.jpg"]),
+    ]
+
+    class FakeResp:
+        status_code = 200
+        content = b"\xff\xd8\xff\xe0fakejpeg"
+
+    # backgrounds.py does a lazy `import requests` inside the function, so we
+    # patch the real requests module's get (what the lazy import resolves to).
+    import requests
+
+    monkeypatch.setattr(requests, "get", lambda *a, **k: FakeResp())
+    out = backgrounds.fetch_backgrounds("waves", tmp_path, sources, count=4, prefix="bg")
+    # a, b, c, d — 4 distinct (the repeated b.jpg deduped, so we reach across
+    # both sources to fill the grid).
+    assert len(out) == 4
+    names = sorted(p.name for p in out)
+    assert names == ["bg-0.jpg", "bg-1.jpg", "bg-2.jpg", "bg-3.jpg"]
+
+
+def test_fetch_backgrounds_empty_on_blank_query(tmp_path):
+    assert backgrounds.fetch_backgrounds("", tmp_path, backgrounds.pick_sources("web")) == []
+
+
+@pytest.mark.skipif(not _HAS_FFMPEG, reason="ffmpeg not on PATH")
+def test_composite_collage_background_4up(tmp_path):
+    """Real ffmpeg: 4 distinct color tiles composite into a 2x2 grid behind
+    the clip, output is a valid frame-sized video."""
+    clip = tmp_path / "cut.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+         "-i", "color=teal:320x568:duration=2:rate=24", "-pix_fmt", "yuv420p", str(clip)],
+        check=True,
+    )
+    colors = ["red", "green", "blue", "yellow"]
+    imgs = []
+    for i, c in enumerate(colors):
+        p = tmp_path / f"bg-{i}.jpg"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+             "-i", f"color={c}:400x400:duration=1", "-frames:v", "1", str(p)],
+            check=True,
+        )
+        imgs.append(p)
+    out = tmp_path / "collage.mp4"
+    ok = backgrounds.composite_collage_background(clip, imgs, out, 320, 568)
+    assert ok is True
+    assert out.exists() and out.stat().st_size > 0
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    assert probe.stdout.strip().replace(" ", "") == "320,568"
+
+
+def test_composite_collage_background_empty_list_returns_false(tmp_path):
+    assert backgrounds.composite_collage_background(
+        tmp_path / "clip.mp4", [], tmp_path / "out.mp4", 320, 568
+    ) is False
