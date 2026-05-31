@@ -3,6 +3,12 @@
 Builds a synthetic 6s mp4 with three 2s color blocks (red/green/blue) so we can
 assert the detector finds the obvious cuts. ffmpeg is required at test time;
 the test is skipped if it's not available.
+
+scenedetect is a declared core dependency, but the import is lazy (inside
+detect_cuts() to avoid loading opencv at import time). Skip the whole module
+when it isn't installed so a partial dev environment doesn't hard-fail with
+ModuleNotFoundError — same tolerance the suite already gives missing ffmpeg /
+tesseract / whisper. A full `pip install -e .` installs it and runs these for real.
 """
 
 from __future__ import annotations
@@ -13,6 +19,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("scenedetect")
 
 from scripts import detect_cuts
 
