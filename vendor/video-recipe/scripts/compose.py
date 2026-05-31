@@ -73,6 +73,19 @@ def parse_args() -> argparse.Namespace:
         help="Apply Kling lip-sync warp to cuts that have audio. Roughly doubles cost (~+$0.084/sec per cut warped). Recommended for talking-head reproductions; pointless for greenscreen-kinetic or AI-montage.",
     )
     p.add_argument(
+        "--character-ref",
+        type=str,
+        default=None,
+        help=(
+            "Path to a reference face image (or an http(s) URL) for Kling image2video "
+            "character consistency (#25). When set, every cut is generated FROM this image "
+            "instead of pure text2video — so the same creator's face appears across all cuts "
+            "rather than a different person per cut. /ugcspy-remix passes the character video's "
+            "decode reference.jpg here. Same per-second cost as text2video. Background is still "
+            "prompt-driven (v1): the target's scene description rides in each cut prompt."
+        ),
+    )
+    p.add_argument(
         "--backgrounds",
         type=str,
         choices=["off", "pinterest", "web"],
@@ -292,6 +305,39 @@ def kling_billed_duration(requested_sec: float) -> int:
     if requested_sec <= 5:
         return 5
     return 10
+
+
+# ─── Character reference (image2video, issue #25) ──────────────────────────
+
+
+def resolve_character_ref(raw: str | None, recipe_dir: Path) -> str | None:
+    """Resolve --character-ref into a value to pass as the render
+    `first_frame`. Returns None when unset.
+
+    - http(s) URL → returned unchanged (Kling fetches it server-side; the
+      TS adapter passes URLs straight through).
+    - absolute or relative file path → resolved (relative paths resolve
+      against the recipe dir, where decode writes reference.jpg) and
+      validated to exist. Returns the absolute path string.
+
+    Fails loudly with code 1 on a missing local file — better than
+    discovering a typo'd path after paying for the first cut."""
+    if not raw:
+        return None
+    if raw.startswith(("http://", "https://")):
+        return raw
+    p = Path(raw)
+    if not p.is_absolute():
+        p = recipe_dir / raw
+    if not p.exists():
+        fail(
+            f"--character-ref points at {p}, which doesn't exist. Pass an http(s) URL, an "
+            f"absolute path, or a path relative to the recipe dir. /ugcspy-decode writes the "
+            f"character video's reference frame to <recipe_dir>/reference.jpg — decode the "
+            f"character video first (or drop --character-ref to use plain text2video).",
+            code=1,
+        )
+    return str(p)
 
 
 # ─── Per-cut background imagery (Pinterest/web composite) ──────────────────
@@ -676,6 +722,10 @@ def args_signature(args: argparse.Namespace) -> str:
         f"|kling_voice_id={getattr(args, 'kling_voice_id', None) or ''}"
         f"|kling_voice_lang={getattr(args, 'kling_voice_language', 'en')}"
         f"|kling_voice_speed={getattr(args, 'kling_voice_speed', 1.0):.2f}"
+        # character_ref switches every cut between text2video and image2video,
+        # so it MUST invalidate the cache — resuming a text2video run with a
+        # character ref (or vice versa) would mix two render modes.
+        f"|character_ref={getattr(args, 'character_ref', None) or ''}"
         # backgrounds composites a backdrop into each cut's clip — a cached
         # plain clip and a cached composited clip aren't interchangeable, so
         # toggling this (or the tile count, which changes the collage layout)
@@ -1157,7 +1207,17 @@ def compose(args: argparse.Namespace) -> None:
     tts_provider, tts_reason = pick_tts_provider(cuts, args.tts, lipsync_on)
     print(f"[compose] tts provider: {tts_provider} ({tts_reason})")
 
-    # 2d. Decide whether per-cut background compositing runs. Gated to
+    # 2d. Resolve the character reference image (#25). When set, cuts route
+    # through Kling image2video (face locked across cuts) instead of
+    # text2video. A relative path resolves against the recipe dir (where
+    # decode writes reference.jpg); an http(s) URL or absolute path is used
+    # as-is. We validate existence upfront so we don't discover a typo'd
+    # path on the first paid cut.
+    character_ref = resolve_character_ref(args.character_ref, args.recipe_dir)
+    if character_ref:
+        print(f"[compose] character reference: {character_ref} — cuts use image2video (face locked across cuts)")
+
+    # 2d-bis. Decide whether per-cut background compositing runs. Gated to
     # backdrop-friendly formats via decode.json. No API cost (pure ffmpeg),
     # so this is purely an output-quality knob — but it does add wall time
     # (a web search + download + an ffmpeg re-encode per cut).
@@ -1299,10 +1359,11 @@ def compose(args: argparse.Namespace) -> None:
                 )
             else:
                 print(f"[compose] rendering cut {i}/{len(cuts) - 1} ({billed_dur}s)...")
-            result = call_render(
-                args.ugcspy_bin,
-                {"kind": "clip", "prompt": prompt, "duration_sec": billed_dur},
-            )
+            clip_payload = {"kind": "clip", "prompt": prompt, "duration_sec": billed_dur}
+            if character_ref:
+                # image2video: lock the creator's face across cuts (#25).
+                clip_payload["first_frame"] = character_ref
+            result = call_render(args.ugcspy_bin, clip_payload)
             mp4 = Path(result["mp4_path"])
             if not mp4.exists():
                 fail(f"render returned mp4_path={mp4} but file doesn't exist", code=2)

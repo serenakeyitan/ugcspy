@@ -98,6 +98,13 @@ class Decode:
     # When the audio is music-only / non-speech, has_speech is False and the
     # spoken-narrative fields are empty rather than filled with ASR noise.
     audio_transcript: dict | None = None
+    # v0.3: filename (relative to the recipe dir) of a source-resolution
+    # reference keyframe extracted for Kling image2video character
+    # consistency (#25). None when extraction was skipped (--no-reference)
+    # or failed. /ugcspy-remix passes this as the compose `--character-ref`
+    # so every cut keeps the SAME face instead of text2video inventing a new
+    # person per cut.
+    reference_image: str | None = None
 
 
 # ─── CLI helpers ────────────────────────────────────────────────────────────
@@ -130,6 +137,11 @@ def parse_args() -> argparse.Namespace:
         "--whisper-model",
         default="base",
         help="Whisper model size for audio transcription: tiny|base|small|medium|large. Default 'base' is the right floor for English UGC.",
+    )
+    p.add_argument(
+        "--no-reference",
+        action="store_true",
+        help="Skip extracting the source-resolution reference keyframe used for Kling image2video character consistency (#25). The keyframe is cheap (one ffmpeg seek) and lets /ugcspy-remix lock the creator's face across cuts; use this only when you don't need the character-reference path.",
     )
     return p.parse_args()
 
@@ -256,6 +268,52 @@ def extract_frames_per_second(mp4: Path, frames_dir: Path, fps: float) -> int:
     if proc.returncode != 0:
         fail(f"ffmpeg frame extract failed: {proc.stderr[-300:]}", code=2)
     return len(list(frames_dir.glob("*.jpg")))
+
+
+def extract_reference_frame(mp4: Path, out_path: Path, duration_sec: float) -> Path | None:
+    """Extract ONE reference keyframe at SOURCE resolution for use as a
+    Kling image2video character reference (issue #25).
+
+    v1 heuristic: grab a frame ~40% into the video. Rationale — the very
+    first frames are often a hook card / black intro, and the tail is
+    often the brand/CTA card; the 40% mark is usually mid-content where
+    the creator's face is on screen and steady. This is deliberately
+    simple and cheap; a face-detection + sharpness scorer is a documented
+    follow-up (the issue spells out variance-of-Laplacian + largest face),
+    but the midpoint heuristic ships the feature now.
+
+    Saved at native resolution (NO downscale — Kling wants full detail for
+    identity fidelity). Returns the path on success, None on ffmpeg failure
+    (decode continues; character ref is optional).
+    """
+    # Clamp the seek to a sane spot even for very short/zero-duration probes.
+    seek = max(0.0, duration_sec * 0.4) if duration_sec > 0 else 0.0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            f"{seek:.3f}",
+            "-i",
+            str(mp4),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",  # high quality JPEG; we want detail, not small files
+            str(out_path),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0 or not out_path.exists():
+        print(
+            f"[decode] reference-frame: ffmpeg failed to grab a keyframe "
+            f"(rc={proc.returncode}); character reference unavailable.",
+            file=sys.stderr,
+        )
+        return None
+    return out_path
 
 
 def ocr_all_frames(frames_dir: Path, ocr_dir: Path) -> dict[str, str]:
@@ -1112,6 +1170,17 @@ def run(args: argparse.Namespace) -> None:
     pitch = detect_brand_pitch(overlays, source_meta, tech["duration_sec"], audio_transcript)
     shot_list = build_shot_list(cuts, overlays, tech["duration_sec"], fmt["kind"])
 
+    # Reference keyframe for Kling image2video character consistency (#25).
+    # Cheap (one ffmpeg seek), source-resolution, optional. /ugcspy-remix
+    # feeds this as the compose --character-ref so the creator's face is
+    # locked across every generated cut.
+    reference_image: str | None = None
+    if not getattr(args, "no_reference", False):
+        ref_path = recipe_dir / "reference.jpg"
+        if extract_reference_frame(mp4, ref_path, tech["duration_sec"]):
+            reference_image = ref_path.name
+            print(f"[decode] reference keyframe -> {ref_path} (for image2video character lock)")
+
     decode = Decode(
         schema_version="0.3",
         video_id=recipe_dir.name,
@@ -1139,6 +1208,7 @@ def run(args: argparse.Namespace) -> None:
             ],
         },
         audio_transcript=audio_transcript,
+        reference_image=reference_image,
     )
 
     decode_json = recipe_dir / "decode.json"

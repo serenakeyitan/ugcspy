@@ -29,8 +29,9 @@ cd vendor/video-recipe && python3.11 -m scripts.decode <url-or-recipe-dir>
 ```
 
 Tell the user upfront this takes ~30 seconds (downloads if needed, extracts frames, OCRs every second, detects cuts, classifies format). It writes:
-- `recipes/<video_id>/decode.json` — structured artifact
+- `recipes/<video_id>/decode.json` — structured artifact (includes `reference_image` — the keyframe filename for character-consistent remixing)
 - `recipes/<video_id>/decode.html` — browser-skimmable view
+- `recipes/<video_id>/reference.jpg` — a source-resolution keyframe (~40% into the video) for Kling image2video character consistency (#25). `/ugcspy-remix` feeds this as `--character-ref` so the creator's face stays consistent across AI-generated cuts. Skip with `--no-reference`.
 
 ## Step 3 — Render the summary in chat
 

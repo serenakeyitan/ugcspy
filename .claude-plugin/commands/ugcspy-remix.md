@@ -116,6 +116,27 @@ Plus any creator-specific notes:
 
 After showing the brief in chat, offer to save it to `vendor/video-recipe/recipes/<target-id>/remix-as-<source-uploader>.md` for the creator to reference later. Default to NOT saving unless asked — most users will just copy/paste from chat.
 
+## Step 7 — (Optional) AI render with the source creator's FACE (image2video, #25)
+
+The brief above is for a *human* creator to shoot. If instead the user wants to **AI-render** the target's format using the **source creator's face locked across every cut**, use the character-consistency path. This is the answer to "use this character from video B in video A's format."
+
+When `/ugcspy-decode` ran on the SOURCE (character) video, it wrote a source-resolution reference keyframe to `recipes/<source-id>/reference.jpg`. Feed that to compose as `--character-ref`:
+
+```bash
+cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<target-id> \
+  --character-ref recipes/<source-id>/reference.jpg \
+  --budget 10 --dry-run
+```
+
+What this does (per Issue #25):
+- Every cut is generated via Kling **image2video** from the SAME reference image — so the creator's identity is consistent across all cuts, instead of plain text2video inventing a different "young woman" per cut.
+- The cut PROMPTS come from the TARGET recipe (format/scene). Background is **prompt-driven** in v1 — the target's scene description rides in each cut's prompt; it is NOT locked to a second reference image (that needs Kling's multi-image2video endpoint, a documented v2 follow-up).
+- Cost is the same per-second as text2video ($0.10/s std). Always `--dry-run` first and confirm the estimate before the real spend.
+
+Before rendering, sanity-check the reference: `open recipes/<source-id>/reference.jpg`. The v1 extractor grabs a frame ~40% into the source — usually a clean mid-content frame, but if it caught a blurry/averted-face moment, tell the user to either re-decode or hand-pick a frame and pass its path to `--character-ref`. A bad reference produces a bad identity lock.
+
+Then run for real (drop `--dry-run`). Add `--lipsync` only if the target is talking-head and you want mouth-sync to the TTS.
+
 ## When NOT to use this
 
 - User just wants to understand one video → `/ugcspy-decode`
