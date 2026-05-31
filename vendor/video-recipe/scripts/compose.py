@@ -168,6 +168,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--background-ref",
+        type=str,
+        default=None,
+        help=(
+            "Kling v3 only. Background/scene reference image(s) to lock the SETTING across cuts via "
+            "element_list — the v3-native answer to the Pinterest-collage backdrop (no ffmpeg "
+            "composite). Accepts a single image path/URL, a comma-separated list (first = frontal, "
+            "rest = up to 3 detail refs), or a directory of images. Registered ONCE as a Scene "
+            "element (cached in compose_state). Combined with --character-element, one v3 call locks "
+            "BOTH the face and the background. Requires --character-element + kling-v3."
+        ),
+    )
+    p.add_argument(
         "--kling-negative-prompt",
         type=str,
         default=DEFAULT_KLING_NEGATIVE_PROMPT,
@@ -546,6 +559,108 @@ def _apply_cut_background(
         print(f"[compose] cut {cut_idx}: composited {layout} ('{query}')")
 
 
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png")
+
+
+def resolve_background_refs(raw: str | None, recipe_dir: Path) -> list[str]:
+    """Resolve --background-ref into an ordered list of image references (the
+    first is the frontal/primary, up to 3 more are detail refs). Returns []
+    when unset.
+
+    Accepts:
+      - a single http(s) URL or image path
+      - a comma-separated list of the above
+      - a directory of images (sorted; .jpg/.jpeg/.png)
+
+    Relative paths resolve against the recipe dir. Fails loudly (code 1) on a
+    missing local file/dir — better than discovering it after paying."""
+    if not raw:
+        return []
+    candidates: list[str] = []
+    # Directory?
+    dir_path = Path(raw)
+    if not dir_path.is_absolute():
+        dir_path = recipe_dir / raw
+    if dir_path.is_dir():
+        imgs = sorted(p for p in dir_path.iterdir() if p.suffix.lower() in _IMAGE_EXTS)
+        if not imgs:
+            fail(f"--background-ref dir {dir_path} has no .jpg/.jpeg/.png images.", code=1)
+        return [str(p) for p in imgs[:4]]  # frontal + up to 3
+    # Comma list (or single).
+    for token in (s.strip() for s in raw.split(",")):
+        if not token:
+            continue
+        if token.startswith(("http://", "https://")):
+            candidates.append(token)
+            continue
+        p = Path(token)
+        if not p.is_absolute():
+            p = recipe_dir / token
+        if not p.exists():
+            fail(
+                f"--background-ref points at {p}, which doesn't exist. Pass an http(s) URL, an "
+                f"image path, a comma-list, or a directory of images (relative paths resolve "
+                f"against the recipe dir).",
+                code=1,
+            )
+        candidates.append(str(p))
+    return candidates[:4]  # frontal + up to 3 refer images
+
+
+def register_element(
+    ugcspy_bin: str,
+    *,
+    cache_key: str,
+    label: str,
+    name: str,
+    description: str,
+    frontal_image: str,
+    refer_images: list[str] | None,
+    tag_id: str,
+    state: dict,
+    recipe_dir: Path,
+    render_env: dict[str, str] | None = None,
+) -> int | None:
+    """Register a Kling Element Library element and return its element_id (for
+    v3 element_list). The id is CACHED in compose_state under `cache_key` so a
+    resume reuses the element instead of paying to recreate it.
+
+    `frontal_image` is the primary reference; `refer_images` adds up to 3
+    additional angle/detail images (the create-element API caps at 3). `label`
+    is used only in log lines; `tag_id` is the Element Library tag (e.g. o_102
+    Character, o_106 Scene).
+
+    Returns the element_id, or None on failure (caller decides the fallback)."""
+    cached = state.get(cache_key)
+    if isinstance(cached, int):
+        print(f"[compose] {label} element cached (element_id={cached})")
+        return cached
+    print(f"[compose] registering {label} reference as a Kling element (one-time)...")
+    payload: dict = {
+        "kind": "create_element",
+        "name": name,
+        "description": description,
+        "frontal_image": frontal_image,
+        "tag_id": tag_id,
+    }
+    if refer_images:
+        payload["refer_images"] = refer_images[:3]
+    result = call_render(ugcspy_bin, payload, render_env)
+    element_id = result.get("element_id")
+    if not isinstance(element_id, int):
+        print(
+            f"[compose] warning: create_element ({label}) returned no usable element_id "
+            f"({element_id}).",
+            file=sys.stderr,
+        )
+        return None
+    # Cache it so resume doesn't recreate the element.
+    state[cache_key] = element_id
+    save_state(recipe_dir, state)
+    print(f"[compose] {label} element registered (element_id={element_id})")
+    return element_id
+
+
 def register_character_element(
     ugcspy_bin: str,
     character_ref: str,
@@ -553,42 +668,51 @@ def register_character_element(
     recipe_dir: Path,
     render_env: dict[str, str] | None = None,
 ) -> int | None:
-    """Register the character reference as a Kling Element Library element and
-    return its element_id (for v3 element_list). The id is CACHED in
-    compose_state so a resume reuses the element instead of paying to recreate
-    it.
-
-    Returns the element_id, or None on failure (caller falls back to passing
-    the ref as a first_frame image)."""
-    cached = state.get("character_element_id")
-    if isinstance(cached, int):
-        print(f"[compose] character element cached (element_id={cached})")
-        return cached
-    print("[compose] registering character reference as a Kling element (one-time)...")
-    result = call_render(
+    """Register the character reference as a Kling element (tag: Character).
+    Thin wrapper over register_element. On failure the caller falls back to
+    passing the ref as a first_frame image."""
+    return register_element(
         ugcspy_bin,
-        {
-            "kind": "create_element",
-            "name": "ugcspy-character",
-            "description": "character reference for consistent identity across cuts",
-            "frontal_image": character_ref,
-            "tag_id": "o_102",  # Character
-        },
-        render_env,
+        cache_key="character_element_id",
+        label="character",
+        name="ugcspy-character",
+        description="character reference for consistent identity across cuts",
+        frontal_image=character_ref,
+        refer_images=None,
+        tag_id="o_102",  # Character
+        state=state,
+        recipe_dir=recipe_dir,
+        render_env=render_env,
     )
-    element_id = result.get("element_id")
-    if not isinstance(element_id, int):
-        print(
-            f"[compose] warning: create_element returned no usable element_id ({element_id}); "
-            f"falling back to first_frame image.",
-            file=sys.stderr,
-        )
+
+
+def register_background_element(
+    ugcspy_bin: str,
+    background_refs: list[str],
+    state: dict,
+    recipe_dir: Path,
+    render_env: dict[str, str] | None = None,
+) -> int | None:
+    """Register background/scene images as a Kling element (tag: Scene). The
+    first image is the frontal reference; the rest (up to 3) are refer images.
+    Locks the scene across cuts via element_list — the v3-native answer to the
+    Pinterest-collage backdrop (no ffmpeg composite needed). Returns the
+    element_id, or None on failure (caller continues without a bg element)."""
+    if not background_refs:
         return None
-    # Cache it so resume doesn't recreate the element.
-    state["character_element_id"] = element_id
-    save_state(recipe_dir, state)
-    print(f"[compose] character element registered (element_id={element_id})")
-    return element_id
+    return register_element(
+        ugcspy_bin,
+        cache_key="background_element_id",
+        label="background",
+        name="ugcspy-background",
+        description="background/scene reference for consistent setting across cuts",
+        frontal_image=background_refs[0],
+        refer_images=background_refs[1:],
+        tag_id="o_106",  # Scene
+        state=state,
+        recipe_dir=recipe_dir,
+        render_env=render_env,
+    )
 
 
 # ─── decode.json signal loading + gating ───────────────────────────────────
@@ -917,6 +1041,9 @@ def args_signature(args: argparse.Namespace) -> str:
         # character_element switches each cut between element_list and
         # first_frame — different render path, so it invalidates the cache.
         f"|char_element={bool(getattr(args, 'character_element', False))}"
+        # background_ref adds a second element to element_list — changing it
+        # changes every cut's scene anchor, so it invalidates the cache too.
+        f"|background_ref={getattr(args, 'background_ref', None) or ''}"
     )
 
 
@@ -1437,6 +1564,23 @@ def compose(args: argparse.Namespace) -> None:
         use_character_element = False
     character_element_id: int | None = None
 
+    # Background element: lock the SCENE across cuts via a second element_list
+    # entry. Only meaningful alongside --character-element on v3 (it shares the
+    # element_list path). Resolved now (validates paths upfront); the
+    # create-element API call happens after the dry-run gate.
+    background_refs = resolve_background_refs(getattr(args, "background_ref", None), args.recipe_dir)
+    use_background_element = bool(background_refs) and use_character_element
+    if background_refs and not use_character_element:
+        print(
+            "[compose] note: --background-ref needs --character-element + kling-v3 "
+            "(both share the element_list path) — ignoring the background element.",
+            file=sys.stderr,
+        )
+        use_background_element = False
+    if use_background_element:
+        print(f"[compose] background element: {len(background_refs)} image(s) → Scene element")
+    background_element_id: int | None = None
+
     # 2e. Resolve Kling model + mode for clip generation. Drives both the cost
     # preflight and the per-cut render payload. Pro-only models coerce to pro.
     kling_model = args.kling_model
@@ -1518,6 +1662,13 @@ def compose(args: argparse.Namespace) -> None:
         )
         if character_element_id is None:
             use_character_element = False  # fall back to first_frame
+
+    # Register the background/scene element ONCE (second element_list entry).
+    # A failure here is non-fatal — we just render without the bg element.
+    if use_background_element and character_element_id is not None:
+        background_element_id = register_background_element(
+            args.ugcspy_bin, background_refs, state, args.recipe_dir, render_env
+        )
 
     # 3. Render each cut: clip → optional per-cut TTS → optional lipsync warp.
     # Resume-aware: if a stage was completed in a previous run AND its
@@ -1607,8 +1758,13 @@ def compose(args: argparse.Namespace) -> None:
                 clip_payload["cfg_scale"] = max(0.0, min(1.0, float(args.kling_cfg_scale)))
             if use_character_element and character_element_id is not None:
                 # v3 element_list: anchor every cut to the registered character
-                # element — stronger identity lock than a first-frame image.
-                clip_payload["element_ids"] = [character_element_id]
+                # element (stronger identity lock than a first-frame image) AND,
+                # when present, the background/scene element — so ONE call locks
+                # both the face and the setting. Up to 3 elements; we use ≤2.
+                element_ids = [character_element_id]
+                if background_element_id is not None:
+                    element_ids.append(background_element_id)
+                clip_payload["element_ids"] = element_ids
             elif character_ref:
                 # image2video: lock the creator's face across cuts (#25).
                 clip_payload["first_frame"] = character_ref

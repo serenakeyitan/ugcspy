@@ -18,6 +18,7 @@ No Kling, no OpenAI, no real Whisper, no real money spent.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -758,6 +759,7 @@ def _minimal_args():
         kling_sound="off",
         kling_base_url=None,
         character_element=False,
+        background_ref=None,
     )
 
 
@@ -936,6 +938,96 @@ def test_args_signature_changes_with_character_element(_minimal_args):
     base = compose.args_signature(_minimal_args)
     _minimal_args.character_element = True
     assert compose.args_signature(_minimal_args) != base
+
+
+def test_args_signature_changes_with_background_ref(_minimal_args):
+    """--background-ref adds a second element to element_list, changing every
+    cut's scene anchor → must invalidate the cache."""
+    base = compose.args_signature(_minimal_args)
+    _minimal_args.background_ref = "bg.jpg"
+    assert compose.args_signature(_minimal_args) != base
+
+
+# ─── resolve_background_refs (background element) ───────────────────────────
+
+
+def test_resolve_background_refs_none_when_unset(tmp_path):
+    assert compose.resolve_background_refs(None, tmp_path) == []
+    assert compose.resolve_background_refs("", tmp_path) == []
+
+
+def test_resolve_background_refs_passes_urls(tmp_path):
+    out = compose.resolve_background_refs(
+        "https://x/a.jpg,https://x/b.jpg", tmp_path
+    )
+    assert out == ["https://x/a.jpg", "https://x/b.jpg"]
+
+
+def test_resolve_background_refs_comma_list_resolves_paths(tmp_path):
+    a = tmp_path / "a.jpg"
+    b = tmp_path / "b.jpg"
+    a.write_bytes(b"\xff\xd8\xff")
+    b.write_bytes(b"\xff\xd8\xff")
+    out = compose.resolve_background_refs("a.jpg,b.jpg", tmp_path)
+    assert out == [str(a), str(b)]
+
+
+def test_resolve_background_refs_directory(tmp_path):
+    bgdir = tmp_path / "bgs"
+    bgdir.mkdir()
+    for name in ("2.png", "1.jpg", "3.jpeg", "notes.txt"):
+        (bgdir / name).write_bytes(b"\xff\xd8\xff")
+    out = compose.resolve_background_refs("bgs", tmp_path)
+    # Sorted, image-only, .txt excluded.
+    assert [Path(p).name for p in out] == ["1.jpg", "2.png", "3.jpeg"]
+
+
+def test_resolve_background_refs_caps_at_four(tmp_path):
+    bgdir = tmp_path / "many"
+    bgdir.mkdir()
+    for i in range(6):
+        (bgdir / f"{i}.jpg").write_bytes(b"\xff\xd8\xff")
+    out = compose.resolve_background_refs("many", tmp_path)
+    assert len(out) == 4  # frontal + up to 3
+
+
+def test_resolve_background_refs_missing_file_fails(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        compose.resolve_background_refs("nope.jpg", tmp_path)
+    assert exc.value.code == 1
+    assert "doesn't exist" in capsys.readouterr().err
+
+
+# ─── register_background_element / register_element ─────────────────────────
+
+
+def test_register_background_element_multi_image_and_cache(tmp_path, monkeypatch):
+    """Background element registers with frontal + refer images (Scene tag),
+    caches its id, and reuses the cache on a second call."""
+    calls = {"n": 0}
+
+    def fake_call_render(ugcspy_bin, payload, env_extra=None):
+        calls["n"] += 1
+        assert payload["kind"] == "create_element"
+        assert payload["tag_id"] == "o_106"  # Scene
+        assert payload["frontal_image"] == "/bg/0.jpg"
+        assert payload["refer_images"] == ["/bg/1.jpg", "/bg/2.jpg"]
+        return {"ok": True, "element_id": 909, "external_id": "bg-1", "cost_usd": 0}
+
+    monkeypatch.setattr(compose, "call_render", fake_call_render)
+    state: dict = {}
+    eid = compose.register_background_element(
+        "ugcspy", ["/bg/0.jpg", "/bg/1.jpg", "/bg/2.jpg"], state, tmp_path
+    )
+    assert eid == 909
+    assert state["background_element_id"] == 909
+    # Cached on second call.
+    assert compose.register_background_element("ugcspy", ["/bg/0.jpg"], state, tmp_path) == 909
+    assert calls["n"] == 1
+
+
+def test_register_background_element_none_when_no_refs(tmp_path):
+    assert compose.register_background_element("ugcspy", [], {}, tmp_path) is None
 
 
 # ─── register_character_element (v3 element_list, PR B) ─────────────────────
