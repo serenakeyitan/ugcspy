@@ -262,31 +262,16 @@ def extract_frames_per_second(mp4: Path, frames_dir: Path, fps: float) -> int:
     return len(list(frames_dir.glob("*.jpg")))
 
 
-def extract_reference_frame(mp4: Path, out_path: Path, duration_sec: float) -> Path | None:
-    """Extract ONE reference keyframe at SOURCE resolution for use as a
-    Kling image2video character reference (issue #25).
-
-    v1 heuristic: grab a frame ~40% into the video. Rationale — the very
-    first frames are often a hook card / black intro, and the tail is
-    often the brand/CTA card; the 40% mark is usually mid-content where
-    the creator's face is on screen and steady. This is deliberately
-    simple and cheap; a face-detection + sharpness scorer is a documented
-    follow-up (the issue spells out variance-of-Laplacian + largest face),
-    but the midpoint heuristic ships the feature now.
-
-    Saved at native resolution (NO downscale — Kling wants full detail for
-    identity fidelity). Returns the path on success, None on ffmpeg failure
-    (decode continues; character ref is optional).
-    """
-    # Clamp the seek to a sane spot even for very short/zero-duration probes.
-    seek = max(0.0, duration_sec * 0.4) if duration_sec > 0 else 0.0
+def _grab_frame_at(mp4: Path, seek_sec: float, out_path: Path) -> bool:
+    """ffmpeg: grab ONE frame at `seek_sec`, source resolution, high-quality
+    JPEG. Returns True on success."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     proc = subprocess.run(
         [
             "ffmpeg",
             "-y",
             "-ss",
-            f"{seek:.3f}",
+            f"{seek_sec:.3f}",
             "-i",
             str(mp4),
             "-frames:v",
@@ -298,14 +283,114 @@ def extract_reference_frame(mp4: Path, out_path: Path, duration_sec: float) -> P
         capture_output=True,
         check=False,
     )
-    if proc.returncode != 0 or not out_path.exists():
+    return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
+
+
+def _candidate_seek_times(duration_sec: float, max_samples: int = 8) -> list[float]:
+    """Evenly-spaced sample timestamps in the 20%–80% MIDDLE band of the
+    video. The intro (hook card / black frames) and outro (brand/CTA card)
+    rarely contain a good clean face, so we don't sample them. For very short
+    or unknown-duration clips we degrade to a single midpoint sample."""
+    if duration_sec <= 0:
+        return [0.0]
+    start = duration_sec * 0.2
+    end = duration_sec * 0.8
+    if end <= start:
+        return [duration_sec * 0.4]
+    n = max(1, min(max_samples, int(duration_sec // 3) or 1))
+    if n == 1:
+        return [duration_sec * 0.4]
+    step = (end - start) / (n - 1)
+    return [round(start + i * step, 3) for i in range(n)]
+
+
+def extract_reference_frame(
+    mp4: Path,
+    out_path: Path,
+    duration_sec: float,
+    *,
+    prefer_face: bool = True,
+) -> Path | None:
+    """Pick the BEST reference keyframe for Kling image2video character
+    consistency (issue #25), saved at SOURCE resolution.
+
+    Strategy (when OpenCV is available):
+      1. Sample several candidate frames across the 20%–80% middle band
+         (avoiding intro/outro cards), downscaled, into a temp dir.
+      2. Score each on sharpness (variance of Laplacian) + face area +
+         face centeredness (scripts.frame_score).
+      3. Re-extract the winning timestamp at FULL resolution to out_path.
+
+    Fallback: when cv2 isn't importable (it's a declared dep but optional at
+    runtime) or sampling/scoring fails, grab the 40%-mark frame — the old
+    cheap heuristic. The character reference is optional, so any failure
+    returns None and decode continues.
+
+    `prefer_face`: when False, rank on sharpness only (for sources with no
+    person to lock onto)."""
+    from scripts import frame_score
+
+    # ── Fallback path: no cv2 → cheap midpoint grab. ──
+    if not frame_score.available():
         print(
-            f"[decode] reference-frame: ffmpeg failed to grab a keyframe "
-            f"(rc={proc.returncode}); character reference unavailable.",
+            "[decode] reference-frame: OpenCV unavailable — using the 40%-mark "
+            "frame (install opencv to auto-pick the sharpest face). ",
             file=sys.stderr,
         )
-        return None
-    return out_path
+        seek = duration_sec * 0.4 if duration_sec > 0 else 0.0
+        return out_path if _grab_frame_at(mp4, seek, out_path) else None
+
+    # ── Scored path: sample candidates, score, pick the best timestamp. ──
+    seeks = _candidate_seek_times(duration_sec)
+    sample_dir = out_path.parent / "_ref_candidates"
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    sampled: list[tuple[float, Path]] = []
+    for i, t in enumerate(seeks):
+        cand = sample_dir / f"cand-{i:02d}.jpg"
+        if _grab_frame_at(mp4, t, cand):
+            sampled.append((t, cand))
+
+    if not sampled:
+        # Sampling produced nothing — last-ditch midpoint grab.
+        seek = duration_sec * 0.4 if duration_sec > 0 else 0.0
+        return out_path if _grab_frame_at(mp4, seek, out_path) else None
+
+    try:
+        best = frame_score.pick_best_frame(
+            [p for _, p in sampled], prefer_face=prefer_face
+        )
+    except Exception as e:
+        print(f"[decode] reference-frame: scoring failed ({e}); using midpoint.", file=sys.stderr)
+        best = None
+
+    # Map the winning candidate path back to its seek time.
+    best_seek = duration_sec * 0.4 if duration_sec > 0 else 0.0
+    if best is not None:
+        for t, p in sampled:
+            if p == best.path:
+                best_seek = t
+                break
+        face_note = (
+            f"face {best.face_area:.0%} area, centered {best.face_centered:.2f}"
+            if best.has_face
+            else "no face detected — picked on sharpness"
+        )
+        print(
+            f"[decode] reference-frame: best of {len(sampled)} candidates at "
+            f"{best_seek:.1f}s (sharpness {best.sharpness:.0f}, {face_note})"
+        )
+
+    # Re-extract the winner at FULL source resolution (the candidates may be
+    # the same res here, but re-grab to be explicit + clean up the temp dir).
+    ok = _grab_frame_at(mp4, best_seek, out_path)
+    # Clean up the candidate scratch dir.
+    try:
+        for _, p in sampled:
+            p.unlink(missing_ok=True)
+        sample_dir.rmdir()
+    except OSError:
+        pass
+    return out_path if ok else None
 
 
 def ocr_all_frames(frames_dir: Path, ocr_dir: Path) -> dict[str, str]:

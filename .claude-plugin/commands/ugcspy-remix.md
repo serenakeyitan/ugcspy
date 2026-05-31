@@ -131,7 +131,7 @@ What this does (per Issue #25):
 - The cut PROMPTS come from the TARGET recipe (format/scene). Background is **prompt-driven** in v1 — the target's scene description rides in each cut's prompt; it is NOT locked to a second reference image (that needs Kling's multi-image2video endpoint, a documented v2 follow-up).
 - Cost is the same per-second as text2video ($0.10/s std). Always `--dry-run` first and confirm the estimate before the real spend.
 
-Before rendering, sanity-check the reference: `open recipes/<source-id>/reference.jpg`. The v1 extractor grabs a frame ~40% into the source — usually a clean mid-content frame, but if it caught a blurry/averted-face moment, tell the user to either re-decode or hand-pick a frame and pass its path to `--character-ref`. A bad reference produces a bad identity lock.
+Before rendering, sanity-check the reference: `open recipes/<source-id>/reference.jpg`. Decode auto-picks the sharpest, clearest-face frame from the source's middle band (OpenCV scoring), so it's usually a clean face shot — but face detection isn't perfect, so if the chosen frame is still off (e.g. the source has no clear frontal face anywhere), tell the user to hand-pick a frame and pass its path to `--character-ref`. A bad reference produces a bad identity lock.
 
 Then run for real (drop `--dry-run`). Add `--lipsync` only if the target is talking-head and you want mouth-sync to the TTS.
 
