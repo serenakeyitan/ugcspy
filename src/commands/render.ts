@@ -10,7 +10,11 @@ import { RenderError } from "../render/types.ts";
  *   { "kind": "clip",               "prompt": str, "duration_sec": int, "aspect_ratio"?: str,
  *                                   "first_frame"?: str, "end_frame"?: str, "model"?: str,
  *                                   "mode"?: "std"|"pro"|"4k", "negative_prompt"?: str,
- *                                   "cfg_scale"?: float, "sound"?: "on"|"off" }
+ *                                   "cfg_scale"?: float, "sound"?: "on"|"off",
+ *                                   "element_ids"?: number[] }
+ *   { "kind": "create_element",     "frontal_image": str, "name"?: str, "description"?: str,
+ *                                   "refer_images"?: str[], "tag_id"?: str }
+ *                                   → { ok, element_id, external_id, cost_usd }
  *   { "kind": "tts",                "text": str,   "voice"?: str, "speed"?: float }
  *   { "kind": "lipsync",            "video_id": str, "audio_path": str }
  *   { "kind": "lipsync_text2video", "video_id": str, "text": str (≤120 chars),
@@ -72,11 +76,38 @@ export async function runRender(): Promise<void> {
         negative_prompt: req.negative_prompt ? String(req.negative_prompt) : undefined,
         cfg_scale: typeof req.cfg_scale === "number" ? req.cfg_scale : undefined,
         sound,
+        element_ids: Array.isArray(req.element_ids)
+          ? (req.element_ids as unknown[]).map((n) => Number(n)).filter((n) => Number.isFinite(n))
+          : undefined,
       });
       console.log(
         JSON.stringify({
           ok: true,
           mp4_path: result.mp4_path,
+          external_id: result.external_id,
+          cost_usd: result.cost_usd,
+        }),
+      );
+      return;
+    }
+    if (req.kind === "create_element") {
+      // Register a multi-image reference element; returns element_id for a
+      // later clip's element_ids (Kling v3 multi-reference).
+      const provider = new KlingProvider(klingAccess, klingSecret, klingBase);
+      const referImages = Array.isArray(req.refer_images)
+        ? (req.refer_images as unknown[]).map((s) => String(s))
+        : undefined;
+      const result = await provider.createElement({
+        name: String(req.name ?? "ref"),
+        description: String(req.description ?? ""),
+        frontal_image: String(req.frontal_image ?? ""),
+        refer_images: referImages,
+        tag_id: req.tag_id ? String(req.tag_id) : undefined,
+      });
+      console.log(
+        JSON.stringify({
+          ok: true,
+          element_id: result.element_id,
           external_id: result.external_id,
           cost_usd: result.cost_usd,
         }),

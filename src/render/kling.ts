@@ -7,6 +7,8 @@ import {
   RenderError,
   type ClipGenRequest,
   type ClipGenResult,
+  type ElementRequest,
+  type ElementResult,
   type LipSyncProvider,
   type LipSyncRequest,
   type LipSyncResult,
@@ -179,7 +181,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     // the same face, instead of text2video inventing a new "young woman"
     // per cut. The two endpoints share the submit/poll/download lifecycle;
     // only the submit path + body differ.
-    const useImage = typeof req.first_frame === "string" && req.first_frame.length > 0;
+    const hasFirstFrame = typeof req.first_frame === "string" && req.first_frame.length > 0;
+    // element_list (v3 multi-reference) also lives on the image2video endpoint.
+    const elementIds = Array.isArray(req.element_ids)
+      ? req.element_ids.filter((n) => typeof n === "number" && Number.isFinite(n))
+      : [];
+    if (elementIds.length > 3) {
+      throw new RenderError(
+        `Kling element_list accepts at most 3 elements; received ${elementIds.length}.`,
+        this.name,
+      );
+    }
+    const useImage = hasFirstFrame || elementIds.length > 0;
     const endpoint = useImage ? "/v1/videos/image2video" : "/v1/videos/text2video";
 
     // 1. Submit job
@@ -202,14 +215,22 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       body.cfg_scale = cfgScale;
     }
     if (useImage) {
-      // Kling's `image` field accepts either a public URL or a raw
-      // base64-encoded image (no data: prefix per their docs). A local file
-      // path is read + base64-encoded inline. image2video does NOT take
-      // aspect_ratio — the output ratio is inferred from the reference image.
-      body.image = this.resolveImageField(req.first_frame as string);
-      // Optional end frame (image_tail): motion interpolates first→tail.
-      if (req.end_frame && req.end_frame.length > 0) {
-        body.image_tail = this.resolveImageField(req.end_frame);
+      if (hasFirstFrame) {
+        // Kling's `image` field accepts either a public URL or a raw
+        // base64-encoded image (no data: prefix per their docs). A local file
+        // path is read + base64-encoded inline. image2video does NOT take
+        // aspect_ratio — the output ratio is inferred from the reference image.
+        body.image = this.resolveImageField(req.first_frame as string);
+        // Optional end frame (image_tail): motion interpolates first→tail.
+        if (req.end_frame && req.end_frame.length > 0) {
+          body.image_tail = this.resolveImageField(req.end_frame);
+        }
+      }
+      // Multi-reference elements (v3): anchor to pre-registered Element Library
+      // ids. Each {element_id} locks one subject/scene across the generation —
+      // e.g. the character's face + the background. Up to 3.
+      if (elementIds.length > 0) {
+        body.element_list = elementIds.map((id) => ({ element_id: id }));
       }
     } else {
       // text2video uses aspect_ratio (image2video derives it from the image).
@@ -289,6 +310,111 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       // Model+mode-aware cost (not the static baseline) so the running total
       // reflects what v2-6/pro actually bills, not v1-6/std.
       cost_usd: duration * klingCostPerSec(model, mode),
+    };
+  }
+
+  /**
+   * Register a multi-image reference "element" in Kling's Element Library.
+   * Returns the numeric element_id to pass in generateClip's element_ids.
+   *
+   * This is the v3-compatible multi-reference path (the standalone
+   * /v1/videos/multi-image2video endpoint is kling-v1-6-only). It's an async
+   * task: submit → poll → read element_id from the succeed payload.
+   *
+   * Endpoint: POST /v1/general/advanced-custom-elements (image_refer), built
+   * from a frontal image + 0–3 additional angle/detail images. The official
+   * caps (name ≤20, description ≤100 chars) are enforced by truncation so a
+   * long auto-generated name never fails the call.
+   */
+  async createElement(req: ElementRequest): Promise<ElementResult> {
+    this.assertConfigured();
+    if (!req.frontal_image || req.frontal_image.length === 0) {
+      throw new RenderError("createElement requires a frontal_image.", this.name);
+    }
+    const refers = (req.refer_images ?? []).filter((s) => s && s.length > 0).slice(0, 3);
+    const body: Record<string, unknown> = {
+      element_name: (req.name || "ref").slice(0, 20),
+      element_description: (req.description || "").slice(0, 100),
+      reference_type: "image_refer",
+      element_image_list: {
+        frontal_image: this.resolveImageField(req.frontal_image),
+        refer_images: refers.map((r) => ({ image_url: this.resolveImageField(r) })),
+      },
+    };
+    if (req.tag_id && req.tag_id.length > 0) {
+      body.tag_list = [{ tag_id: req.tag_id }];
+    }
+
+    // 1. Submit
+    const submitRes = await this.fetchSigned("/v1/general/advanced-custom-elements", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (!submitRes.ok) {
+      throw new RenderError(
+        `Kling createElement submit failed: ${submitRes.status} ${await submitRes.text()}`,
+        this.name,
+      );
+    }
+    const submitJson = (await submitRes.json()) as {
+      code?: number;
+      message?: string;
+      data?: { task_id?: string };
+    };
+    if (submitJson.code !== 0) {
+      throw new RenderError(
+        `Kling createElement returned code=${submitJson.code} message="${submitJson.message}"`,
+        this.name,
+      );
+    }
+    const taskId = submitJson.data?.task_id;
+    if (!taskId) throw new RenderError("Kling createElement response missing data.task_id", this.name);
+
+    // 2. Poll until the element is built.
+    const startedAt = Date.now();
+    const POLL_INTERVAL_MS = 5000;
+    const TIMEOUT_MS = 8 * 60 * 1000;
+    let elementId: number | null = null;
+    while (Date.now() - startedAt < TIMEOUT_MS) {
+      await sleep(POLL_INTERVAL_MS);
+      const statusRes = await this.fetchSigned(`/v1/general/advanced-custom-elements/${taskId}`);
+      if (!statusRes.ok) continue;
+      const statusJson = (await statusRes.json()) as {
+        data?: {
+          task_status?: string;
+          task_status_msg?: string;
+          task_result?: { elements?: { element_id?: number }[] };
+        };
+      };
+      const status = statusJson.data?.task_status;
+      if (status === "succeed") {
+        elementId = statusJson.data?.task_result?.elements?.[0]?.element_id ?? null;
+        if (elementId === null || elementId === undefined) {
+          throw new RenderError(
+            `Kling createElement ${taskId} succeeded but returned no element_id. ` +
+              `Raw: ${JSON.stringify(statusJson).slice(0, 400)}`,
+            this.name,
+          );
+        }
+        break;
+      }
+      if (status === "failed") {
+        throw new RenderError(
+          `Kling createElement ${taskId} failed: ${statusJson.data?.task_status_msg ?? "no message"}`,
+          this.name,
+        );
+      }
+    }
+    if (elementId === null) {
+      throw new RenderError(`Kling createElement ${taskId} timed out after 8min`, this.name);
+    }
+    return {
+      element_id: elementId,
+      external_id: taskId,
+      // Element-creation cost isn't surfaced per-call in the docs; bill 0 here
+      // and rely on the real Kling bill. (Conservative: don't over-count an
+      // amount we can't read from the response.)
+      cost_usd: 0,
     };
   }
 

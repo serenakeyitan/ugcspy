@@ -129,6 +129,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--character-element",
+        action="store_true",
+        help=(
+            "Kling v3 only. Instead of passing --character-ref as a single first-frame image, "
+            "register it ONCE as a Kling Element Library element and reference it via element_list "
+            "on every cut. Stronger identity lock than a first-frame image, and frees the first-frame "
+            "slot. The element is created once and its id cached in compose_state (no re-create on "
+            "resume). Requires --character-ref. Ignored on non-v3 models (which lack element_list)."
+        ),
+    )
+    p.add_argument(
         "--kling-negative-prompt",
         type=str,
         default=DEFAULT_KLING_NEGATIVE_PROMPT,
@@ -442,6 +453,51 @@ def resolve_character_ref(raw: str | None, recipe_dir: Path) -> str | None:
             code=1,
         )
     return str(p)
+
+
+def register_character_element(
+    ugcspy_bin: str,
+    character_ref: str,
+    state: dict,
+    recipe_dir: Path,
+    render_env: dict[str, str] | None = None,
+) -> int | None:
+    """Register the character reference as a Kling Element Library element and
+    return its element_id (for v3 element_list). The id is CACHED in
+    compose_state so a resume reuses the element instead of paying to recreate
+    it.
+
+    Returns the element_id, or None on failure (caller falls back to passing
+    the ref as a first_frame image)."""
+    cached = state.get("character_element_id")
+    if isinstance(cached, int):
+        print(f"[compose] character element cached (element_id={cached})")
+        return cached
+    print("[compose] registering character reference as a Kling element (one-time)...")
+    result = call_render(
+        ugcspy_bin,
+        {
+            "kind": "create_element",
+            "name": "ugcspy-character",
+            "description": "character reference for consistent identity across cuts",
+            "frontal_image": character_ref,
+            "tag_id": "o_102",  # Character
+        },
+        render_env,
+    )
+    element_id = result.get("element_id")
+    if not isinstance(element_id, int):
+        print(
+            f"[compose] warning: create_element returned no usable element_id ({element_id}); "
+            f"falling back to first_frame image.",
+            file=sys.stderr,
+        )
+        return None
+    # Cache it so resume doesn't recreate the element.
+    state["character_element_id"] = element_id
+    save_state(recipe_dir, state)
+    print(f"[compose] character element registered (element_id={element_id})")
+    return element_id
 
 
 # ─── decode.json signal loading + gating ───────────────────────────────────
@@ -765,6 +821,9 @@ def args_signature(args: argparse.Namespace) -> str:
         # rendered the cut; mixing hosts mid-run is also unsafe to resume.
         f"|kling_sound={getattr(args, 'kling_sound', 'off')}"
         f"|kling_base={getattr(args, 'kling_base_url', None) or ''}"
+        # character_element switches each cut between element_list and
+        # first_frame — different render path, so it invalidates the cache.
+        f"|char_element={bool(getattr(args, 'character_element', False))}"
     )
 
 
@@ -1323,6 +1382,20 @@ def compose(args: argparse.Namespace) -> None:
     if character_ref:
         print(f"[compose] character reference: {character_ref} — cuts use image2video (face locked across cuts)")
 
+    # --character-element: register the reference as a Kling Element (v3
+    # element_list) instead of a first_frame image. Only valid on v3 (other
+    # models lack element_list). The actual create-element API call happens
+    # AFTER the dry-run gate so a dry run never spends. Here we just decide.
+    use_character_element = bool(getattr(args, "character_element", False)) and bool(character_ref)
+    if use_character_element and args.kling_model != "kling-v3":
+        print(
+            f"[compose] note: --character-element needs kling-v3 (element_list); "
+            f"model is {args.kling_model} — using first_frame image instead.",
+            file=sys.stderr,
+        )
+        use_character_element = False
+    character_element_id: int | None = None
+
     # 2e. Resolve Kling model + mode for clip generation. Drives both the cost
     # preflight and the per-cut render payload. Pro-only models coerce to pro.
     kling_model = args.kling_model
@@ -1394,6 +1467,16 @@ def compose(args: argparse.Namespace) -> None:
     if args.dry_run:
         print("[compose] dry-run; no API calls made.")
         return
+
+    # Register the character element ONCE (v3 element_list path). Cached in
+    # compose_state so a resume reuses it. On failure, fall back to passing the
+    # ref as a first_frame image (use_character_element flips off).
+    if use_character_element and character_ref:
+        character_element_id = register_character_element(
+            args.ugcspy_bin, character_ref, state, args.recipe_dir, render_env
+        )
+        if character_element_id is None:
+            use_character_element = False  # fall back to first_frame
 
     # 3. Render each cut: clip → optional per-cut TTS → optional lipsync warp.
     # Resume-aware: if a stage was completed in a previous run AND its
@@ -1481,7 +1564,11 @@ def compose(args: argparse.Namespace) -> None:
                 clip_payload["negative_prompt"] = args.kling_negative_prompt
             if args.kling_cfg_scale is not None:
                 clip_payload["cfg_scale"] = max(0.0, min(1.0, float(args.kling_cfg_scale)))
-            if character_ref:
+            if use_character_element and character_element_id is not None:
+                # v3 element_list: anchor every cut to the registered character
+                # element — stronger identity lock than a first-frame image.
+                clip_payload["element_ids"] = [character_element_id]
+            elif character_ref:
                 # image2video: lock the creator's face across cuts (#25).
                 clip_payload["first_frame"] = character_ref
             result = call_render(args.ugcspy_bin, clip_payload, render_env)

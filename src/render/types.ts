@@ -37,6 +37,40 @@ export interface ClipGenRequest {
   // produce sound + lip-sync inline, removing the need for a separate
   // lip-sync/TTS pass. Default off. Ignored by models that lack native audio.
   sound?: "on" | "off";
+  // Multi-reference element IDs (Kling 3.0 `element_list`). Each is a
+  // pre-registered Element Library id from createElement(). Up to 3. When set,
+  // the generation anchors to ALL these elements (e.g. character face +
+  // background scene) in one call — the v3-compatible multi-image path.
+  // Mutually exclusive with voice references (we don't use those).
+  element_ids?: number[];
+}
+
+/**
+ * Register a multi-image reference "element" in Kling's Element Library, so it
+ * can be referenced by id in a later generateClip (element_list). Kling builds
+ * the element from a frontal image + up to 3 additional angle/detail images.
+ * This is an async task (submit → poll), like clip generation.
+ */
+export interface ElementRequest {
+  // Human-readable element name (Kling caps at 20 chars — adapter truncates).
+  name: string;
+  // Short description (Kling caps at 100 chars — adapter truncates).
+  description: string;
+  // The primary frontal reference image (file path or URL).
+  frontal_image: string;
+  // 0–3 additional reference images from other angles / close-ups.
+  refer_images?: string[];
+  // Element-library tag id (e.g. "o_102" Character, "o_106" Scene). Optional.
+  tag_id?: string;
+}
+
+export interface ElementResult {
+  // The numeric element_id to pass in a later ClipGenRequest.element_ids.
+  element_id: number;
+  // Provider task id that created it (traceability).
+  external_id: string;
+  // Cost in USD billed for creating the element (may be 0 if not surfaced).
+  cost_usd: number;
 }
 
 export interface ClipGenResult {
