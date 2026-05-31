@@ -3,6 +3,10 @@
 Reuses the synthetic 3-color video from test_detect_cuts (built fresh per
 test module), runs detection, then verifies keyframe extraction produces
 3 valid JPEGs per cut.
+
+Runs detect_cuts.detect_cuts(), which lazily imports scenedetect (a declared
+core dep). Skip the whole module when scenedetect isn't installed so a partial
+dev environment doesn't hard-fail with ModuleNotFoundError.
 """
 
 from __future__ import annotations
@@ -13,6 +17,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+pytest.importorskip("scenedetect")
 
 from scripts import detect_cuts, extract_keyframes
 
