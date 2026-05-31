@@ -17,7 +17,7 @@ This pipeline costs real money on real APIs. Tell the user upfront before doing 
 - **Total for a typical 6-30s UGC video**: $1-6 (without lipsync) / $2-12 (with lipsync)
 - **Default budget cap**: $5 (override with `--budget 10`)
 - **Resume by default**: compose persists per-cut state. If a run fails on cut 4 of 5, the next run skips cuts 0-3 (no re-billing). Pass `--no-resume` to start fresh. Recipe-hash protects against silent corruption when recipe.json changes between runs.
-- **AI-disclosure burned by default**: final reproduction.mp4 carries a small "AI-generated" tag (bottom-right). Override with `--disclosure-text` / `--disclosure-position`, or opt-out with `--no-disclosure` (prints a ToS warning).
+- **No AI-disclosure watermark**: the reproduction.mp4 is always unlabeled — compose never burns a watermark and there is no flag to add one. Label the output yourself at publish time if you need to (FTC + EU AI Act + platform ToS may require AIGC labeling depending on where you post).
 
 Required API keys (the compose pipeline will fail with a clear error if missing):
 - `KLING_ACCESS_KEY` + `KLING_SECRET_KEY` — Kling's API uses HMAC-signed JWTs and needs both halves. Get the pair at https://klingai.com/dev (the developer portal — NOT the same as the web-app account at klingai.com).
@@ -78,16 +78,23 @@ cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budg
 
 # Talking-head with lip-sync — adds Kling lipsync warp per cut so mouth matches TTS:
 cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budget 10 --lipsync
+
+# Greenscreen-kinetic / collage — build a multi-image collage backdrop behind each cut:
+cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budget 10 --backgrounds pinterest
+
+# Tune the collage grid: 4 (default, 2x2 Canva-collage look) / 1 (single blurred backdrop) / 6 / 9 …
+cd vendor/video-recipe && python3.11 -m scripts.compose recipes/<videoId> --budget 10 --backgrounds pinterest --backgrounds-tiles 4
 ```
 
 Pipeline (in order):
 1. For each cut, append the per-cut spoken text to the Kling prompt (L1 — gives diffusion a target for mouth movements, free improvement)
 2. Render each cut via Kling text2video (1-3 min per cut)
-3. For cuts with `transcript`, render per-cut TTS via OpenAI (~1s each)
-4. If `--lipsync` AND the cut has audio: POST the cut to Kling `/v1/videos/lip-sync` with the per-cut TTS as base64 audio → returns a warped MP4 with mouth synced to TTS. Falls back silently to the un-warped clip if Kling rejects (e.g. no face detected).
-5. Mix per-cut TTS into each clip (when not using lipsync — lipsync already bakes audio in)
-6. Concat clips with ffmpeg
-7. Output `vendor/video-recipe/recipes/<videoId>/reproduction.mp4`
+3. If `--backgrounds pinterest|web`: search for several topic-matching images per cut (Pinterest first, generic web fallback) and composite them as a **multi-image collage grid** behind the cut — `--backgrounds-tiles 4` (default) reconstructs the 2x2 Canva-collage look of greenscreen-kinetic UGC; `1` is a single blurred backdrop. The grid is blurred + darkened so the foreground reads. Pure ffmpeg, no video-gen API cost. Best-effort — a search miss keeps the plain clip; fewer images found than requested → the grid uses whatever was fetched. Auto-gated to backdrop-friendly formats (greenscreen-kinetic / collage / ai-montage) when decode.json is present; pointless for talking-head.
+4. For cuts with `transcript`, render per-cut TTS via OpenAI (~1s each)
+5. If `--lipsync` AND the cut has audio: POST the cut to Kling `/v1/videos/lip-sync` with the per-cut TTS as base64 audio → returns a warped MP4 with mouth synced to TTS. Falls back silently to the un-warped clip if Kling rejects (e.g. no face detected).
+6. Mix per-cut TTS into each clip (when not using lipsync — lipsync already bakes audio in)
+7. Concat clips with ffmpeg
+8. Output `vendor/video-recipe/recipes/<videoId>/reproduction.mp4`
 
 Wall time: roughly `cut_count × 90 seconds` for text2video, plus another ~90 seconds per cut for lipsync if `--lipsync`. A 5-cut talking-head with lipsync is ~15 min.
 
@@ -105,7 +112,9 @@ After compose completes, tell the user where reproduction.mp4 lives and offer to
 - **Quality varies wildly per prompt.** Kling and similar models still produce wonky hands, weird motion, and inconsistent characters across cuts. Expect iteration — first try is rarely the keeper.
 - **Lip-sync (`--lipsync`) only works on clear-face cuts.** Kling rejects cuts with no detectable face (e.g. background-only montage, hands-only product shots) with code `1006` "no face detected". Our compose pipeline catches that and silently keeps the un-warped clip rather than aborting — but you'll spend ~$0.084/sec on cuts that fall back. If your source is purely b-roll, omit `--lipsync` entirely.
 - **Lipsync source-video freshness window**: Kling's lipsync only accepts source clips ≤30 days old. We just generated them ourselves so this is fine, but if you re-run lipsync standalone weeks later on cached cuts, it'll fail.
+- **`--backgrounds` is best-effort, and Pinterest is flaky.** Pinterest has no public search API and blocks scrapers aggressively, so `--backgrounds pinterest` frequently returns nothing and silently falls back to generic web image search (which is more reliable). A cut whose search finds nothing keeps its plain clip — no error. Treat searched backgrounds as a bonus, not a guarantee, and eyeball the result. Backgrounds only apply to backdrop-friendly formats (greenscreen-kinetic / collage / ai-montage); they're skipped for talking-head even if you pass the flag.
+- **The collage is a grid of search results, not a clone of the source's exact images.** `--backgrounds-tiles 4` tiles four *independently-searched* topical photos into a 2x2 grid (matching the source's collage *composition*), then blurs + darkens them as a backdrop. It does not extract and reuse the source video's specific background images — it finds new ones for the same topic. If fewer than the requested number of distinct images are found, the grid fills with whatever was fetched.
 - **`B-FREED` and other camelCase brand pronunciations**: Whisper sometimes transcribes BeFreed as "B-FREED" (verified on real Mya video). The per-cut TTS reads that literally as "B dash freed" — sounds awkward. Edit the cut's `transcript` field in recipe.json to "BeFreed" (or your preferred pronunciation) before composing.
 - **Sora 2 is being discontinued Sep 2026.** Don't build workflows depending on it. Kling, Runway, Veo, and Luma are the durable options.
-- **AI-disclosure watermark is burned by default.** Final reproduction.mp4 carries a small "AI-generated" tag bottom-right (configurable via `--disclosure-text` and `--disclosure-position`). Required by FTC + EU AI Act + TikTok ToS for AIGC content; using `--no-disclosure` prints a loud warning. Most platforms now enforce labeling of synthetic content.
+- **No AI-disclosure watermark.** compose never burns a watermark and there is no flag to add one — the reproduction is always unlabeled. If you publish AI output where AIGC labeling is required (FTC / EU AI Act / platform ToS), apply the label yourself downstream.
 - **Resume protects against mid-pipeline failure.** A Kling 502 on cut 4 of 5 doesn't burn the $4 already spent on cuts 0-3 — compose persists per-cut state to `reproduction/compose_state.json` and skips cached stages on re-run. Refuses to resume when `recipe.json` changed (silent corruption guard); pass `--no-resume` to discard previous progress explicitly.

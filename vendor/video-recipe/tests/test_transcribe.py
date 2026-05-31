@@ -153,3 +153,104 @@ def test_main_re_raises_unrelated_exceptions(tmp_path, monkeypatch) -> None:  # 
     monkeypatch.setattr(transcribe, "transcribe_audio", boom)
     with pytest.raises(ValueError, match="genuinely unrelated"):
         transcribe.main([str(audio), str(out_path)])
+
+
+# ─── non-speech / BGM / 语气助词 handling ───────────────────────────────────
+
+
+def test_speech_segments_tagged_and_classified(tmp_path: Path) -> None:
+    """A normal spoken result is tagged kind=speech and audio_kind=speech."""
+    out = tmp_path / "t.json"
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFfake")
+    doc = transcribe.transcribe_audio(audio, out, model=FakeWhisperModel(CANNED_RESULT))
+    assert doc["audio_kind"] == "speech"
+    assert doc["has_speech"] is True
+    assert all(s["kind"] == "speech" for s in doc["segments"])
+    assert doc["source"] == "whisper"
+
+
+def test_music_only_drops_hallucinated_text(tmp_path: Path) -> None:
+    """Segments with high no_speech_prob are music/ambience. Whisper
+    hallucinates lyrics there — we must drop the text, tag the segment
+    non_speech, and classify the whole track as music."""
+    music_result = {
+        "language": "en",
+        "segments": [
+            {
+                "start": 0.0,
+                "end": 3.0,
+                "text": "Oh baby tonight we dance",  # hallucinated over the beat
+                "no_speech_prob": 0.92,
+                "words": [{"start": 0.0, "end": 1.0, "word": "Oh"}],
+            },
+            {
+                "start": 3.0,
+                "end": 6.0,
+                "text": "shawty let me see you move",
+                "no_speech_prob": 0.88,
+                "words": [],
+            },
+        ],
+    }
+    out = tmp_path / "t.json"
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFfake")
+    doc = transcribe.transcribe_audio(audio, out, model=FakeWhisperModel(music_result))
+    assert doc["audio_kind"] == "music"
+    assert doc["has_speech"] is False
+    # Text is blanked; no hallucinated lyrics survive.
+    assert all(s["text"] == "" for s in doc["segments"])
+    assert all(s["kind"] == "non_speech" for s in doc["segments"])
+    # And no fake words leak into the word stream used for lip-sync.
+    assert doc["words"] == []
+
+
+def test_mixed_audio_keeps_speech_drops_music(tmp_path: Path) -> None:
+    mixed = {
+        "language": "en",
+        "segments": [
+            {"start": 0.0, "end": 2.0, "text": "Here's my real take.", "no_speech_prob": 0.1,
+             "words": [{"start": 0.0, "end": 0.5, "word": "Here's"}]},
+            {"start": 2.0, "end": 5.0, "text": "la la la music bed", "no_speech_prob": 0.95, "words": []},
+        ],
+    }
+    out = tmp_path / "t.json"
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFfake")
+    doc = transcribe.transcribe_audio(audio, out, model=FakeWhisperModel(mixed))
+    assert doc["audio_kind"] == "mixed"
+    assert doc["has_speech"] is True
+    speech = [s for s in doc["segments"] if s["kind"] == "speech"]
+    music = [s for s in doc["segments"] if s["kind"] == "non_speech"]
+    assert len(speech) == 1 and speech[0]["text"] == "Here's my real take."
+    assert len(music) == 1 and music[0]["text"] == ""
+    # Only the real speech contributes words.
+    assert [w["word"] for w in doc["words"]] == ["Here's"]
+
+
+def test_non_lexical_filler_tagged_but_preserved(tmp_path: Path) -> None:
+    """语气助词 / filler sounds (uh, mmm, [Music]) are real audio events —
+    keep the text but tag kind=non_lexical so they aren't treated as a
+    scripted line and don't pollute the word stream."""
+    result = {
+        "language": "en",
+        "segments": [
+            {"start": 0.0, "end": 1.0, "text": "Uh", "no_speech_prob": 0.2,
+             "words": [{"start": 0.0, "end": 0.5, "word": "Uh"}]},
+            {"start": 1.0, "end": 2.0, "text": "[Music]", "no_speech_prob": 0.3, "words": []},
+            {"start": 2.0, "end": 4.0, "text": "the actual point", "no_speech_prob": 0.1,
+             "words": [{"start": 2.0, "end": 2.5, "word": "the"}]},
+        ],
+    }
+    out = tmp_path / "t.json"
+    audio = tmp_path / "a.wav"
+    audio.write_bytes(b"RIFFfake")
+    doc = transcribe.transcribe_audio(audio, out, model=FakeWhisperModel(result))
+    kinds = {s["text"]: s["kind"] for s in doc["segments"]}
+    assert kinds["Uh"] == "non_lexical"
+    assert kinds["[Music]"] == "non_lexical"
+    assert kinds["the actual point"] == "speech"
+    # Non-lexical filler doesn't become a word the creator is told to say.
+    assert [w["word"] for w in doc["words"]] == ["the"]
+    assert doc["audio_kind"] == "speech"  # has real speech, no music segments

@@ -721,6 +721,8 @@ def _minimal_args():
         kling_voice_language="en",
         kling_voice_speed=1.0,
         character_ref=None,
+        backgrounds="off",
+        backgrounds_tiles=4,
     )
 
 
@@ -846,6 +848,18 @@ def test_args_signature_changes_with_character_ref(_minimal_args):
     assert sig_ref != sig_other
 
 
+def test_args_signature_changes_with_backgrounds(_minimal_args):
+    """A cached plain clip and a cached composited-backdrop clip aren't
+    interchangeable, so toggling --backgrounds must invalidate the cache."""
+    sig_off = compose.args_signature(_minimal_args)
+    _minimal_args.backgrounds = "pinterest"
+    sig_pin = compose.args_signature(_minimal_args)
+    _minimal_args.backgrounds = "web"
+    sig_web = compose.args_signature(_minimal_args)
+    assert sig_off != sig_pin
+    assert sig_pin != sig_web
+
+
 # ─── resolve_character_ref (#25) ────────────────────────────────────────────
 
 
@@ -878,6 +892,31 @@ def test_resolve_character_ref_missing_file_fails_loudly(tmp_path, capsys):
         compose.resolve_character_ref("nope.jpg", tmp_path)
     assert exc.value.code == 1
     assert "doesn't exist" in capsys.readouterr().err
+
+
+# ─── backgrounds_eligible (format gating) ───────────────────────────────────
+
+
+def test_backgrounds_eligible_trusts_user_when_no_decode():
+    on, reason = compose.backgrounds_eligible(None)
+    assert on is True
+    assert "missing" in reason
+
+
+def test_backgrounds_eligible_enabled_for_greenscreen():
+    on, _ = compose.backgrounds_eligible({"format": {"kind": "greenscreen_kinetic_listicle"}})
+    assert on is True
+
+
+def test_backgrounds_eligible_disabled_for_talking_head():
+    on, reason = compose.backgrounds_eligible({"format": {"kind": "talking_head_floating_card"}})
+    assert on is False
+    assert "not background-eligible" in reason
+
+
+def test_backgrounds_eligible_trusts_user_when_kind_absent():
+    on, _ = compose.backgrounds_eligible({"format": {}})
+    assert on is True
 
 
 def test_args_signature_changes_with_kling_voice_speed(_minimal_args):
@@ -1337,113 +1376,7 @@ def test_failed_lipsync_resume_re_attempts_only_lipsync(tmp_path):
     assert compose.stage_done(loaded, 0, "lipsync") is False
 
 
-# ─── AI-disclosure watermark (issue #17) ───────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "position,expected_x_contains,expected_y_contains",
-    [
-        ("bottom-right", "w-text_w", "h-text_h"),
-        ("bottom-left", "30", "h-text_h"),
-        ("top-right", "w-text_w", "30"),
-        ("top-left", "30", "30"),
-    ],
-)
-def test_disclosure_filter_positions(position, expected_x_contains, expected_y_contains):
-    """All four corner positions emit valid drawtext x/y expressions."""
-    out = compose.build_disclosure_filter("AI-generated", position)
-    # Find the x= and y= args in the filter string
-    x_segment = next(s for s in out.split(":") if s.startswith("x="))
-    y_segment = next(s for s in out.split(":") if s.startswith("y="))
-    assert expected_x_contains in x_segment
-    assert expected_y_contains in y_segment
-
-
-def test_disclosure_filter_unknown_position_falls_back_to_bottom_right():
-    """An invalid position string shouldn't crash; default to safe corner."""
-    out = compose.build_disclosure_filter("AI", "invalid-position-name")
-    assert "w-text_w" in out  # bottom-right default
-    assert "h-text_h" in out
-
-
-def test_disclosure_filter_includes_text():
-    out = compose.build_disclosure_filter("AI-generated", "bottom-right")
-    assert "AI-generated" in out
-    assert out.startswith("drawtext=")
-
-
-def test_disclosure_filter_escapes_special_chars():
-    """Watermark text might contain colons or apostrophes if the user
-    overrides it. Same escape rules as caption burn-in."""
-    out = compose.build_disclosure_filter("Made with AI 100%", "bottom-right")
-    assert "Made with AI 100\\%" in out
-
-
-def test_disclosure_filter_styling_smaller_than_caption_burnin():
-    """Disclosure should be visible-but-not-dominant: smaller font + box.
-    Regression test against a future refactor that accidentally uses the
-    caption burn-in fontsize."""
-    out = compose.build_disclosure_filter("AI", "bottom-right")
-    assert "fontsize=28" in out  # smaller than caption's 42
-    assert "boxborderw=8" in out  # smaller than caption's 12
-
-
-@pytest.mark.skipif(not compose.drawtext_available(), reason="ffmpeg lacks libfreetype")
-def test_apply_disclosure_watermark_produces_correct_duration(synthetic_clip, tmp_path):
-    """E2E: feed a synthetic clip + disclosure overlay, verify output
-    duration matches input and has valid video stream."""
-    src_with_audio = tmp_path / "with_audio.mp4"
-    # Generate a 5s clip with silent audio so apply_disclosure_watermark's
-    # `-c:a copy` has something to copy
-    proc = subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=teal:1080x1920:duration=5:rate=30",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-c:v",
-            "libx264",
-            "-c:a",
-            "aac",
-            "-t",
-            "5",
-            str(src_with_audio),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        pytest.skip(f"ffmpeg fixture build failed: {proc.stderr[:200]}")
-    out = tmp_path / "watermarked.mp4"
-    compose.apply_disclosure_watermark(src_with_audio, out, "AI-generated", "bottom-right")
-    assert out.exists()
-    duration = compose.ffprobe_duration(out)
-    assert 4.9 < duration < 5.1
-    # And it has an audio stream (we copied it through)
-    audio_check = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "a:0",
-            "-show_entries",
-            "stream=codec_name",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(out),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert audio_check.stdout.strip(), "watermarked output should have audio stream"
+# Note: the AI-disclosure watermark feature was removed — compose never
+# applies a watermark, and there is no --disclosure option. The reproduction
+# is always unlabeled (the user labels at publish time if they choose to).
+# See the compose() concat step, which writes reproduction.mp4 directly.

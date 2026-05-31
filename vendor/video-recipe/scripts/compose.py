@@ -86,6 +86,34 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--backgrounds",
+        type=str,
+        choices=["off", "pinterest", "web"],
+        default="off",
+        help=(
+            "Search the web for topic-matching background imagery per cut and composite it "
+            "behind the cut (ffmpeg overlay — no video-gen API cost). "
+            "'pinterest' searches Pinterest first then falls back to generic web image search; "
+            "'web' uses generic image search only; 'off' (default) skips backgrounds entirely. "
+            "By default builds a multi-image collage grid (see --backgrounds-tiles) matching the "
+            "Canva-collage look of greenscreen-kinetic UGC. Best-effort: a search miss keeps the "
+            "un-composited clip. Auto-gated to collage / greenscreen-kinetic formats when "
+            "decode.json is present."
+        ),
+    )
+    p.add_argument(
+        "--backgrounds-tiles",
+        type=int,
+        default=4,
+        help=(
+            "How many distinct images to tile into the per-cut background collage. "
+            "4 (default) reconstructs the classic 2x2 Canva-collage look; 1 = a single blurred "
+            "full-frame backdrop; 2/3/6/9 etc. pick near-square grids. Only used when "
+            "--backgrounds is pinterest/web. Fewer images are found than requested → the grid "
+            "uses whatever was fetched."
+        ),
+    )
+    p.add_argument(
         "--no-burnin",
         action="store_true",
         help="Skip burning OCR'd overlay text into the reproduction. By default, overlay text from recipe.title_cards / cut.ocr_text / cut.caption is rendered as on-screen text per cut. Use this for testing or when the source's overlay is undesirable in the reproduction.",
@@ -94,24 +122,6 @@ def parse_args() -> argparse.Namespace:
         "--no-resume",
         action="store_true",
         help="Discard any previous compose_state.json and re-run from scratch. By default, compose resumes: cuts whose API calls succeeded previously are skipped and their cached outputs reused (so a Kling 502 mid-pipeline doesn't force you to re-pay for completed cuts). Use this when you want a clean run.",
-    )
-    p.add_argument(
-        "--no-disclosure",
-        action="store_true",
-        help="Skip the AI-generated disclosure watermark on the final reproduction. Default behavior burns 'AI-generated' bottom-right of the output, required by FTC + EU AI Act + TikTok ToS for AIGC content. Using this flag prints a loud warning — most platforms now enforce labeling of synthetic content.",
-    )
-    p.add_argument(
-        "--disclosure-text",
-        type=str,
-        default="AI-generated",
-        help="Override the default disclosure text. Keep it short — long text dominates the frame. Default: 'AI-generated'.",
-    )
-    p.add_argument(
-        "--disclosure-position",
-        type=str,
-        choices=["bottom-right", "bottom-left", "top-right", "top-left"],
-        default="bottom-right",
-        help="Where to place the disclosure watermark. Default: bottom-right (matches platform conventions for AI-labels).",
     )
     p.add_argument(
         "--tts",
@@ -328,6 +338,87 @@ def resolve_character_ref(raw: str | None, recipe_dir: Path) -> str | None:
             code=1,
         )
     return str(p)
+
+
+# ─── Per-cut background imagery (Pinterest/web composite) ──────────────────
+#
+# Formats where a searched backdrop actually helps. Greenscreen-kinetic /
+# collage UGC is built ON a background image layer; reproducing it flat
+# looks empty. Talking-head / AI-montage don't benefit (the frame is the
+# subject), so we skip them unless decode.json is absent (then we trust the
+# user's explicit --backgrounds opt-in and apply to every cut).
+_BACKGROUND_ELIGIBLE_FORMATS: frozenset[str] = frozenset({
+    "greenscreen_kinetic_listicle",
+    "collage_voiceover",
+    "ai_montage_kinetic",
+})
+
+
+def backgrounds_eligible(decode: dict | None) -> tuple[bool, str]:
+    """Decide whether --backgrounds should run, given decode signals.
+
+    - decode None (no decode.json) → trust the user's explicit opt-in,
+      apply to all cuts.
+    - decode present with an eligible format.kind → enabled.
+    - decode present with an ineligible kind → disabled (a backdrop would
+      just sit behind a talking head pointlessly)."""
+    if decode is None:
+        return True, "no decode signal (decode.json missing) — applying backgrounds as requested"
+    kind = (decode.get("format") or {}).get("kind")
+    if not kind:
+        return True, "decode present but no format.kind — applying as requested"
+    if kind in _BACKGROUND_ELIGIBLE_FORMATS:
+        return True, f"enabled — format.kind = {kind!r}"
+    return False, (
+        f"disabled — format.kind = {kind!r} is not background-eligible "
+        f"({sorted(_BACKGROUND_ELIGIBLE_FORMATS)}); a backdrop wouldn't help this format."
+    )
+
+
+def _cut_background_query(cut: dict) -> str:
+    """Build the image-search query for a cut from its overlay/caption +
+    scene text. Imported lazily so compose stays importable without the
+    backgrounds module's optional deps."""
+    from scripts.backgrounds import derive_query
+
+    overlay = (cut.get("caption") or cut.get("ocr_text") or "").strip()
+    scene = (resolve_cut_prompt(cut) or "").strip()
+    return derive_query(overlay_text=overlay, scene_description=scene)
+
+
+def _apply_cut_background(
+    cut: dict,
+    dst: Path,
+    out_dir: Path,
+    cut_idx: int,
+    width: int,
+    height: int,
+    sources: list,
+    tiles: int = 4,
+) -> None:
+    """Search for + composite a background behind the cut clip at `dst`,
+    in place. Builds a multi-image collage grid of `tiles` images (the
+    Canva-collage look of greenscreen-kinetic UGC); tiles=1 produces a
+    single blurred backdrop. Best-effort: any miss/failure leaves `dst`
+    untouched."""
+    from scripts.backgrounds import composite_collage_background, fetch_backgrounds
+
+    query = _cut_background_query(cut)
+    if not query:
+        return
+    n = max(1, int(tiles))
+    bg_imgs = fetch_backgrounds(
+        query, out_dir, sources, count=n, prefix=f"bg-{cut_idx:02d}"
+    )
+    if not bg_imgs:
+        return
+    composited = out_dir / f"cut-{cut_idx:02d}-bg.mp4"
+    if composite_collage_background(dst, bg_imgs, composited, width, height):
+        # Replace the clip in place so downstream stitch/lipsync see the
+        # composited frame.
+        shutil.move(str(composited), str(dst))
+        layout = "1-image backdrop" if len(bg_imgs) == 1 else f"{len(bg_imgs)}-image collage"
+        print(f"[compose] cut {cut_idx}: composited {layout} ('{query}')")
 
 
 # ─── decode.json signal loading + gating ───────────────────────────────────
@@ -623,10 +714,6 @@ def args_signature(args: argparse.Namespace) -> str:
       - --dry-run: never reaches the render layer
       - --no-resume: this IS the cache control; doesn't go in the signature
       - --ugcspy-bin: tool path, doesn't affect outputs
-      - --disclosure-* + --no-disclosure: applied at the FINAL watermark step,
-        not per-cut. Changing these on resume re-writes only the final mp4.
-        (Strictly we could include them, but the cost is one ffmpeg pass,
-        not a re-render. Keep them out to allow cheap watermark iteration.)
     """
     return (
         f"lipsync={bool(getattr(args, 'lipsync', False))}"
@@ -639,6 +726,12 @@ def args_signature(args: argparse.Namespace) -> str:
         # so it MUST invalidate the cache — resuming a text2video run with a
         # character ref (or vice versa) would mix two render modes.
         f"|character_ref={getattr(args, 'character_ref', None) or ''}"
+        # backgrounds composites a backdrop into each cut's clip — a cached
+        # plain clip and a cached composited clip aren't interchangeable, so
+        # toggling this (or the tile count, which changes the collage layout)
+        # must invalidate the resume cache.
+        f"|backgrounds={getattr(args, 'backgrounds', 'off')}"
+        f"|backgrounds_tiles={getattr(args, 'backgrounds_tiles', 4)}"
     )
 
 
@@ -1046,79 +1139,6 @@ def build_drawtext_filter(burnin_text: str, clip_dur: float) -> str:
     )
 
 
-# ─── AI-disclosure watermark (issue #17) ───────────────────────────────────
-#
-# FTC + EU AI Act + TikTok ToS all require labeling of AI-generated content.
-# Unlabeled output of this tool is a compliance gap — especially for lipsync
-# warps where the synthetic mouth is on a face resembling a real creator.
-# We burn a disclosure watermark on the final reproduction by default.
-#
-# Position uses corner-anchored placement to match how platforms typically
-# render their own AI-label badges (TikTok's "AI-Generated" badge sits
-# bottom-right; Instagram's "AI" tag sits top-left on Reels).
-#
-# Like the caption burn-in, this requires ffmpeg with libfreetype. When
-# missing we degrade gracefully: a warning prints, the final reproduction
-# is written without the watermark. The user gets explicit notice so they
-# don't unknowingly post unlabeled AI content.
-
-# Maps user-facing position names to drawtext (x, y) expressions.
-_DISCLOSURE_POSITIONS: dict[str, tuple[str, str]] = {
-    "bottom-right": ("w-text_w-30", "h-text_h-30"),
-    "bottom-left": ("30", "h-text_h-30"),
-    "top-right": ("w-text_w-30", "30"),
-    "top-left": ("30", "30"),
-}
-
-
-def build_disclosure_filter(text: str, position: str) -> str:
-    """Build a drawtext filter for the AI-disclosure watermark.
-
-    Smaller fontsize than the caption burn-in (28 vs 42) — the disclosure
-    is meant to be visible-but-not-dominant. Black box behind for
-    legibility on any background; corner-anchored placement matches
-    platform conventions for AI labels."""
-    x_expr, y_expr = _DISCLOSURE_POSITIONS.get(position, _DISCLOSURE_POSITIONS["bottom-right"])
-    escaped = escape_drawtext(text)
-    font = _resolve_burnin_font()
-    font_arg = f":fontfile={font}" if font else ""
-    return (
-        f"drawtext=text='{escaped}'"
-        f"{font_arg}"
-        f":fontcolor=white"
-        f":fontsize=28"
-        f":box=1"
-        f":boxcolor=black@0.65"
-        f":boxborderw=8"
-        f":x={x_expr}"
-        f":y={y_expr}"
-    )
-
-
-def apply_disclosure_watermark(src: Path, dst: Path, text: str, position: str) -> None:
-    """Single ffmpeg pass: apply disclosure drawtext over `src` and write
-    to `dst`. Stream-copies audio (no need to re-encode); only re-encodes
-    video. Faster than a full re-encode of the whole reproduction."""
-    run_ffmpeg(
-        [
-            "-y",
-            "-i",
-            str(src),
-            "-vf",
-            build_disclosure_filter(text, position),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "copy",  # audio passes through; only video gets a new encode
-            str(dst),
-        ]
-    )
-
-
 # ─── Composer ──────────────────────────────────────────────────────────────
 
 
@@ -1196,6 +1216,27 @@ def compose(args: argparse.Namespace) -> None:
     character_ref = resolve_character_ref(args.character_ref, args.recipe_dir)
     if character_ref:
         print(f"[compose] character reference: {character_ref} — cuts use image2video (face locked across cuts)")
+
+    # 2d-bis. Decide whether per-cut background compositing runs. Gated to
+    # backdrop-friendly formats via decode.json. No API cost (pure ffmpeg),
+    # so this is purely an output-quality knob — but it does add wall time
+    # (a web search + download + an ffmpeg re-encode per cut).
+    backgrounds_on = False
+    bg_sources: list = []
+    tech_width = 1080
+    tech_height = 1920
+    if args.backgrounds != "off":
+        backgrounds_on, bg_reason = backgrounds_eligible(decode_signals)
+        print(f"[compose] backgrounds ({args.backgrounds}): {bg_reason}")
+        if backgrounds_on:
+            from scripts.backgrounds import pick_sources
+
+            bg_sources = pick_sources(args.backgrounds)
+            # Output frame size: prefer the source's real dimensions from
+            # decode.json so the backdrop matches the reproduction aspect.
+            tech = (decode_signals or {}).get("technical") or {}
+            tech_width = int(tech.get("width") or 1080) or 1080
+            tech_height = int(tech.get("height") or 1920) or 1920
 
     # 3. Cost preflight — sum estimated cost across all cuts + TTS + optional lipsync.
     # Uses kling_billed_duration so the estimate matches what we'll actually
@@ -1341,6 +1382,24 @@ def compose(args: argparse.Namespace) -> None:
                     f"running cost ${total_cost:.2f} exceeded budget ${args.budget:.2f} after cut {i}",
                     code=4,
                 )
+
+        # Background composite (#: per-cut Pinterest/web backdrop). Runs on
+        # the finalized text2video clip BEFORE TTS/lipsync so the lipsync
+        # warp (if any) operates on the composited frame. No video-gen API
+        # cost — pure ffmpeg overlay. Best-effort: a search miss or composite
+        # failure keeps the un-composited clip and moves on. Gated to formats
+        # where a backdrop helps (collage/greenscreen); skipped otherwise.
+        if backgrounds_on:
+            _apply_cut_background(
+                cut=cut,
+                dst=dst,
+                out_dir=out_dir,
+                cut_idx=cut_idx,
+                width=int(tech_width),
+                height=int(tech_height),
+                sources=bg_sources,
+                tiles=int(getattr(args, "backgrounds_tiles", 4)),
+            )
 
         # L2: per-cut TTS, aligned to this cut's spoken window.
         # Only renders OpenAI TTS when tts_provider == "openai". When
@@ -1599,54 +1658,13 @@ def compose(args: argparse.Namespace) -> None:
     concat_list = out_dir / "concat.txt"
     concat_list.write_text("\n".join(f"file '{p.name}'" for p in final_clip_paths) + "\n")
     final = args.recipe_dir / "reproduction.mp4"
-    # First concat all the normalized clips into a stitched intermediate.
+    # Concat the normalized clips straight into the final reproduction.
     # Stream-copy is safe here: every input has identical codec params.
-    # Then optionally apply the disclosure watermark to that stitched file.
-    stitched = out_dir / "stitched.mp4"
-    run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(stitched)])
-
-    # Apply AI-disclosure watermark unless explicitly opted out. Required
-    # by FTC + EU AI Act + TikTok ToS for AI-generated content.
-    disclosure_status: str
-    if args.no_disclosure:
-        print(
-            "[compose] ⚠ WARNING: --no-disclosure was set. The reproduction will NOT carry an AI-generated label. "
-            "Most platforms (TikTok, Instagram, YouTube) require AIGC labeling under their ToS, "
-            "and FTC + EU AI Act require disclosure of synthetic content. "
-            "Use this flag only when you have a specific reason (e.g. you're applying a different label downstream).",
-            file=sys.stderr,
-        )
-        shutil.move(str(stitched), str(final))
-        disclosure_status = "skipped (--no-disclosure)"
-    elif not drawtext_available():
-        # ffmpeg without libfreetype can't render the watermark either. We
-        # already warned earlier about caption burn-in being skipped; surface
-        # the disclosure issue separately because it's a compliance gap.
-        print(
-            "[compose] ⚠ WARNING: ffmpeg drawtext unavailable; AI-disclosure watermark NOT applied. "
-            "Install ffmpeg with libfreetype (apt install ffmpeg on Debian/Ubuntu, "
-            "or brew tap homebrew-ffmpeg/ffmpeg + brew install homebrew-ffmpeg/ffmpeg/ffmpeg "
-            "--with-freetype on macOS) and re-run to add the required label.",
-            file=sys.stderr,
-        )
-        shutil.move(str(stitched), str(final))
-        disclosure_status = "skipped (drawtext unavailable)"
-    else:
-        print(
-            f"[compose] applying AI-disclosure watermark "
-            f"({args.disclosure_text!r} at {args.disclosure_position})..."
-        )
-        apply_disclosure_watermark(stitched, final, args.disclosure_text, args.disclosure_position)
-        # Clean up the intermediate stitched.mp4 since the watermarked
-        # version is what the user wants.
-        try:
-            stitched.unlink()
-        except OSError:
-            pass
-        disclosure_status = f"burned {args.disclosure_text!r} at {args.disclosure_position}"
+    # No AI-disclosure watermark is ever applied — the output is unlabeled
+    # by design (the user labels at publish time if they choose to).
+    run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
 
     print(f"\n[compose] ✓ reproduction.mp4 written to {final}")
-    print(f"[compose] AI-disclosure: {disclosure_status}")
     print(f"[compose] total cost: ${total_cost:.2f} of ${args.budget:.2f} budget")
     # Per-cut lipsync summary (only emitted when lipsync was on for at least one cut)
     if any(s != "skipped" for _, s in lipsync_statuses):
