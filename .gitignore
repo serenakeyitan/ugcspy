@@ -45,3 +45,4 @@ CLAUDE.md
 .tmp/
 
 # Local debug artifacts from manual decode analysis
+.gstack/
