@@ -86,6 +86,9 @@ export async function runRender(): Promise<void> {
       emitOk({
         mp4_path: result.mp4_path,
         external_id: result.external_id,
+        // video_id is the lip-sync-ready id (distinct from the task's
+        // external_id). compose persists + passes this to lipsync_text2video.
+        video_id: result.video_id,
         cost_usd: result.cost_usd,
       });
       return;

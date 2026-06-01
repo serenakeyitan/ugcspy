@@ -743,7 +743,8 @@ def _minimal_args():
 
     return argparse.Namespace(
         lipsync=False,
-        no_burnin=False,
+        burnin=False,  # burn-in off by default (opt-in via --burnin)
+        no_burnin=False,  # legacy no-op, kept for back-compat
         no_resume=False,
         tts="auto",
         kling_voice_id=None,
@@ -828,11 +829,19 @@ def test_args_signature_changes_with_lipsync_flag(_minimal_args):
     assert sig1 != sig2
 
 
-def test_args_signature_changes_with_no_burnin_flag(_minimal_args):
+def test_args_signature_ignores_burnin_flags(_minimal_args):
+    """Burn-in is a concat-time presentation choice, NOT a billed render
+    stage — toggling captions must NOT invalidate the paid text2video/lipsync
+    cache. So neither --burnin nor the legacy --no-burnin appears in the
+    signature. (Pre-2026-06 this asserted the opposite; that was wrong: it
+    forced a full re-render — re-paying for every cut — just to add/remove
+    on-screen text.)"""
     sig1 = compose.args_signature(_minimal_args)
     _minimal_args.no_burnin = True
+    if hasattr(_minimal_args, "burnin"):
+        _minimal_args.burnin = True
     sig2 = compose.args_signature(_minimal_args)
-    assert sig1 != sig2
+    assert sig1 == sig2
 
 
 def test_args_signature_changes_with_tts_provider(_minimal_args):

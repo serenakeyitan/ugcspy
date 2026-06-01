@@ -107,6 +107,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
   private static readonly POLL_INTERVAL_MS = 5000;
   private static readonly POLL_TIMEOUT_MS = 8 * 60 * 1000;
 
+  // Fallback voice per language for lipSyncWithText when the caller doesn't
+  // specify one. text2video mode REQUIRES voice_id (omitting it → 1201
+  // "Voice language not found"). These IDs were verified to submit
+  // successfully against api-singapore.klingai.com (May 2026); the catalog
+  // is account/endpoint-specific so don't swap in fal.ai/PiAPI ids blindly.
+  // 'girlfriend_4_speech02' is a natural female en voice (suits UGC creators);
+  // 'ai_shatang' is a female zh voice.
+  private static readonly DEFAULT_VOICE_ID: Record<"en" | "zh", string> = {
+    en: "girlfriend_4_speech02",
+    zh: "ai_shatang",
+  };
+
   // Official API domain. Per the kling.ai docs, the endpoint moved from
   // api.klingai.com to api-singapore.klingai.com for users outside China.
   // Overridable via the constructor (env-driven from render.ts) so the old
@@ -247,6 +259,7 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     // 2. Poll until done.
     const startedAt = Date.now();
     let videoUrl: string | null = null;
+    let videoId: string | null = null;
     while (Date.now() - startedAt < KlingProvider.POLL_TIMEOUT_MS) {
       await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`${endpoint}/${taskId}`);
@@ -255,12 +268,16 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
         data?: {
           task_status?: string;
           task_status_msg?: string;
-          task_result?: { videos?: { url?: string }[] };
+          task_result?: { videos?: { id?: string; url?: string }[] };
         };
       };
       const status = statusJson.data?.task_status;
       if (status === "succeed") {
-        videoUrl = statusJson.data?.task_result?.videos?.[0]?.url ?? null;
+        const video = statusJson.data?.task_result?.videos?.[0];
+        videoUrl = video?.url ?? null;
+        // Capture the VIDEO id (distinct from the task id). Lip-sync's
+        // video_id field needs THIS, not taskId — see ClipGenResult.video_id.
+        videoId = video?.id ?? null;
         break;
       }
       if (status === "failed") {
@@ -281,6 +298,10 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     return {
       mp4_path: outPath,
       external_id: taskId,
+      // The generated video's own id — what lip-sync's video_id needs.
+      // Falls back to undefined if Kling omitted it (shouldn't happen on
+      // succeed, but don't fabricate the task id here — that's the 1201 bug).
+      video_id: videoId ?? undefined,
       // Model+mode-aware cost (not the static baseline) so the running total
       // reflects what v2-6/pro actually bills, not v1-6/std.
       cost_usd: duration * klingCostPerSec(model, mode),
@@ -486,13 +507,20 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
    * (using its voice catalog) and produces a face-synced clip in one
    * call. No separate audio file to manage.
    *
-   * Constraints (per Kling docs, verified May 2026):
+   * Constraints (per Kling docs + LIVE API, verified May 2026):
    *   - `text` max 120 chars; longer text MUST be split by the caller
    *     into separate cuts (this method enforces the limit and refuses
    *     loudly rather than silently truncating).
    *   - `voice_language` ∈ {"en", "zh"}; other languages auto-translate
    *     to English on Kling's side (likely surprising).
    *   - `voice_speed` ∈ [0.8, 2.0].
+   *   - `voice_id` is REQUIRED in text2video mode. Kling does NOT pick a
+   *     default from the language alone — omitting voice_id (sending only
+   *     voice_language) yields 1201 "Voice language not found". So when the
+   *     caller doesn't specify a voice, we supply a known-valid default per
+   *     language (DEFAULT_VOICE_ID), verified against the live api-singapore
+   *     endpoint. The catalog is account/endpoint-specific (e.g. fal.ai's
+   *     `oversea_female1` is NOT valid here), so these are probed values.
    *
    * Same source-video constraints as lipSyncClip (5/10s, ≤30 days old,
    * clear face). Same pricing per second.
@@ -531,18 +559,21 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
     // 1. Submit lipsync text2video job
     // Schema verified against github/199-mcp/mcp-kling/kling-api-docs.md
     // section 3-13 (lip-sync endpoint, mode: text2video sub-shape).
+    // voice_id is REQUIRED in text2video mode (see method doc). When the
+    // caller doesn't pick one, fall back to a known-valid default for the
+    // language so we never submit a voice-less request that 1201s. These IDs
+    // were verified against the live api-singapore endpoint May 2026.
+    const voiceId = req.voice_id ?? KlingProvider.DEFAULT_VOICE_ID[lang];
     const submitBody: Record<string, unknown> = {
       input: {
         video_id: req.video_id,
         mode: "text2video",
         text: req.text,
+        voice_id: voiceId,
         voice_language: lang,
         voice_speed: speed,
       },
     };
-    if (req.voice_id) {
-      (submitBody.input as Record<string, unknown>).voice_id = req.voice_id;
-    }
     const taskId = await this.submitTask("/v1/videos/lip-sync", submitBody, "lipsync text2video");
 
     // 2. Poll for completion — same lifecycle as lipSyncClip

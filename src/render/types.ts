@@ -77,8 +77,16 @@ export interface ClipGenResult {
   // Local path to the downloaded MP4. The adapter is responsible for
   // pulling the video from the provider's CDN to disk.
   mp4_path: string;
-  // Provider's own ID for traceability (useful when debugging cost/quality).
+  // Provider's TASK id (the submit→poll job id). Used for traceability and
+  // cost/quality debugging. NOT the id lip-sync wants — see video_id below.
   external_id: string;
+  // Provider's VIDEO id — the id of the generated video object itself
+  // (Kling: task_result.videos[0].id). This is DISTINCT from the task id
+  // and is what the lip-sync endpoint's `video_id` field expects. Passing
+  // the task id instead yields Kling error 1201 "From video not found by
+  // id". Optional because not every provider distinguishes the two; falls
+  // back to external_id when absent.
+  video_id?: string;
   // Cost in USD as billed at the time of the call. Used to surface a
   // running total to the user before they spend more.
   cost_usd: number;
@@ -101,7 +109,9 @@ export interface VideoGenProvider {
  * surfaces the API error if the gate is wrong.
  */
 export interface LipSyncRequest {
-  /** task_id / external_id from a prior generateClip call. Must be from
+  /** The VIDEO id from a prior generateClip call (ClipGenResult.video_id),
+   *  NOT the task id. Kling looks this up as a video object; passing the
+   *  task id yields error 1201 "From video not found by id". Must be from
    *  the same provider account and ≤30 days old (Kling constraint). */
   video_id: string;
   /** Path on local disk to the audio file (mp3/wav/m4a/aac, ≤5MB). The
@@ -140,7 +150,8 @@ export interface LipSyncProvider {
  * language.
  */
 export interface LipSyncWithTextRequest {
-  /** task_id / external_id from a prior generateClip call. */
+  /** The VIDEO id from a prior generateClip call (ClipGenResult.video_id),
+   *  NOT the task id. See LipSyncRequest.video_id for the 1201 footgun. */
   video_id: string;
   /** Text to be spoken. Provider may enforce a hard char limit. */
   text: string;

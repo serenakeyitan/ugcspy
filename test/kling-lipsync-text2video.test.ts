@@ -128,7 +128,11 @@ describe("KlingProvider.lipSyncWithText", () => {
     expect(result.cost_usd).toBeCloseTo(0.42, 5);
   }, 15000);
 
-  test("omits voice_id when not provided (Kling picks default for language)", async () => {
+  test("supplies a default voice_id per language when not provided", async () => {
+    // text2video mode REQUIRES voice_id — Kling does NOT pick a default from
+    // the language alone (omitting it yields 1201 "Voice language not found",
+    // confirmed against the live api-singapore endpoint). So the adapter must
+    // fill in a known-valid default rather than send a voice-less request.
     global.fetch = makeMockFetch([
       { status: 200, json: { code: 0, data: { task_id: "t" } } },
       {
@@ -136,7 +140,7 @@ describe("KlingProvider.lipSyncWithText", () => {
         json: {
           data: {
             task_status: "succeed",
-            task_result: { videos: [{ url: "https://kling.cdn/v.mp4", duration: "5" }] },
+            task_result: { videos: [{ id: "v", url: "https://kling.cdn/v.mp4", duration: "5" }] },
           },
         },
       },
@@ -152,10 +156,35 @@ describe("KlingProvider.lipSyncWithText", () => {
 
     const submit = captured.find((r) => r.url.endsWith("/v1/videos/lip-sync"));
     const body = JSON.parse(submit!.body) as { input: Record<string, unknown> };
-    expect(body.input).not.toHaveProperty("voice_id");
+    // voice_id MUST be present (the zh default), not omitted.
+    expect(body.input.voice_id).toBe("ai_shatang");
     expect(body.input.voice_language).toBe("zh");
     // Default voice_speed of 1.0 should be set
     expect(body.input.voice_speed).toBe(1.0);
+  }, 15000);
+
+  test("defaults to a female English voice when language is en and no voice given", async () => {
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "t" } } },
+      {
+        status: 200,
+        json: {
+          data: {
+            task_status: "succeed",
+            task_result: { videos: [{ id: "v", url: "https://kling.cdn/v.mp4", duration: "5" }] },
+          },
+        },
+      },
+      { status: 200, bodyBuffer: new ArrayBuffer(10) },
+    ]) as typeof fetch;
+
+    const provider = new KlingProvider("access", "secret");
+    await provider.lipSyncWithText({ video_id: "x", text: "Hello", voice_language: "en" });
+
+    const submit = captured.find((r) => r.url.endsWith("/v1/videos/lip-sync"));
+    const body = JSON.parse(submit!.body) as { input: Record<string, unknown> };
+    expect(body.input.voice_id).toBe("girlfriend_4_speech02");
+    expect(body.input.voice_language).toBe("en");
   }, 15000);
 
   test("refuses text > 120 chars with a clear error", async () => {

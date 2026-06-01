@@ -201,9 +201,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--burnin",
+        action="store_true",
+        help="Burn the OCR'd overlay text (recipe.title_cards / cut.ocr_text / cut.caption) onto the reproduction as on-screen text. OFF by default: reproductions ship with NO words on screen so the user can add captions manually in their editor of choice. Pass this only when you explicitly want the source's overlay text baked in.",
+    )
+    # Back-compat: --no-burnin was the old opt-OUT flag back when burn-in was
+    # on by default. Burn-in is now off by default, so --no-burnin is a no-op
+    # accepted silently (suppressed from help) to avoid breaking old scripts.
+    p.add_argument(
         "--no-burnin",
         action="store_true",
-        help="Skip burning OCR'd overlay text into the reproduction. By default, overlay text from recipe.title_cards / cut.ocr_text / cut.caption is rendered as on-screen text per cut. Use this for testing or when the source's overlay is undesirable in the reproduction.",
+        help=argparse.SUPPRESS,
     )
     p.add_argument(
         "--no-resume",
@@ -1025,7 +1033,10 @@ def args_signature(args: argparse.Namespace) -> str:
     """
     return (
         f"lipsync={bool(getattr(args, 'lipsync', False))}"
-        f"|no_burnin={bool(getattr(args, 'no_burnin', False))}"
+        # NB: burn-in is intentionally NOT in the signature. It's a concat-time
+        # presentation choice (drawtext overlay), not a billed render stage —
+        # toggling captions must never invalidate the paid text2video/lipsync
+        # cache and force a re-pay. (Was `no_burnin=...` here pre-2026-06.)
         f"|tts={getattr(args, 'tts', 'auto')}"
         f"|kling_voice_id={getattr(args, 'kling_voice_id', None) or ''}"
         f"|kling_voice_lang={getattr(args, 'kling_voice_language', 'en')}"
@@ -1740,7 +1751,10 @@ def compose(args: argparse.Namespace) -> None:
         cut_video_id: str | None = None
         if stage_done(state, cut_idx, "text2video") and dst.exists() and dst.stat().st_size > 0:
             # Reuse cached clip — no API call, no cost added (state already
-            # has the cost from the previous run).
+            # has the cost from the previous run). The state's external_id
+            # field holds the lipsync-ready VIDEO id (persisted post-fix);
+            # older state files may hold the task id (lipsync will then 1201,
+            # but re-running text2video refreshes it).
             for c in state["cuts"]:
                 if c.get("index") == cut_idx:
                     cut_video_id = c.get("text2video", {}).get("external_id")
@@ -1788,8 +1802,12 @@ def compose(args: argparse.Namespace) -> None:
             if not mp4.exists():
                 fail(f"render returned mp4_path={mp4} but file doesn't exist", code=2)
             shutil.copy(mp4, dst)
-            # Capture the Kling task_id (external_id) — needed for L3 lipsync
-            cut_video_id = result.get("external_id")
+            # Capture the Kling VIDEO id — needed for L3 lipsync's video_id
+            # field. This is DISTINCT from the task's external_id: passing the
+            # task id to lipsync yields Kling error 1201 "From video not found
+            # by id". Older adapters that don't return video_id fall back to
+            # external_id (the pre-fix behavior).
+            cut_video_id = result.get("video_id") or result.get("external_id")
             cost_this = float(result["cost_usd"])
             total_cost += cost_this
             print(f"[compose]   cost so far: ${total_cost:.2f}")
@@ -2007,13 +2025,14 @@ def compose(args: argparse.Namespace) -> None:
         normalized = out_dir / f"final-{i:02d}.mp4"
 
         # Resolve per-cut burn-in text from recipe.title_cards or
-        # cut.caption / cut.ocr_text (in that priority). When --no-burnin
-        # is passed or no text resolves, burnin_filter is None and the
-        # normalize helpers skip drawtext.
+        # cut.caption / cut.ocr_text (in that priority). Burn-in is OFF by
+        # default — reproductions ship with NO on-screen text so captions can
+        # be added manually downstream. Only --burnin opts in. When off or no
+        # text resolves, burnin_filter is None and normalize skips drawtext.
         burnin_filter: str | None = None
         cuts_idx = int(cuts[i].get("index", i))
-        if args.no_burnin:
-            burnin_summary.append((cuts_idx, "skipped: --no-burnin"))
+        if not args.burnin:
+            burnin_summary.append((cuts_idx, "skipped: burn-in off by default (pass --burnin to enable)"))
         elif not drawtext_available():
             # ffmpeg without libfreetype can't run drawtext. Degrade
             # gracefully — emit a clear one-time warning at the first

@@ -123,7 +123,11 @@ const SUCCEED_CYCLE: MockResponse[] = [
     json: {
       data: {
         task_status: "succeed",
-        task_result: { videos: [{ url: "https://kling.cdn/v.mp4", duration: "5" }] },
+        // Real Kling: the video object has its OWN id, distinct from the
+        // task_id above. Lip-sync needs THIS id (see the 1201 bug).
+        task_result: {
+          videos: [{ id: "img-video-1", url: "https://kling.cdn/v.mp4", duration: "5" }],
+        },
       },
     },
   },
@@ -182,7 +186,13 @@ describe("KlingProvider.generateClip image2video (character consistency)", () =>
 
     // Poll hits the image2video status endpoint, not text2video.
     expect(captured.some((r) => r.url.includes("/v1/videos/image2video/img-task-1"))).toBe(true);
+    // external_id is the TASK id (submit→poll job id) for traceability.
     expect(result.external_id).toBe("img-task-1");
+    // video_id is the VIDEO object's id from task_result.videos[0].id — what
+    // lip-sync's video_id field needs. MUST be distinct from external_id;
+    // returning the task id here is the 1201 "From video not found" bug.
+    expect(result.video_id).toBe("img-video-1");
+    expect(result.video_id).not.toBe(result.external_id);
     // 5s * v3 pro ($0.21/s) = $1.05.
     expect(result.cost_usd).toBeCloseTo(1.05, 5);
   }, 15000);
