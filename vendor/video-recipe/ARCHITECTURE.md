@@ -134,6 +134,10 @@ METHODOLOGY.md                    # No-setup contributor track (markdown-only)
 CHANGELOG.md                      # Version history
 RELEASE.md                        # Release-cutting playbook
 
+docs/
+  kling-api-notes.md              # Kling API gotchas (lip-sync video_id vs
+                                  # task id, voice_id required, trial units)
+
 scripts/
   doctor.py                       # Preflight: ffmpeg, tesseract, deps, network
   download.py                     # Stage 1: yt-dlp
