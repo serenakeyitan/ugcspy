@@ -1,4 +1,5 @@
 import { loadConfig } from "../lib/config.ts";
+import { ElevenLabsTtsProvider } from "../render/elevenlabs-tts.ts";
 import { KlingProvider } from "../render/kling.ts";
 import { OpenAITtsProvider } from "../render/openai-tts.ts";
 import { RenderError } from "../render/types.ts";
@@ -16,6 +17,7 @@ import { RenderError } from "../render/types.ts";
  *                                   "refer_images"?: str[], "tag_id"?: str }
  *                                   → { ok, element_id, external_id, cost_usd }
  *   { "kind": "tts",                "text": str,   "voice"?: str, "speed"?: float }
+ *   { "kind": "tts_elevenlabs",     "text": str,   "voice_id": str }
  *   { "kind": "lipsync",            "video_id": str, "audio_path": str }
  *   { "kind": "lipsync_text2video", "video_id": str, "text": str (≤120 chars),
  *                                   "voice_id"?: str, "voice_language"?: "en"|"zh",
@@ -48,6 +50,8 @@ export async function runRender(): Promise<void> {
   // Read keys from env first, then config. Env wins so CI/agents can
   // override without touching files on disk.
   const openaiKey = process.env.OPENAI_API_KEY ?? "";
+  // ElevenLabs TTS (optional — only needed when --tts elevenlabs)
+  const elevenlabsKey = process.env.ELEVENLABS_API_KEY ?? "";
   // Kling uses TWO keys: access_key + secret_key, both required for HMAC
   // signing each request. KLING_API_KEY (the old single-key env var) is
   // accepted as a fallback alias for KLING_ACCESS_KEY only — secret is
@@ -119,6 +123,22 @@ export async function runRender(): Promise<void> {
         text: String(req.text ?? ""),
         voice_id: req.voice as string | undefined,
         speed: req.speed as number | undefined,
+      });
+      emitOk({
+        mp3_path: result.mp3_path,
+        duration_sec: result.duration_sec,
+        cost_usd: result.cost_usd,
+      });
+      return;
+    }
+    if (req.kind === "tts_elevenlabs") {
+      // ElevenLabs TTS — same MP3-output shape as OpenAI TTS so the
+      // downstream Kling audio2video lipsync path doesn't care which
+      // provider produced the audio.
+      const provider = new ElevenLabsTtsProvider(elevenlabsKey);
+      const result = await provider.generateVoiceover({
+        text: String(req.text ?? ""),
+        voice_id: req.voice_id ? String(req.voice_id) : undefined,
       });
       emitOk({
         mp3_path: result.mp3_path,

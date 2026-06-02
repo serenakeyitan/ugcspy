@@ -221,7 +221,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--tts",
         type=str,
-        choices=["auto", "kling", "openai"],
+        choices=["auto", "kling", "openai", "elevenlabs"],
         default="auto",
         help=(
             "Choose the TTS provider for the WHOLE reproduction. Mixing providers per-cut "
@@ -230,7 +230,19 @@ def parse_args() -> argparse.Namespace:
             "'auto' (default): use Kling TTS when every cut transcript fits in 120 chars "
             "(bundled with lipsync, simpler integration); else use OpenAI TTS (no char limit). "
             "'kling': force Kling TTS, refuse upfront if any cut exceeds 120 chars. "
-            "'openai': force OpenAI TTS (current behavior, no character constraint)."
+            "'openai': force OpenAI TTS (no character constraint). "
+            "'elevenlabs': force ElevenLabs TTS — use this when you want a custom voice "
+            "(stock catalog or voice clone). Requires --elevenlabs-voice-id and ELEVENLABS_API_KEY."
+        ),
+    )
+    p.add_argument(
+        "--elevenlabs-voice-id",
+        type=str,
+        default=None,
+        help=(
+            "ElevenLabs voice ID to use when --tts is elevenlabs. Required for that mode — "
+            "ElevenLabs has no implicit default since voice catalog is per-account. Get the ID "
+            "from your account at https://elevenlabs.io/app/voice-lab, or paste a cloned voice's ID."
         ),
     )
     p.add_argument(
@@ -871,17 +883,24 @@ def pick_tts_provider(
     requested: str,
     lipsync_on: bool,
 ) -> tuple[str, str]:
-    """Return (provider, reason). provider ∈ {"openai", "kling"}.
-    Refuses with code 1 if --tts kling is forced but not actually usable.
+    """Return (provider, reason). provider ∈ {"openai", "kling", "elevenlabs"}.
+    Refuses with code 1 if --tts kling or elevenlabs is forced but not actually usable.
 
     Coupling note: Kling TTS only exists inside Kling's lip-sync endpoint
     (mode: text2video). There's no standalone Kling-TTS API. So Kling TTS
     is only available when lipsync_on. When lipsync is off (non-talking-
-    head format, or --lipsync flag absent), OpenAI is the only option.
+    head format, or --lipsync flag absent), OpenAI/ElevenLabs are the
+    available options.
+
+    ElevenLabs is a third option (added in #56). Same shape as OpenAI:
+    standalone TTS, produces an MP3, passed to Kling audio2video lipsync.
+    Always available regardless of lipsync_on (just generates audio).
+    Forced via --tts elevenlabs; never auto-picked because it requires
+    a per-account voice_id that the picker can't guess.
 
     Args:
       cuts: recipe cuts to compute max transcript length over.
-      requested: user's --tts flag value, ∈ {"auto", "kling", "openai"}.
+      requested: user's --tts flag value, ∈ {"auto", "kling", "openai", "elevenlabs"}.
       lipsync_on: whether lipsync will actually run (combines --lipsync
         flag with the decode-derived format gate). When False, Kling TTS
         isn't available regardless of what the user asked for.
@@ -899,6 +918,16 @@ def pick_tts_provider(
 
     if requested == "openai":
         return "openai", "user forced --tts openai (no char limit, separate API call)"
+
+    if requested == "elevenlabs":
+        if not transcripts:
+            fail(
+                "--tts elevenlabs was forced, but the recipe has no per-cut transcripts to speak. "
+                "Either add transcripts to recipe.json's cut entries, or omit --tts (no TTS "
+                "needed for this recipe).",
+                code=1,
+            )
+        return "elevenlabs", "user forced --tts elevenlabs (custom voice via voice_id; ElevenLabs Standard pricing)"
 
     if requested == "kling":
         if not lipsync_on:
@@ -1041,6 +1070,10 @@ def args_signature(args: argparse.Namespace) -> str:
         f"|kling_voice_id={getattr(args, 'kling_voice_id', None) or ''}"
         f"|kling_voice_lang={getattr(args, 'kling_voice_language', 'en')}"
         f"|kling_voice_speed={getattr(args, 'kling_voice_speed', 1.0):.2f}"
+        # ElevenLabs voice ID (#56). Switching voices mid-run would mix
+        # timbres across cached cuts (Frankenstein-cadence) so it must
+        # invalidate the cache. Empty when --tts is not elevenlabs.
+        f"|elevenlabs_voice_id={getattr(args, 'elevenlabs_voice_id', None) or ''}"
         # character_ref switches every cut between text2video and image2video,
         # so it MUST invalidate the cache — resuming a text2video run with a
         # character ref (or vice versa) would mix two render modes.
@@ -1644,13 +1677,18 @@ def compose(args: argparse.Namespace) -> None:
     cost_estimate += kling_total
     cost_breakdown.append(f"text2video {len(cuts)} cuts: ${kling_total:.2f}")
     # TTS cost — depends on provider:
-    #   openai: charged by character count (~$15 per 1M chars)
-    #   kling:  bundled into the lipsync call, no separate TTS cost
+    #   openai:     charged by character count ($15 per 1M chars)
+    #   kling:      bundled into the lipsync call, no separate TTS cost
+    #   elevenlabs: $0.30 per 1000 chars (Standard tier; #56)
     tts_chars = sum(len(c.get("transcript") or "") for c in cuts_with_audio) or len(full_transcript)
     if tts_provider == "openai" and tts_chars:
         tts_total = (tts_chars / 1_000_000) * 15
         cost_estimate += tts_total
         cost_breakdown.append(f"openai TTS {tts_chars} chars: ${tts_total:.4f}")
+    elif tts_provider == "elevenlabs" and tts_chars:
+        tts_total = (tts_chars / 1000) * 0.30
+        cost_estimate += tts_total
+        cost_breakdown.append(f"elevenlabs TTS {tts_chars} chars: ${tts_total:.4f}")
     # L3 lipsync — only on cuts that have audio, only when lipsync_on. Same
     # per-second cost regardless of which mode (audio2video vs text2video).
     # Billed against the same rounded duration as text2video — the lipsync
@@ -1836,17 +1874,34 @@ def compose(args: argparse.Namespace) -> None:
             )
 
         # L2: per-cut TTS, aligned to this cut's spoken window.
-        # Only renders OpenAI TTS when tts_provider == "openai". When
-        # tts_provider == "kling", TTS happens inside the lipsync call
-        # (L3 below) — no separate audio file is rendered.
+        # OpenAI and ElevenLabs both produce an MP3 file consumed by the
+        # Kling audio2video lipsync step (L3) below. When tts_provider ==
+        # "kling", TTS happens inside the lipsync call itself — no
+        # separate audio file is rendered here.
         audio_path: Path | None = None
-        if cut_transcript and tts_provider == "openai":
+        if cut_transcript and tts_provider in ("openai", "elevenlabs"):
             audio_path = out_dir / f"cut-{i:02d}.mp3"
             if stage_done(state, cut_idx, "tts") and audio_path.exists() and audio_path.stat().st_size > 0:
-                print(f"[compose]   cut {i}: TTS cached (skipping OpenAI call)")
+                print(f"[compose]   cut {i}: TTS cached (skipping {tts_provider} call)")
             else:
-                print(f"[compose]   rendering per-cut OpenAI TTS ({len(cut_transcript)} chars)...")
-                tts_result = call_render(args.ugcspy_bin, {"kind": "tts", "text": cut_transcript}, render_env)
+                if tts_provider == "openai":
+                    tts_payload = {"kind": "tts", "text": cut_transcript}
+                    label = "OpenAI"
+                else:  # elevenlabs
+                    voice_id = getattr(args, "elevenlabs_voice_id", None)
+                    if not voice_id:
+                        fail(
+                            "--tts elevenlabs requires --elevenlabs-voice-id (no implicit default).",
+                            code=1,
+                        )
+                    tts_payload = {
+                        "kind": "tts_elevenlabs",
+                        "text": cut_transcript,
+                        "voice_id": voice_id,
+                    }
+                    label = "ElevenLabs"
+                print(f"[compose]   rendering per-cut {label} TTS ({len(cut_transcript)} chars)...")
+                tts_result = call_render(args.ugcspy_bin, tts_payload, render_env)
                 tts_src = Path(tts_result["mp3_path"])
                 shutil.copy(tts_src, audio_path)
                 cost_this = float(tts_result["cost_usd"])
@@ -1868,11 +1923,13 @@ def compose(args: argparse.Namespace) -> None:
         # Lipsync runs when:
         #   - lipsync_on (combines --lipsync + decode format gate), AND
         #   - cut_video_id is set (text2video succeeded), AND
-        #   - (tts_provider == "openai" and audio_path exists)  → audio2video mode
+        #   - (tts_provider ∈ {"openai", "elevenlabs"} and audio_path exists)  → audio2video mode
         #     OR (tts_provider == "kling" and cut_transcript exists)  → text2video mode
+        # external_tts_lipsync_mode covers both OpenAI and ElevenLabs since
+        # both produce an MP3 file that Kling's audio2video lipsync warps.
         kling_tts_mode = tts_provider == "kling" and bool(cut_transcript)
-        openai_lipsync_mode = tts_provider == "openai" and audio_path is not None
-        if lipsync_on and cut_video_id and (kling_tts_mode or openai_lipsync_mode):
+        external_tts_lipsync_mode = tts_provider in ("openai", "elevenlabs") and audio_path is not None
+        if lipsync_on and cut_video_id and (kling_tts_mode or external_tts_lipsync_mode):
             if stage_done(state, cut_idx, "lipsync") and dst.exists() and dst.stat().st_size > 0:
                 # Lipsync was previously successful — dst already holds the
                 # warped video. Skip the API call.
