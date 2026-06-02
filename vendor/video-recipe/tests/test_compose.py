@@ -1646,3 +1646,43 @@ def test_failed_lipsync_resume_re_attempts_only_lipsync(tmp_path):
 # applies a watermark, and there is no --disclosure option. The reproduction
 # is always unlabeled (the user labels at publish time if they choose to).
 # See the compose() concat step, which writes reproduction.mp4 directly.
+
+
+# ─── Issue #58: audio cut-off + face stability ──────────────────────────────
+
+
+def test_default_negative_prompt_includes_face_stability_terms():
+    """Issue #58 P1 — face jitter was a symptom of Kling free-interpreting
+    image2video face geometry. The default negative_prompt now front-loads
+    face-stability terms before general artifact terms."""
+    np = compose.DEFAULT_KLING_NEGATIVE_PROMPT
+    for term in (
+        "deformed face",
+        "warped face",
+        "facial morphing",
+        "jittery",
+        "shaky",
+        "unstable",
+    ):
+        assert term in np, f"missing face-stability term: {term}"
+    # The pre-existing general-artifact baseline MUST be preserved
+    for term in ("blurry", "low quality", "watermark", "text"):
+        assert term in np, f"regressed general-artifact term: {term}"
+
+
+def test_default_negative_prompt_face_terms_come_first():
+    """Face-stability words should come BEFORE general-artifact words because
+    Kling's negative-prompt tokenization seems to favor earlier terms."""
+    np = compose.DEFAULT_KLING_NEGATIVE_PROMPT
+    face_idx = np.find("deformed face")
+    general_idx = np.find("blurry")
+    assert face_idx < general_idx, (
+        f"face stability terms should come before general artifacts; "
+        f"deformed face at {face_idx}, blurry at {general_idx}"
+    )
+
+
+def test_ffprobe_stream_durations_exists_and_is_callable():
+    """The helper that powers the audio-cut-off fix is exported."""
+    assert hasattr(compose, "ffprobe_stream_durations")
+    assert callable(compose.ffprobe_stream_durations)
