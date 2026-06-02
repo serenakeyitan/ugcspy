@@ -430,6 +430,11 @@ KLING_MAX_DURATION_SEC: int = max(KLING_SUPPORTED_DURATIONS)
 # --kling-negative-prompt (pass '' to disable). Kept in sync conceptually with
 # what a reviewer would hand-tune; not model-version-specific.
 DEFAULT_KLING_NEGATIVE_PROMPT = (
+    # Issue #58: face-stability words added to fight talking-head jitter on
+    # image2video output. Order matters slightly — Kling's negative prompt
+    # tokenization seems to favor earlier terms. Face-stability up front.
+    "deformed face, warped face, facial morphing, jittery, shaky, unstable, "
+    # General artifacts (pre-#58 baseline)
     "blurry, low quality, distorted, deformed, warped hands, extra fingers, "
     "extra limbs, text, watermark, logo, subtitles, jpeg artifacts, oversaturated"
 )
@@ -2139,14 +2144,55 @@ def compose(args: argparse.Namespace) -> None:
             mix_clip_with_silence(clip, normalized, clip_dur, burnin=burnin_filter)
         final_clip_paths.append(normalized)
 
-    concat_list = out_dir / "concat.txt"
-    concat_list.write_text("\n".join(f"file '{p.name}'" for p in final_clip_paths) + "\n")
     final = args.recipe_dir / "reproduction.mp4"
-    # Concat the normalized clips straight into the final reproduction.
-    # Stream-copy is safe here: every input has identical codec params.
+    # Issue #58 fix: add a 5ms acrossfade at each cut boundary to eliminate
+    # AAC zero-crossing "clicks" at the seams. Even with normalize_with_audio()
+    # now stretching audio to match video length, AAC encode/decode can leave
+    # microsecond-scale discontinuities that a tiny crossfade hides perfectly.
+    # 5ms is too short to be heard as a "fade" but plenty for the artifact.
+    #
     # No AI-disclosure watermark is ever applied — the output is unlabeled
     # by design (the user labels at publish time if they choose to).
-    run_ffmpeg(["-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(final)])
+    n = len(final_clip_paths)
+    if n == 1:
+        # Single cut, no concat needed
+        shutil.copy(final_clip_paths[0], final)
+    else:
+        # Multi-cut: use concat filter with acrossfade. We can't use the
+        # concat demuxer (it doesn't support acrossfade); concat filter
+        # works but requires per-input -i.
+        cmd: list[str] = ["-y"]
+        for p in final_clip_paths:
+            cmd.extend(["-i", str(p)])
+        # Build the filter graph:
+        #   video: [0:v][1:v][2:v][3:v] concat=n=4:v=1:a=0 [vout]
+        #   audio: [0:a][1:a] acrossfade=d=0.005 [a01]
+        #          [a01][2:a] acrossfade=d=0.005 [a012]
+        #          [a012][3:a] acrossfade=d=0.005 [aout]
+        # Video uses straight concat (no fade — would be visible). Audio chains
+        # acrossfade because that's the only way to glue per-pair.
+        ACROSSFADE_DUR = 0.005  # 5ms
+        video_inputs = "".join(f"[{i}:v]" for i in range(n))
+        video_chain = f"{video_inputs}concat=n={n}:v=1:a=0[vout]"
+        audio_chain_parts: list[str] = []
+        prev = "[0:a]"
+        for i in range(1, n):
+            out_label = "[aout]" if i == n - 1 else f"[a{i:02d}]"
+            audio_chain_parts.append(
+                f"{prev}[{i}:a]acrossfade=d={ACROSSFADE_DUR}{out_label}"
+            )
+            prev = out_label
+        audio_chain = ";".join(audio_chain_parts)
+        filter_graph = f"{video_chain};{audio_chain}"
+        cmd.extend([
+            "-filter_complex", filter_graph,
+            "-map", "[vout]",
+            "-map", "[aout]",
+            *_CANONICAL_VIDEO_ARGS,
+            *_CANONICAL_AUDIO_ARGS,
+            str(final),
+        ])
+        run_ffmpeg(cmd)
 
     print(f"\n[compose] ✓ reproduction.mp4 written to {final}")
     print(f"[compose] total cost: ${total_cost:.2f} of ${args.budget:.2f} budget")
@@ -2208,7 +2254,7 @@ _CANONICAL_AUDIO_ARGS: list[str] = [
 
 
 def ffprobe_duration(path: Path) -> float:
-    """Return the duration of a video/audio file in seconds via ffprobe."""
+    """Return the format-level duration of a video/audio file in seconds via ffprobe."""
     proc = subprocess.run(
         [
             "ffprobe",
@@ -2230,6 +2276,54 @@ def ffprobe_duration(path: Path) -> float:
         return float(proc.stdout.strip())
     except ValueError:
         fail(f"ffprobe returned non-numeric duration for {path}: {proc.stdout[:100]}", code=3)
+
+
+def ffprobe_stream_durations(path: Path) -> tuple[float, float | None]:
+    """Return (video_duration, audio_duration) for a media file. audio_duration is
+    None when the file has no audio stream.
+
+    Critical for issue #58: Kling's lipsync mp4 returns audio shorter than video
+    by ~67ms (AAC encoder priming + post-roll). normalize_with_audio() used to
+    rely on format-level duration which always tracks the longer stream (video).
+    The 67ms tail of video then had NO audio, accumulating to ~268ms across 4
+    cuts and producing audible "audio cut-off" at every cut boundary."""
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,duration",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        fail(f"ffprobe failed on {path}: {proc.stderr[:200]}", code=3)
+    video_dur: float | None = None
+    audio_dur: float | None = None
+    for line in proc.stdout.strip().splitlines():
+        parts = line.split(",")
+        if len(parts) < 2:
+            continue
+        codec_type = parts[0].strip()
+        try:
+            dur = float(parts[1].strip())
+        except (ValueError, IndexError):
+            continue
+        if codec_type == "video" and video_dur is None:
+            video_dur = dur
+        elif codec_type == "audio" and audio_dur is None:
+            audio_dur = dur
+    if video_dur is None:
+        # Fall back to format-level duration when ffprobe didn't expose a video
+        # stream duration (e.g. lossless containers with stream=N/A).
+        video_dur = ffprobe_duration(path)
+    return video_dur, audio_dur
 
 
 def is_lipsync_clip(clip: Path, cut_index: int, out_dir: Path) -> bool:
@@ -2272,14 +2366,44 @@ def normalize_with_audio(src: Path, dst: Path, clip_dur: float, burnin: str | No
     params. Used for lipsync-warped clips so they concat cleanly with
     TTS-mixed clips from other cuts.
 
+    Issue #58 fix: Kling lipsync mp4 returns audio shorter than video by
+    ~67ms (AAC encoder priming). We now ffprobe both streams. When audio
+    is shorter, we atempo-stretch it to match video — preserves video
+    length (no concat drift), eliminates the audio tail gap (no
+    "click off" at cut boundaries), and a sub-1.5% tempo shift is
+    inaudible. When audio is longer or matches, we just use it as-is.
+
     When `burnin` is provided, applies a drawtext filter overlay before
     re-encoding. burnin is a complete drawtext filter spec from
     build_drawtext_filter()."""
+    video_dur, audio_dur = ffprobe_stream_durations(src)
     cmd = ["-y", "-i", str(src)]
-    if burnin:
-        # Use -vf so the drawtext filter applies to the video stream only;
-        # audio passes through unchanged.
-        cmd.extend(["-vf", burnin])
+    # Build optional filter chain: drawtext (video) + atempo (audio)
+    # We assemble as -filter_complex when BOTH are needed, otherwise as
+    # -vf / -af for the simple case.
+    video_filter = burnin  # may be None
+    audio_filter: str | None = None
+    if audio_dur is not None and audio_dur > 0 and audio_dur < video_dur - 0.005:
+        # Audio is shorter than video by more than 5ms — stretch it via atempo.
+        # atempo factor = audio_dur / video_dur (factor < 1 = slow down = longer audio).
+        # Sub-1% stretches are inaudible; we typically see ~1.4% on Kling lipsync.
+        tempo_factor = audio_dur / video_dur
+        # Clamp to atempo's supported range [0.5, 2.0]. We're nowhere near
+        # those limits but defend in depth.
+        tempo_factor = max(0.5, min(2.0, tempo_factor))
+        audio_filter = f"atempo={tempo_factor:.6f}"
+    if video_filter and audio_filter:
+        # Both filters → use filter_complex
+        cmd.extend([
+            "-filter_complex",
+            f"[0:v]{video_filter}[v];[0:a]{audio_filter}[a]",
+            "-map", "[v]",
+            "-map", "[a]",
+        ])
+    elif video_filter:
+        cmd.extend(["-vf", video_filter])
+    elif audio_filter:
+        cmd.extend(["-af", audio_filter])
     cmd.extend(
         [
             *_CANONICAL_VIDEO_ARGS,
@@ -2290,6 +2414,7 @@ def normalize_with_audio(src: Path, dst: Path, clip_dur: float, burnin: str | No
         ]
     )
     run_ffmpeg(cmd)
+    return  # explicit early-return; remaining lines were the old impl
 
 
 def mix_clip_with_padded_audio(
