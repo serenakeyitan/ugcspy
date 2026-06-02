@@ -750,6 +750,7 @@ def _minimal_args():
         kling_voice_id=None,
         kling_voice_language="en",
         kling_voice_speed=1.0,
+        elevenlabs_voice_id=None,
         character_ref=None,
         backgrounds="off",
         backgrounds_tiles=4,
@@ -1152,6 +1153,52 @@ def test_args_signature_changes_with_kling_voice_speed(_minimal_args):
     # Idempotency: identical speed → identical sig
     _minimal_args.kling_voice_speed = 1.0
     assert compose.args_signature(_minimal_args) == sig_1
+
+
+def test_args_signature_changes_with_elevenlabs_voice_id(_minimal_args):
+    """Issue #56 — switching ElevenLabs voice IDs between runs must invalidate
+    the cache. Reusing a cached cut rendered with voice A while the new run
+    expects voice B would produce mixed-voice output (same Frankenstein
+    failure mode the smart-picker exists to prevent)."""
+    sig_none = compose.args_signature(_minimal_args)
+    _minimal_args.elevenlabs_voice_id = "S9NKLs1GeSTKzXd9D0Lf"
+    sig_v1 = compose.args_signature(_minimal_args)
+    _minimal_args.elevenlabs_voice_id = "AnotherVoiceIdABC123"
+    sig_v2 = compose.args_signature(_minimal_args)
+    assert sig_none != sig_v1
+    assert sig_v1 != sig_v2
+    # Idempotency: same voice → same sig
+    _minimal_args.elevenlabs_voice_id = "S9NKLs1GeSTKzXd9D0Lf"
+    assert compose.args_signature(_minimal_args) == sig_v1
+
+
+def test_pick_tts_provider_elevenlabs_forced(_minimal_args):
+    """--tts elevenlabs is always accepted as long as there's a transcript.
+    Unlike --tts kling, it doesn't require --lipsync (TTS works standalone)."""
+    cuts = [{"index": 0, "transcript": "hello world"}]
+    provider, reason = compose.pick_tts_provider(cuts, requested="elevenlabs", lipsync_on=False)
+    assert provider == "elevenlabs"
+    assert "elevenlabs" in reason
+
+
+def test_pick_tts_provider_elevenlabs_refuses_empty_transcripts(_minimal_args, capsys):
+    """--tts elevenlabs needs at least one cut with non-empty transcript."""
+    cuts = [{"index": 0, "transcript": ""}, {"index": 1, "transcript": "   "}]
+    with pytest.raises(SystemExit) as exc:
+        compose.pick_tts_provider(cuts, requested="elevenlabs", lipsync_on=True)
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "no per-cut transcripts" in err
+
+
+def test_pick_tts_provider_auto_does_not_pick_elevenlabs(_minimal_args):
+    """auto mode never picks elevenlabs (no voice_id to guess). User must
+    opt in explicitly."""
+    cuts = [{"index": 0, "transcript": "short transcript under 120 chars"}]
+    provider, _ = compose.pick_tts_provider(cuts, requested="auto", lipsync_on=True)
+    assert provider != "elevenlabs"
+    provider, _ = compose.pick_tts_provider(cuts, requested="auto", lipsync_on=False)
+    assert provider != "elevenlabs"
 
 
 def test_args_signature_stable_for_unrelated_args(_minimal_args):
