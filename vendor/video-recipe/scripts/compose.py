@@ -276,6 +276,22 @@ def parse_args() -> argparse.Namespace:
             "values useful for tight-cut videos where TTS audio must fit within the cut duration."
         ),
     )
+    p.add_argument(
+        "--cut-edge-pad",
+        type=float,
+        default=DEFAULT_CUT_EDGE_PAD,
+        help=(
+            "Silent buffer (seconds) inserted at the START and END of every cut's audio so "
+            "speech never touches a cut boundary. Default "
+            f"{DEFAULT_CUT_EDGE_PAD:.2f}s. This is the infra-level fix for boundary collisions "
+            "(issue #62): without it, Kling lipsync renders speech edge-to-edge and the last "
+            "word of one cut overlaps the first word of the next — and Kling's head-trim eats "
+            "the first phoneme of the incoming cut. Padding is codec-independent and applied "
+            "regardless of how the TTS provider handles transcript punctuation. The speech is "
+            "time-compressed into [pad, clip_dur - pad] and the edges are silence. Set to 0 to "
+            "disable (restores edge-to-edge behavior)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -438,6 +454,21 @@ DEFAULT_KLING_NEGATIVE_PROMPT = (
     "blurry, low quality, distorted, deformed, warped hands, extra fingers, "
     "extra limbs, text, watermark, logo, subtitles, jpeg artifacts, oversaturated"
 )
+
+# Issue #62: silent buffer (seconds) inserted at the start AND end of every cut's
+# audio so speech never reaches a cut boundary. Kling lipsync renders TTS
+# edge-to-edge in [0, clip_dur] and ALSO trims ~30-50ms off the head of every
+# warped clip — so without an edge buffer the last word of cut N collides with
+# the first word of cut N+1, and the head-trim eats the first phoneme of the
+# incoming cut. We tried padding the transcript with "... " but Kling's TTS
+# strips leading/trailing ellipsis (confirmed via silencedetect: only cuts whose
+# transcript naturally ended in a pause got edge silence). The robust fix is at
+# the audio layer, downstream of the TTS provider: compress the speech into
+# [pad, clip_dur - pad] and fill the edges with real silence. Codec- and
+# provider-independent. 0.12s is ~2 video frames at 30fps + headroom for the
+# head-trim; small enough not to feel like dead air, large enough to decouple
+# adjacent cuts. Tunable via --cut-edge-pad (0 restores edge-to-edge).
+DEFAULT_CUT_EDGE_PAD = 0.12
 
 # Per-second USD by model + mode. MUST stay in sync with KLING_COST_PER_SEC in
 # src/render/kling.ts — the TS adapter computes the authoritative cost; this
@@ -1071,6 +1102,11 @@ def args_signature(args: argparse.Namespace) -> str:
         # presentation choice (drawtext overlay), not a billed render stage —
         # toggling captions must never invalidate the paid text2video/lipsync
         # cache and force a re-pay. (Was `no_burnin=...` here pre-2026-06.)
+        # NB: --cut-edge-pad (issue #62) is also intentionally NOT in the
+        # signature, for the same reason: it's a concat-time audio transform
+        # (adelay/atrim on already-rendered clips), not a billed render stage.
+        # Tuning the edge buffer re-runs only the cheap local ffmpeg normalize,
+        # never the paid Kling text2video/lipsync calls.
         f"|tts={getattr(args, 'tts', 'auto')}"
         f"|kling_voice_id={getattr(args, 'kling_voice_id', None) or ''}"
         f"|kling_voice_lang={getattr(args, 'kling_voice_language', 'en')}"
@@ -2131,13 +2167,18 @@ def compose(args: argparse.Namespace) -> None:
         # tracks fixing properly).
         clip_has_audio = is_lipsync_clip(clip, i, out_dir)
         if clip_has_audio:
-            # Lipsync clip — has audio, just normalize codec + optional burn-in
-            normalize_with_audio(clip, normalized, clip_dur, burnin=burnin_filter)
+            # Lipsync clip — has audio, just normalize codec + optional burn-in.
+            # Issue #62: edge-pad so speech doesn't touch the cut boundary.
+            normalize_with_audio(
+                clip, normalized, clip_dur, burnin=burnin_filter, edge_pad=args.cut_edge_pad
+            )
         elif audio:
             # Non-lipsync (or lipsync-failed) cut with TTS audio.
             # Pad TTS with silence to clip duration so we don't lose
             # paid-for Kling frames via -shortest truncation.
-            mix_clip_with_padded_audio(clip, audio, normalized, clip_dur, burnin=burnin_filter)
+            mix_clip_with_padded_audio(
+                clip, audio, normalized, clip_dur, burnin=burnin_filter, edge_pad=args.cut_edge_pad
+            )
         else:
             # No audio for this cut (no transcript) — pad with silence
             # so concat doesn't choke on missing audio track
@@ -2361,9 +2402,27 @@ def is_lipsync_clip(clip: Path, cut_index: int, out_dir: Path) -> bool:
     return bool(proc.stdout.strip())
 
 
-def _audio_realign_chain(target_dur: float, source_audio_dur: float | None) -> str:
+def _resolve_edge_pad(target_dur: float, edge_pad: float) -> float:
+    """Clamp the requested edge pad so the inner speech window stays sane.
+
+    The speech is squeezed into [edge_pad, target_dur - edge_pad], i.e. an
+    inner window of (target_dur - 2*edge_pad). If the caller asks for a pad so
+    large the inner window would collapse, we cap the pad at 40% of target_dur
+    per side (leaving a 20% speech window) rather than producing a degenerate
+    or negative-length atrim. Negative requests are treated as 0."""
+    if edge_pad <= 0:
+        return 0.0
+    return min(edge_pad, target_dur * 0.4)
+
+
+def _audio_realign_chain(
+    target_dur: float,
+    source_audio_dur: float | None,
+    edge_pad: float = 0.0,
+) -> str:
     """Build the ffmpeg audio filter chain that realigns a clip's audio to
-    exactly fill [0, target_dur] without gaps or leading silence.
+    exactly fill [0, target_dur], with speech confined to
+    [edge_pad, target_dur - edge_pad] and the edges padded with real silence.
 
     Issue #58 deep root cause:
       Kling's lipsync mp4 has THREE timing problems stacked:
@@ -2375,39 +2434,65 @@ def _audio_realign_chain(target_dur: float, source_audio_dur: float | None) -> s
             cover the full intended duration
       An atempo-only fix (PR #59 first attempt) only addressed (1) and
       improved diff from 43ms → 28ms. To get to 6ms we need to:
-        - atempo stretch audio to MATCH video length (fixes #1)
+        - atempo stretch audio to MATCH the inner window length (fixes #1)
+        - adelay to push speech off the leading edge (issue #62 buffer)
         - apad+atrim to PIN the exact end time (defensive overshoot)
         - asetpts=PTS-STARTPTS to reset internal timeline to 0 (fixes #2's
           internal effects; AAC priming will reappear in mp4 muxing but
           downstream concat filter normalizes it again)
+
+    Issue #62 edge padding:
+      When edge_pad > 0, the speech is time-compressed into the inner window
+      [edge_pad, target_dur - edge_pad] instead of [0, target_dur], and both
+      edges become silence. This decouples adjacent cuts at the concat
+      boundary: the trailing speech of cut N and the leading speech of cut N+1
+      can no longer collide, and Kling's head-trim (which eats ~30-50ms off the
+      start of each warped clip) now bites into silence instead of the first
+      phoneme. The padding is applied at the audio layer — downstream of the
+      TTS provider — so it works regardless of whether the provider honors
+      transcript-level punctuation/ellipsis padding (Kling's TTS does not).
 
     When source has no audio at all, returns a synthesis chain that
     generates `target_dur` of silence (used by mix_clip_with_silence).
 
     Returns an ffmpeg filter string (no labels — caller wraps with
     [in]...[out] as needed)."""
+    pad = _resolve_edge_pad(target_dur, edge_pad)
     if source_audio_dur is None or source_audio_dur <= 0:
         # No source audio — synthesize silence. anullsrc generates silence
-        # at the requested sample rate; atrim pins the duration.
+        # at the requested sample rate; atrim pins the duration. Edge padding
+        # is a no-op here (the whole clip is already silence).
         return (
             f"anullsrc=channel_layout=stereo:sample_rate=44100,"
             f"atrim=duration={target_dur:.3f}"
         )
-    # Compute tempo factor. <1 = slow down = lengthen audio. We then apad+atrim
-    # as defensive belt+suspenders: atempo's output length isn't precisely
-    # predictable due to rounding; apad fills any residual gap with silence
-    # and atrim pins the exact end. asetpts resets the timeline.
-    tempo_factor = source_audio_dur / target_dur
+    # Speech window. With no pad this is the full clip (legacy behavior); with
+    # pad it's the shrunken inner span.
+    inner_dur = target_dur - 2 * pad
+    # Compute tempo factor against the INNER window so the (possibly stretched)
+    # speech lands inside [pad, target_dur - pad]. <1 = slow down = lengthen.
+    tempo_factor = source_audio_dur / inner_dur
     tempo_factor = max(0.5, min(2.0, tempo_factor))
-    return (
-        f"atempo={tempo_factor:.6f},"
-        f"apad,"
-        f"atrim=0:{target_dur:.6f},"
-        f"asetpts=PTS-STARTPTS"
-    )
+    chain = f"atempo={tempo_factor:.6f}"
+    if pad > 0:
+        # adelay shifts the (already inner-length) speech to start at `pad`.
+        # It takes milliseconds; `all=1` applies the same delay to every
+        # channel so stereo stays aligned.
+        delay_ms = int(round(pad * 1000))
+        chain += f",adelay={delay_ms}:all=1"
+    # apad fills any residual gap with silence (covers the trailing edge and
+    # atempo rounding); atrim pins the exact end; asetpts resets the timeline.
+    chain += f",apad,atrim=0:{target_dur:.6f},asetpts=PTS-STARTPTS"
+    return chain
 
 
-def normalize_with_audio(src: Path, dst: Path, clip_dur: float, burnin: str | None = None) -> None:
+def normalize_with_audio(
+    src: Path,
+    dst: Path,
+    clip_dur: float,
+    burnin: str | None = None,
+    edge_pad: float = 0.0,
+) -> None:
     """Re-encode `src` (which already has audio) to canonical codec params.
     Used for lipsync-warped clips so they concat cleanly with TTS-mixed
     clips from other cuts.
@@ -2427,7 +2512,9 @@ def normalize_with_audio(src: Path, dst: Path, clip_dur: float, burnin: str | No
     # realign chain is non-trivial. setpts on video resets its timeline too
     # (defends against Kling's video PTS occasionally being negative).
     video_filter = f"setpts=PTS-STARTPTS{(',' + burnin) if burnin else ''}"
-    audio_filter = _audio_realign_chain(target_dur=clip_dur, source_audio_dur=audio_dur)
+    audio_filter = _audio_realign_chain(
+        target_dur=clip_dur, source_audio_dur=audio_dur, edge_pad=edge_pad
+    )
     cmd.extend([
         "-filter_complex",
         f"[0:v]{video_filter}[v];[0:a]{audio_filter}[a]",
@@ -2452,6 +2539,7 @@ def mix_clip_with_padded_audio(
     dst: Path,
     clip_dur: float,
     burnin: str | None = None,
+    edge_pad: float = 0.0,
 ) -> None:
     """Mix `audio` over `clip`. Pad audio with silence to clip_dur when
     audio is shorter (preserves all paid-for Kling video frames). Cut
@@ -2461,11 +2549,23 @@ def mix_clip_with_padded_audio(
     Issue #58: also resets video + audio PTS to 0 so downstream concat
     doesn't inherit any negative-PTS offsets from Kling's text2video mp4.
     Same realignment guarantee as normalize_with_audio() — both paths
-    produce identical timing semantics so the final concat is uniform."""
-    # Audio: pad with silence + trim + reset PTS (apad/atrim is symmetric so
-    # we don't need to know whether audio is shorter or longer than clip_dur)
+    produce identical timing semantics so the final concat is uniform.
+
+    Issue #62: when edge_pad > 0, the mixed speech is pushed off the leading
+    edge by `pad` seconds (adelay) and the trailing edge stays silence via the
+    apad/atrim to clip_dur. This is the same boundary-decoupling applied to the
+    lipsync path in _audio_realign_chain, kept consistent here so lipsync-failed
+    fallback cuts don't reintroduce edge-to-edge collisions. Unlike the lipsync
+    path we do NOT time-compress (external TTS is usually already shorter than
+    the clip, so there's headroom for the leading delay); if the delayed audio
+    would overflow clip_dur the atrim pins it back."""
+    pad = _resolve_edge_pad(clip_dur, edge_pad)
+    delay = f"adelay={int(round(pad * 1000))}:all=1," if pad > 0 else ""
+    # Audio: optional leading delay, then pad with silence + trim + reset PTS
+    # (apad/atrim is symmetric so we don't need to know whether audio is
+    # shorter or longer than clip_dur)
     audio_chain = (
-        f"[1:a]apad=whole_dur={clip_dur:.6f},"
+        f"[1:a]{delay}apad=whole_dur={clip_dur:.6f},"
         f"atrim=duration={clip_dur:.6f},"
         f"asetpts=PTS-STARTPTS[a]"
     )

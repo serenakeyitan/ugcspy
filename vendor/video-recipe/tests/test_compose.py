@@ -17,6 +17,7 @@ No Kling, no OpenAI, no real Whisper, no real money spent.
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 from pathlib import Path
 
@@ -1686,3 +1687,66 @@ def test_ffprobe_stream_durations_exists_and_is_callable():
     """The helper that powers the audio-cut-off fix is exported."""
     assert hasattr(compose, "ffprobe_stream_durations")
     assert callable(compose.ffprobe_stream_durations)
+
+
+# ─── Issue #62: cut-edge audio padding ──────────────────────────────────────
+
+
+def test_default_cut_edge_pad_is_positive():
+    """The infra fix ships ON by default — a non-zero edge buffer so speech
+    never touches a cut boundary out of the box."""
+    assert compose.DEFAULT_CUT_EDGE_PAD > 0
+    # Sanity: a couple of video frames at 30fps + headroom, not a huge gap.
+    assert compose.DEFAULT_CUT_EDGE_PAD <= 0.3
+
+
+def test_realign_chain_edge_pad_zero_is_legacy_behavior():
+    """pad=0 must reproduce the exact pre-#62 chain so disabling the feature
+    is a true no-op (no adelay, tempo computed against the full clip)."""
+    chain = compose._audio_realign_chain(5.0, 4.9, edge_pad=0.0)
+    assert "adelay" not in chain
+    # tempo computed against full 5.0s window: 4.9/5.0 = 0.98
+    assert "atempo=0.980000" in chain
+    assert chain.endswith("asetpts=PTS-STARTPTS")
+
+
+def test_realign_chain_edge_pad_inserts_leading_delay():
+    """pad>0 must push speech off the leading edge with adelay (in ms, all
+    channels) and compress speech into the inner window."""
+    chain = compose._audio_realign_chain(5.0, 4.9, edge_pad=0.12)
+    # 120ms leading delay, applied to every channel
+    assert "adelay=120:all=1" in chain
+    # tempo now computed against the INNER window (5.0 - 2*0.12 = 4.76):
+    # 4.9/4.76 = 1.0294...
+    assert "atempo=1.029412" in chain
+    # still pinned to the full clip duration at the end
+    assert "atrim=0:5.000000" in chain
+
+
+def test_realign_chain_edge_pad_noop_when_no_source_audio():
+    """A fully-silent clip (no source audio) ignores edge_pad — the whole clip
+    is already silence, so there's nothing to push off the edges."""
+    chain = compose._audio_realign_chain(5.0, None, edge_pad=0.12)
+    assert "anullsrc" in chain
+    assert "adelay" not in chain
+
+
+def test_resolve_edge_pad_clamps_to_40_percent_per_side():
+    """An absurd pad larger than the clip must be capped so the inner speech
+    window never collapses (cap = 40% of clip per side → 20% speech window)."""
+    # 4s requested on a 5s clip → capped at 2.0 (40% of 5)
+    assert compose._resolve_edge_pad(5.0, 4.0) == pytest.approx(2.0)
+    # a reasonable pad passes through untouched
+    assert compose._resolve_edge_pad(5.0, 0.12) == pytest.approx(0.12)
+
+
+def test_resolve_edge_pad_treats_negative_as_zero():
+    """Negative pads are clamped to 0 (disabled), never negative adelay."""
+    assert compose._resolve_edge_pad(5.0, -1.0) == 0.0
+
+
+def test_realign_chain_default_pad_param_is_zero():
+    """edge_pad defaults to 0 at the function boundary so existing callers
+    that don't pass it keep legacy behavior; opt-in happens at the CLI layer."""
+    sig = inspect.signature(compose._audio_realign_chain)
+    assert sig.parameters["edge_pad"].default == 0.0
