@@ -239,30 +239,68 @@ def _user_video_cap() -> int:
 
 
 async def run_user(handle: str, days: int) -> None:
+    """Pull ONE creator's full catalog (their own posts), browser-free.
+
+    Primary path is the yt-dlp flat-playlist walk — the SAME complete-catalog
+    walk the hashtag mode's coverage pass uses. It hits www.tiktok.com directly
+    (no Chromium, no key) and reaches the creator's oldest posts, so this is a
+    true catalog view, not the old ~50-post TikTokApi teaser (which was capped,
+    needed a live browser session, and crashed 'No valid sessions found' from a
+    datacenter host). NO brand filter here — user mode returns ALL the creator's
+    videos within the day window. The TS layer ranks by views.
+
+    TikTokApi is kept only as a fallback for when yt-dlp returns nothing (e.g.
+    a handle it can't resolve), and only if a browser session is available."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     videos: list[dict] = []
-    api = None
-    try:
-        api = await _create_api()
-        user = api.user(handle)
-        async for video in user.videos(count=_user_video_cap()):
-            d = video.as_dict
-            raw = _video_to_raw(d, fallback_handle=handle)
-            if raw is None:
-                continue
+    seen: set[str] = set()
+
+    # Primary: yt-dlp full-catalog walk (browser-free, complete).
+    catalog = await asyncio.to_thread(_ytdlp_creator_catalog, handle)
+    for raw in catalog:
+        ext = raw.get("external_id")
+        if not ext or ext in seen:
+            continue
+        try:
             posted_at = datetime.fromisoformat(raw["posted_at"])
-            if posted_at < cutoff:
-                continue
-            raw.pop("_author", None)
-            videos.append(raw)
-    except Exception as e:
-        fail(f"TikTokApi error (user): {e}", code=2)
-    finally:
-        if api is not None:
-            try:
-                await api.__aexit__(None, None, None)
-            except Exception:
-                pass
+        except (ValueError, KeyError, TypeError):
+            continue
+        if posted_at < cutoff:
+            continue
+        seen.add(ext)
+        raw.pop("_author", None)
+        videos.append(raw)
+
+    # Fallback: legacy TikTokApi path, only if yt-dlp yielded nothing AND a
+    # browser session is available. Browser-free is the default, so this is
+    # skipped unless UGCSPY_USE_CHROMIUM=1 makes a session creatable.
+    if not videos and os.environ.get("UGCSPY_USE_CHROMIUM", "").strip() == "1":
+        api = None
+        try:
+            api = await _create_api()
+            user = api.user(handle)
+            async for video in user.videos(count=_user_video_cap()):
+                d = video.as_dict
+                raw = _video_to_raw(d, fallback_handle=handle)
+                if raw is None:
+                    continue
+                posted_at = datetime.fromisoformat(raw["posted_at"])
+                if posted_at < cutoff:
+                    continue
+                raw.pop("_author", None)
+                if raw["external_id"] in seen:
+                    continue
+                seen.add(raw["external_id"])
+                videos.append(raw)
+        except Exception as e:
+            # yt-dlp already failed too — surface so the caller sees the empty.
+            print(f"[tiktok_fetch] user-mode fallback failed: {e}", file=sys.stderr)
+        finally:
+            if api is not None:
+                try:
+                    await api.__aexit__(None, None, None)
+                except Exception:
+                    pass
 
     print(json.dumps(videos))
 

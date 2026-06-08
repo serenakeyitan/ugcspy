@@ -31,7 +31,14 @@ export function migrate(db: Database): void {
       format_tag TEXT,
       author_handle TEXT,
       raw_metrics_json TEXT NOT NULL DEFAULT '{}',
-      UNIQUE(platform, external_id)
+      -- Scope uniqueness to the competitor. A video can legitimately appear in
+      -- more than one view — e.g. the same clip shows up under a brand hashtag
+      -- search (#befreed) AND under the creator's own catalog (@jacob.befreed).
+      -- A global UNIQUE(platform, external_id) made the second writer UPDATE the
+      -- first's row instead of inserting, so whichever view ran second looked
+      -- truncated (a creator's full pull returned only the videos no prior brand
+      -- search had already claimed). Per-competitor keying fixes that.
+      UNIQUE(competitor_id, platform, external_id)
     );
 
     CREATE INDEX IF NOT EXISTS idx_videos_competitor ON videos(competitor_id);
@@ -67,5 +74,61 @@ export function migrate(db: Database): void {
     } catch {
       // already added
     }
+  }
+
+  // 3. Migrate the videos unique constraint from the old global
+  // UNIQUE(platform, external_id) to per-competitor UNIQUE(competitor_id,
+  // platform, external_id). The old key let one competitor's upsert silently
+  // overwrite another's row for the same video, so a creator's full catalog
+  // pull returned only the videos no prior brand search had already claimed.
+  // SQLite can't ALTER a constraint, so rebuild the table when the old shape is
+  // detected. Detection: the old index/constraint shows up in the table's SQL.
+  const ddl = db
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='videos'`)
+    .get() as { sql?: string } | undefined;
+  const needsRebuild =
+    !!ddl?.sql &&
+    /UNIQUE\s*\(\s*platform\s*,\s*external_id\s*\)/i.test(ddl.sql) &&
+    !/competitor_id\s*,\s*platform\s*,\s*external_id/i.test(ddl.sql);
+  if (needsRebuild) {
+    db.exec("PRAGMA foreign_keys=OFF;");
+    const tx = db.transaction(() => {
+      db.exec(`
+        CREATE TABLE videos_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          competitor_id INTEGER NOT NULL REFERENCES competitors(id) ON DELETE CASCADE,
+          platform TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          posted_at TEXT NOT NULL,
+          fetched_at TEXT NOT NULL DEFAULT (datetime('now')),
+          caption TEXT NOT NULL DEFAULT '',
+          thumbnail_url TEXT NOT NULL DEFAULT '',
+          video_url TEXT NOT NULL DEFAULT '',
+          view_count INTEGER NOT NULL DEFAULT 0,
+          like_count INTEGER NOT NULL DEFAULT 0,
+          comment_count INTEGER NOT NULL DEFAULT 0,
+          share_count INTEGER NOT NULL DEFAULT 0,
+          hook_source TEXT NOT NULL DEFAULT 'none',
+          hook_text TEXT NOT NULL DEFAULT '',
+          hook_confidence REAL NOT NULL DEFAULT 0,
+          format_tag TEXT,
+          author_handle TEXT,
+          raw_metrics_json TEXT NOT NULL DEFAULT '{}',
+          UNIQUE(competitor_id, platform, external_id)
+        );
+        INSERT OR IGNORE INTO videos_new
+          SELECT id, competitor_id, platform, external_id, posted_at, fetched_at,
+                 caption, thumbnail_url, video_url, view_count, like_count,
+                 comment_count, share_count, hook_source, hook_text, hook_confidence,
+                 format_tag, author_handle, raw_metrics_json
+          FROM videos;
+        DROP TABLE videos;
+        ALTER TABLE videos_new RENAME TO videos;
+        CREATE INDEX IF NOT EXISTS idx_videos_competitor ON videos(competitor_id);
+        CREATE INDEX IF NOT EXISTS idx_videos_posted_at ON videos(posted_at);
+      `);
+    });
+    tx();
+    db.exec("PRAGMA foreign_keys=ON;");
   }
 }

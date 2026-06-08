@@ -112,7 +112,7 @@ function upsertVideos(
       view_count, like_count, comment_count, share_count,
       hook_source, hook_text, hook_confidence, format_tag, raw_metrics_json
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(platform, external_id) DO UPDATE SET
+    ON CONFLICT(competitor_id, platform, external_id) DO UPDATE SET
       view_count = excluded.view_count,
       like_count = excluded.like_count,
       comment_count = excluded.comment_count,
