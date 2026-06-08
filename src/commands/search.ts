@@ -8,7 +8,14 @@ import type { DataProvider } from "../providers/index.ts";
 import type { Platform, RawVideo, VideoRecord } from "../types.ts";
 
 export type SearchSort = "views" | "recency";
-export type SearchMode = "user" | "hashtag";
+// Search modes (issue: competitor-UGC coverage gap):
+//   user     — one account's catalog (the competitor's own posts). No brand-tag filter.
+//   hashtag  — third-party UGC that EXPLICITLY tags a brand. Brand-tag filter ON.
+//   keyword  — niche/topic discovery: any UGC matching a keyword, brand-tag NOT required.
+//              This is the capability the brand-hashtag model structurally cannot reach
+//              (the exact-tag caption filter dropped it; TikTokApi v7 has no video search).
+//              Served by the tikwm keyword provider; bypasses isHashtagMatch entirely.
+export type SearchMode = "user" | "hashtag" | "keyword";
 
 export interface SearchOptions {
   limit: number;
@@ -43,30 +50,49 @@ function captionHook(caption: string): { text: string; source: string } {
 //   3. Brand-app variant: #befreedapp (very common pattern)
 //   4. Brand handle mention: @befreed
 //
-// Audited against BEFREED's full hashtag feed of 49 videos: this filter
-// keeps 100% of explicit BeFreed UGC (28 videos) and rejects 21 unrelated
-// "be freed" / "freed" posts. False negatives are minimal — videos that
-// reference the brand without any tag (e.g. "ok but befreed has so many
-// books") slip through, which is acceptable: we'd rather miss a few
-// borderline cases than pollute the SMM's view with unrelated content.
+// Audited against BeFreed: keeps explicit-tag UGC AND plain-text brand mentions,
+// while rejecting unrelated "be free"/"#freedom"/"#befree" posts. The accepted
+// signals (any one):
+//   1. Exact hashtag boundary: #befreed (not #befreedish)
+//   2. Campaign code: #befreed_0117
+//   3. Brand-app variant: #befreedapp
+//   4. Handle mention: @befreed (not @befreedom)
+//   5. Plain-text brand token: the literal brand name as a standalone word
+//      (e.g. "reading with befreed is so clutch")
+//
+// Signal #5 is the fix for the dropped-top-performers bug: the highest-reach
+// genuine BeFreed UGC (776K views, "Learning with befreed...") writes the brand
+// as plain text, no # or @. Requiring a tag dropped exactly the videos a
+// "rank by performance" product most needs. Verified on BeFreed's full 1,223-
+// video raw feed: signal #5 recovers 16 genuine brand videos and re-admits
+// ZERO junk — "#freedom", "#befree" (a Russian clothing brand), "be free",
+// horse-breeding, etc. don't contain the literal token "befreed", so the word-
+// boundary match excludes them. (The token IS the brand name, so this is
+// brand-specific precision, not a generic loosening.)
 export function isHashtagMatch(caption: string, tag: string): boolean {
   if (!caption) return false;
   const lower = caption.toLowerCase();
   const cleanTag = tag.replace(/^[#@]/, "").toLowerCase();
   const escaped = escapeRegex(cleanTag);
 
-  // 1. Exact hashtag (with boundary so #befreedish doesn't match #befreed)
-  // 2. Campaign code: #befreed_0117
-  // 3. Brand-app variant: #befreedapp (covers Notion -> #notionapp, etc)
+  // 1-3. Hashtag forms: exact, campaign code, brand-app variant.
   const hashtagPattern = new RegExp(
     `#${escaped}(?![a-z0-9_])|#${escaped}_\\d+|#${escaped}app(?![a-z0-9_])`,
     "i",
   );
   if (hashtagPattern.test(lower)) return true;
 
-  // Brand handle mention (@befreed, but not @befreedom)
+  // 4. Brand handle mention (@befreed, but not @befreedom).
   const mentionPattern = new RegExp(`@${escaped}(?![a-z0-9_])`, "i");
   if (mentionPattern.test(lower)) return true;
+
+  // 5. Plain-text brand token — the brand name as a standalone word, no # or @.
+  // Word boundaries on both sides so "befreedom" / "unbefreed" don't match and
+  // "#befreed"/"@befreed" (already caught above) don't double-count. Safe
+  // because the token equals the brand name; generic words like "free" are NOT
+  // the tag, so junk ("#freedom", "be free") still fails.
+  const plainPattern = new RegExp(`(?<![a-z0-9_])${escaped}(?![a-z0-9_])`, "i");
+  if (plainPattern.test(lower)) return true;
 
   return false;
 }
@@ -96,6 +122,14 @@ export function parseQuery(raw: string, override?: SearchMode): ParsedQuery {
   if (override === "hashtag") {
     const tag = trimmed.replace(/^[@#]/, "");
     return { mode: "hashtag", key: `#${tag}`, value: tag };
+  }
+  if (override === "keyword") {
+    // Keyword/niche discovery: the query is a free-text topic phrase, not a
+    // handle or tag. Keep the raw phrase (spaces and all) as the provider
+    // value. The competitors-table key is prefixed `kw:` so a keyword search
+    // doesn't collide with a same-named #hashtag or @handle row.
+    const phrase = trimmed.replace(/^#/, "");
+    return { mode: "keyword", key: `kw:${phrase}`, value: phrase };
   }
   if (trimmed.startsWith("@")) {
     const handle = trimmed.slice(1);
@@ -188,6 +222,15 @@ async function fetchByMode(
 ): Promise<RawVideo[]> {
   if (query.mode === "user") {
     return provider.fetchRecentVideos(query.value, platform, days);
+  }
+  if (query.mode === "keyword") {
+    if (!provider.fetchKeywordVideos) {
+      throw new Error(
+        `Provider '${provider.name}' does not support keyword/niche search. ` +
+          `Keyword discovery needs the 'tiktok-oss' provider (free, via the tikwm relay).`,
+      );
+    }
+    return provider.fetchKeywordVideos(query.value, platform, days);
   }
   if (!provider.fetchHashtagVideos) {
     throw new Error(

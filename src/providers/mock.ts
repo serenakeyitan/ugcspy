@@ -17,6 +17,25 @@ export class MockProvider implements DataProvider {
     }));
   }
 
+  async fetchKeywordVideos(
+    keyword: string,
+    platform: Platform,
+    days: number,
+  ): Promise<RawVideo[]> {
+    // Niche/keyword discovery: third-party UGC matching a topic, with captions
+    // that deliberately do NOT carry any brand hashtag (that's the corpus the
+    // brand-hashtag filter used to drop). Deterministic per (keyword, platform).
+    const baseline = await this.fetchRecentVideos(`kw:${keyword}`, platform, days);
+    const creators = ["nichecreator1", "topicqueen", "viralskincare", "routinegirl", "dermtalks"];
+    return baseline.map((v, i) => ({
+      ...v,
+      // Topic caption with NO brand tag/mention — pure niche content.
+      caption: `${keyword} tips that actually work ✨ #fyp #${keyword.replace(/\s+/g, "")}`,
+      author_handle: creators[i % creators.length],
+      video_url: `https://www.tiktok.com/@${creators[i % creators.length]}/video/${v.external_id}`,
+    }));
+  }
+
   async fetchRecentVideos(handle: string, platform: Platform, days: number): Promise<RawVideo[]> {
     const seed = hashString(`${handle}:${platform}`);
     const count = Math.min(30, 8 + (seed % 23));

@@ -46,3 +46,7 @@ CLAUDE.md
 
 # Local debug artifacts from manual decode analysis
 .gstack/
+
+# Python bytecode cache (scripts/ + test/ run under system python)
+__pycache__/
+*.pyc

@@ -61,7 +61,7 @@ If you only want to try the CLI shape without setting up the scraper, pick `mock
 
 ## The core flow
 
-Two search modes, auto-detected from the query prefix:
+Three search modes — two auto-detected from the query prefix, one explicit:
 
 ```bash
 # Plain word → hashtag mode = third-party creators promoting the brand
@@ -70,11 +70,17 @@ ugcspy search befreed --platform tiktok
 ugcspy search liquiddeath
 ugcspy search notion
 
-# @handle → user mode = the brand's OWN account posts
+# @handle → user mode = the brand's OWN account posts (full catalog)
 ugcspy search @glossier --platform tiktok
 
 # #tag → explicit hashtag mode
 ugcspy search "#booktok"
+
+# --mode keyword → NICHE/TOPIC discovery: the broad corpus a script writer
+# browses, NOT limited to videos tagging a brand. Finds untagged competitor /
+# niche UGC by topic phrase. Works with ZERO setup (pure HTTP, no Chromium venv).
+ugcspy search --mode keyword "skincare routine"
+ugcspy search --mode keyword "cozy desk setup" --sort views
 
 # Newest first instead of highest-reach
 ugcspy search befreed --sort recency

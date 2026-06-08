@@ -17,15 +17,28 @@ The original spec assumed an Anthropic API key for hook extraction + brief gener
 - **Ranking is by views (reach), not engagement rate.** Engagement-rate ranking inflated tiny videos above genuinely viral ones. Now matches BigSpy's actual behavior. See commit f0284a5.
 - **Four-pass coverage strategy + repeat-querying + bounded parallelism for hashtag search.** Single-hashtag returns ~140-200 per call. The shipped CLI runs (0) user-search seeding, (1) hashtag fetch, (2) campaign-code discovery, (3) seed-creator walk; each hashtag is also repeat-queried up to 3 times until a round adds fewer than 5 new videos. Within each pass, fetches run concurrently with concurrency=12 by default (verified empirically — 4 parallel = 2.97x speedup over sequential, 12 parallel = 1.6x speedup over 8, all zero errors on fresh IPs). Configurable via `UGCSPY_CONCURRENCY` env var; users with `MS_TOKEN` cookies can safely push to 16-24. Wall time ~62-68s for an active brand; corpus 410-444 videos; max view ceiling 335K. See commits 2093f7e, 64e492a, 8a7cd90, 85c0cc2, ccfa543, e62c560.
 - **Watch + daemon (alerts) shipped but moved to "Optional" in the docs** — not part of the demo flow. Search + fork is the core. See commit f0284a5.
+- **Browser-free discovery rebuilt: wide-collect → signal-rank → snowball → yt-dlp coverage.** The Chromium discovery passes (0-2) crash ("No valid sessions found") and hang to timeout, silently shrinking the roster. Replaced with a pure-HTTP tikwm pipeline (Chromium now OFF by default; `UGCSPY_USE_CHROMIUM=1` re-enables it as an extra source on a residential IP). Three lessons baked in:
+  1. **Discovery must be WIDE, precision belongs downstream.** The old code filtered creators at discovery by whether their *one surfaced* video's title carried the brand — dropping creators whose search-result clip didn't name the brand even though their catalog is full of brand UGC. This shrank a ~1400-candidate brand search down to ~38. Fix: discovery collects every surfaced creator; the per-video brand filter runs only in the yt-dlp coverage pass (which walks each creator's full catalog). Measured on BeFreed: **38 → 1403 candidate creators.**
+  2. **Rank candidates by signal, then walk by rank.** Wide discovery surfaces a long noise tail from broad keywords. Each candidate gets a score (+1 per surfacing, +2 if the surfaced title carries the brand, +3 for hashtag-sourced, +2× for each known brand creator who follows them). The coverage pass walks highest-signal first, so under the seed cap the genuine brand creators get crawled and noise falls below the cut.
+  3. **Following-graph snowball is the biggest long-tail source.** Brand-UGC creators mutually-follow as a tight collective, so walking who the high-signal seeds *follow* (tikwm `/api/user/info` → `/api/user/following`, depth-1) surfaces creators search never ranks high enough to return (e.g. `@bobby/@eilisa/@lance/@paige.befreed`). Knobs: `UGCSPY_SNOWBALL_PAGES` (default 1, 0 disables). Walk concurrency raised 4→8 (`UGCSPY_WALK_CONCURRENCY`) now that the roster is ~200 not ~38. Estimated combined ceiling ~600-900 creators for a mid-size brand; beyond that needs residential proxies (deferred). Sound-id discovery and wider keyword expansion were evaluated and skipped (near-zero marginal value / noise).
 
 ## Known limits of the free path (documented honestly)
 
-- `User.following` is not exposed by TikTokApi v7 — TikTok gates following lists behind auth. If `@befreedapp` follows their UGC creators, we can't directly enumerate them. Workaround: pass-0 user-search surfaces handles containing the brand name, which catches most dedicated UGC creators.
+- `User.following` is not exposed by TikTokApi v7 — TikTok gates following lists behind auth. **Worked around** via the tikwm relay (`/api/user/following`, browser-free), which powers the following-graph snowball discovery source above — so we now CAN enumerate the brand-creator follow-collective without auth. (TikTokApi pass-0 user-search remains as a Chromium-only fallback.)
 - Single-hashtag responses cap at ~140-200 per call. TikTok rotates the feed slightly between calls, so repeat-querying works (~+39% unique videos after 5 rounds), with diminishing returns by round 3-4. The CLI now repeat-queries up to 3 rounds per hashtag with a saturation cutoff.
 - `User.liked` returns 0 for most accounts — TikTok hides likes by default.
-- `Search.videos` is not exposed (only `Search.users` works in v7).
+- `Search.videos` is not exposed by TikTokApi (only `Search.users` works in v7), so the
+  TikTokApi-based modes structurally cannot do keyword/niche discovery. **Resolved** by
+  adding a `keyword` mode that goes through the free **tikwm** relay (`/api/feed/search`)
+  over plain HTTP — no TikTokApi, no Chromium, no key. This is the only path that finds
+  untagged niche/competitor UGC (videos that don't hashtag a brand). tikwm is an
+  unofficial third-party relay (no SLA, ToS gray area) so the keyword path fails soft to
+  an empty list and is independent of the TikTokApi user/hashtag modes — one source dying
+  doesn't break the others. The official TikTok Research / Creative Center API is the
+  durable-but-gated upgrade path.
 
-For these, the upgrade is paid ScrapeCreators (handles auth-required endpoints).
+For the auth-gated gaps above, the upgrade is paid ScrapeCreators (handles auth-required
+endpoints).
 
 ## Problem Statement
 

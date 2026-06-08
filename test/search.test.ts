@@ -41,6 +41,28 @@ describe("parseQuery", () => {
     const q = parseQuery("  @befreed  ");
     expect(q.value).toBe("befreed");
   });
+
+  // ─── keyword / niche discovery mode (competitor-UGC coverage fix) ───
+
+  test("override to keyword mode keeps the full phrase, kw: key", () => {
+    const q = parseQuery("skincare routine", "keyword");
+    expect(q.mode).toBe("keyword");
+    expect(q.key).toBe("kw:skincare routine");
+    expect(q.value).toBe("skincare routine"); // spaces preserved — it's a search phrase
+  });
+
+  test("keyword mode strips a leading # but keeps the rest verbatim", () => {
+    const q = parseQuery("#skincare tips", "keyword");
+    expect(q.mode).toBe("keyword");
+    expect(q.value).toBe("skincare tips");
+  });
+
+  test("plain multi-word still defaults to hashtag (keyword is opt-in)", () => {
+    // Behavior preserved: keyword discovery must be explicitly requested via
+    // --mode keyword so existing brand-hashtag scripts don't silently change.
+    const q = parseQuery("skincare routine");
+    expect(q.mode).toBe("hashtag");
+  });
 });
 
 describe("isHashtagMatch (precision filter for hashtag results)", () => {
@@ -54,13 +76,23 @@ describe("isHashtagMatch (precision filter for hashtag results)", () => {
     "Dark Psychology Tricks #BeFreed taught me as a personal coach", // case-insensitive
     "If you want to be disgustingly educated? DO THIS🫣 #befreed_0117 #growth", // campaign code
     "like are you kidding??? #learning #booktok #befreed_0067", // campaign code
+    // Regression (signal #5): plain-text brand mention, no # or @. These were
+    // the DROPPED top performers — 776K & 360K views — the bug this fix closes.
+    "Learning with befreed bc not everyone has time to read 300 pages", // 776K, was dropped
+    "Use these to level up bro, reading with befreed is so clutch", // 360K, was dropped
+    "The BeFreed app has taken over my whole life 🤷🏻‍♀️📚 #booktok", // plain-text, case-insensitive
+    "Bruh befreed is so addictive #reading #learning", // plain-text token
   ];
 
   const FALSE_POSITIVES = [
     "speaking my truth #lookamess #chopped", // unrelated, no befreed tag
     "🎵: Time to be free - Kodak Black (I'm happy…). #lyrics #song", // "be free" phrase, no tag
     "", // missing caption — unverifiable
-    "Our sister will be freed", // "be freed" phrase, no hashtag
+    "Our sister will be freed", // "be freed" phrase — no "befreed" token
+    "я надеюсь это гениально #befree #одежда #мода", // #befree (Russian clothing brand) ≠ befreed
+    "#FREEDOM || I GOT AWAYYYYY #relatable #inspiration", // #freedom ≠ befreed
+    "Horse Breeding Life – Power, Passion, and the Beauty", // pure noise the raw feed matched
+    "Just #befreedish learning vibes", // boundary: befreedish ≠ befreed
   ];
 
   test.each(TRUE_POSITIVES)("keeps real UGC: %s", (caption) => {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MockProvider } from "../src/providers/mock.ts";
+import { isHashtagMatch } from "../src/commands/search.ts";
 
 describe("MockProvider hashtag mode", () => {
   test("returns videos with author_handle set", async () => {
@@ -56,5 +57,35 @@ describe("MockProvider", () => {
       Math.floor(videos.length / 2)
     ]?.view_count ?? 0;
     expect(max).toBeGreaterThan(median * 2);
+  });
+});
+
+describe("MockProvider keyword/niche mode (competitor-UGC coverage fix)", () => {
+  test("returns multi-creator videos for a topic phrase", async () => {
+    const p = new MockProvider();
+    const videos = await p.fetchKeywordVideos("skincare routine", "tiktok", 30);
+    expect(videos.length).toBeGreaterThan(0);
+    const authors = new Set(videos.map((v) => v.author_handle));
+    expect(authors.size).toBeGreaterThan(1); // niche corpus, not one account
+  });
+
+  test("captions carry NO brand hashtag — the corpus the old filter dropped", () => {
+    // The whole point of keyword mode: surface UGC that does NOT tag a brand.
+    // Prove isHashtagMatch (the brand-tag filter) would REJECT these captions,
+    // which is exactly why keyword mode must bypass that filter.
+    const p = new MockProvider();
+    return p.fetchKeywordVideos("skincare routine", "tiktok", 30).then((videos) => {
+      for (const v of videos) {
+        // A hypothetical brand "glossier" is never tagged in niche captions.
+        expect(isHashtagMatch(v.caption, "glossier")).toBe(false);
+      }
+    });
+  });
+
+  test("is deterministic per (keyword, platform)", async () => {
+    const p = new MockProvider();
+    const a = await p.fetchKeywordVideos("skincare routine", "tiktok", 30);
+    const b = await p.fetchKeywordVideos("skincare routine", "tiktok", 30);
+    expect(a).toEqual(b);
   });
 });

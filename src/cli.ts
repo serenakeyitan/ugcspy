@@ -48,7 +48,7 @@ program
 program
   .command("search <query>")
   .description(
-    "Find competitor UGC. `@handle` searches one account; plain word or `#tag` searches third-party creators promoting that brand.",
+    "Find competitor UGC. `@handle` = one account's catalog; plain word or `#tag` = third-party creators tagging that brand; `--mode keyword \"<phrase>\"` = broad niche/topic discovery (no brand tag required).",
   )
   .option("-l, --limit <n>", "max rows", (v) => parseInt(v, 10), 20)
   .option("-s, --sort <mode>", "views | recency", "views")
@@ -56,14 +56,17 @@ program
   .option("-d, --days <n>", "trailing window in days", (v) => parseInt(v, 10), 30)
   .option(
     "-m, --mode <mode>",
-    "user | hashtag — override auto-detection from query prefix",
+    "user | hashtag | keyword — override auto-detection (keyword = niche/topic discovery)",
   )
   .option("--refresh", "force refetch even if cached")
   .option("--json", "emit JSON instead of a table")
   .action(async (query: string, raw) => {
     // Accept legacy "engagement" as an alias for "views" so existing scripts don't break.
     const sort = raw.sort === "engagement" ? "views" : raw.sort;
-    const mode = raw.mode === "user" || raw.mode === "hashtag" ? raw.mode : undefined;
+    const mode =
+      raw.mode === "user" || raw.mode === "hashtag" || raw.mode === "keyword"
+        ? raw.mode
+        : undefined;
     const opts: SearchOptions = {
       limit: raw.limit,
       sort,

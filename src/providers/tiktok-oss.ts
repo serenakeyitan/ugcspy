@@ -48,15 +48,45 @@ export class TikTokOssProvider implements DataProvider {
     return this.runBridge({ mode: "hashtag", tag, days });
   }
 
-  private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
-    if (!venvExists()) {
+  // Keyword / niche discovery. Served by the tikwm relay (free, no key) inside
+  // the Python bridge — this is the broad-corpus path that the brand-hashtag
+  // model structurally cannot reach. The bridge uses stdlib urllib (no
+  // TikTokApi/Chromium session needed for this mode), but still runs in the
+  // managed venv for one code path + the shared RawVideo contract.
+  async fetchKeywordVideos(
+    keyword: string,
+    platform: Platform,
+    days: number,
+  ): Promise<RawVideo[]> {
+    if (platform !== "tiktok") {
       throw new ProviderError(
-        `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30s + ~150MB Chromium download).`,
+        `Provider 'tiktok-oss' only supports tiktok keyword search.`,
+        this.name,
+      );
+    }
+    return this.runBridge({ mode: "keyword", keyword, days });
+  }
+
+  private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
+    // Keyword/niche discovery is pure HTTP (tikwm + stdlib urllib) — it needs
+    // NO TikTokApi/Chromium venv. So if the managed venv isn't set up, fall
+    // back to system python3 for keyword mode rather than forcing a ~150MB
+    // install. user/hashtag modes still require the venv (they use TikTokApi).
+    const isKeyword = payload.mode === "keyword";
+    let pythonBin: string;
+    if (venvExists()) {
+      pythonBin = venvPython();
+    } else if (isKeyword) {
+      pythonBin = "python3"; // stdlib-only path; resolved on PATH
+    } else {
+      throw new ProviderError(
+        `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30s + ~150MB Chromium download). ` +
+          `(Tip: keyword/niche search — \`--mode keyword\` — works without the venv.)`,
         this.name,
       );
     }
     const scriptPath = resolveScript();
-    const proc = Bun.spawn([venvPython(), scriptPath], {
+    const proc = Bun.spawn([pythonBin, scriptPath], {
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",
