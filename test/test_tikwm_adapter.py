@@ -198,6 +198,56 @@ def test_rescue_drops_only_on_confirmed_non_match(monkeypatch):
     assert kept == []
 
 
+# ── merge enrichment: author backfill + brand-safe caption preference ─────────
+# THE (unknown) BUG: the tikwm discovery feed sometimes yields a video with no
+# author (the item had no author.unique_id), so the row lands author=NULL and
+# renders "(unknown)" — even though the SAME video in the creator's yt-dlp walk
+# carries _author. First-writer-wins dedup kept the blank copy. _upgrade_metrics
+# now backfills identity from the authoritative walk WITHOUT clobbering a value
+# discovery already had, and WITHOUT replacing a brand-tagged caption with a
+# longer brand-LESS one (the flat-playlist walk truncates non-deterministically).
+
+def test_merge_backfills_missing_author_from_walk():
+    existing = {
+        "external_id": "V", "_author": "", "author_handle": "",
+        "view_count": 398200, "caption": "bc not everyone #befreed_0136",
+        "video_url": "https://www.tiktok.com/video/V",
+    }
+    fresh = {
+        "external_id": "V", "_author": "jacob.befreed", "view_count": 399300,
+        "caption": "bc not everyone has time to read 300 pages",
+        "video_url": "https://www.tiktok.com/@jacob.befreed/video/V",
+    }
+    videos = [existing]
+    tf._merge_into_videos([[fresh]], videos, {"V"}, prefer_metrics=True, brand_tag="befreed")
+    v = videos[0]
+    assert v["_author"] == "jacob.befreed"
+    assert v["author_handle"] == "jacob.befreed"
+    assert v["view_count"] == 399300
+    assert "/@jacob.befreed/" in v["video_url"]
+    # the brand tag must survive — NOT be clobbered by the longer non-brand walk caption
+    assert "#befreed_0136" in v["caption"]
+
+
+def test_merge_does_not_clobber_existing_author():
+    existing = {"external_id": "Z", "_author": "realauthor", "view_count": 1, "caption": "x"}
+    tf._merge_into_videos(
+        [[{"external_id": "Z", "_author": "wrong", "view_count": 2}]],
+        [existing], {"Z"}, prefer_metrics=True, brand_tag="befreed",
+    )
+    assert existing["_author"] == "realauthor"
+
+
+def test_merge_upgrades_to_fuller_caption_when_brand_kept():
+    existing = {"external_id": "W", "_author": "x", "view_count": 1, "caption": "short #befreed"}
+    tf._merge_into_videos(
+        [[{"external_id": "W", "_author": "x", "view_count": 2,
+           "caption": "a much longer caption that still has #befreed_0124 in it"}]],
+        [existing], {"W"}, prefer_metrics=True, brand_tag="befreed",
+    )
+    assert "0124" in existing["caption"]
+
+
 class _MonkeyPatch:
     """Tiny monkeypatch shim so the inline runner works without pytest."""
 

@@ -458,7 +458,7 @@ async def run_hashtag(tag: str, days: int) -> None:
         # prefer_metrics=True: the yt-dlp walk is authoritative for CURRENT
         # view/like counts. Let it overwrite the stale snapshots the discovery
         # feed (Pass 1/2) captured, instead of first-writer-wins dropping it.
-        _merge_into_videos(pass_3_results, videos, seen_ids, prefer_metrics=True)
+        _merge_into_videos(pass_3_results, videos, seen_ids, prefer_metrics=True, brand_tag=tag)
 
     print(json.dumps(videos))
 
@@ -842,7 +842,7 @@ async def _gather_with_concurrency(limit, coros):
     return await asyncio.gather(*(bounded(c) for c in coros))
 
 
-def _merge_into_videos(per_task_results, videos, seen_ids, prefer_metrics=False):
+def _merge_into_videos(per_task_results, videos, seen_ids, prefer_metrics=False, brand_tag=""):
     """Serial merge of per-task results into the shared videos list,
     deduplicating by external_id. Runs after all parallel fetches
     complete, so no race conditions.
@@ -872,7 +872,7 @@ def _merge_into_videos(per_task_results, videos, seen_ids, prefer_metrics=False)
                 continue
             if ext in seen_ids:
                 if prefer_metrics:
-                    _upgrade_metrics(index.get(ext), v)
+                    _upgrade_metrics(index.get(ext), v, brand_tag)
                 continue
             seen_ids.add(ext)
             videos.append(v)
@@ -880,24 +880,56 @@ def _merge_into_videos(per_task_results, videos, seen_ids, prefer_metrics=False)
                 index[ext] = v
 
 
-def _upgrade_metrics(existing, fresh):
-    """Overwrite an existing video dict's engagement metrics + caption with the
-    fresh (authoritative yt-dlp walk) copy. Only fields the walk reliably
-    provides are touched; identity fields (external_id, posted_at, author) and
-    anything the walk left empty are preserved. A metric is only overwritten
-    when the fresh value is a higher non-zero count, so a walk that momentarily
-    reports 0 (e.g. a transient API hiccup) never regresses a good snapshot."""
+def _upgrade_metrics(existing, fresh, brand_tag=""):
+    """Enrich an existing video dict from the fresh (authoritative yt-dlp walk)
+    copy. Metrics are bumped to the higher value; caption prefers the longer
+    (less-truncated) one; and identity fields the discovery feed left BLANK are
+    backfilled from the walk. A metric is only overwritten when the fresh value
+    is a higher non-zero count, so a walk that momentarily reports 0 (transient
+    API hiccup) never regresses a good snapshot.
+
+    Why backfill identity: the tikwm discovery feed sometimes yields a video with
+    no author (its item had no author.unique_id), so the row lands with
+    author_handle = NULL and renders as "(unknown)" — even though the SAME video
+    in the creator's yt-dlp walk carries `_author`. First-writer-wins dedup kept
+    the blank discovery copy and the walk's author never got promoted. We now
+    fill any identity field that is missing on `existing` but present on `fresh`
+    (author + a real per-creator video_url), without ever clobbering a value the
+    discovery copy already had."""
     if existing is None or not isinstance(fresh, dict):
         return
     for key in ("view_count", "like_count", "comment_count", "share_count"):
         new = fresh.get(key)
         if isinstance(new, int) and new > (existing.get(key) or 0):
             existing[key] = new
-    # The walk's caption is the full current description; prefer it when it is
-    # at least as long as what discovery captured (longer == less truncated).
+    # Prefer the walk's caption when it's longer (less truncated) — UNLESS doing
+    # so would drop a brand tag the existing caption carries. The flat-playlist
+    # walk truncates non-deterministically, so its (sometimes longer) caption can
+    # still be the one missing the brand hashtag while the discovery-feed caption
+    # has it. Replacing a brand-tagged caption with a longer brand-LESS one would
+    # silently un-qualify the video. So only swap when the candidate is longer
+    # AND not a brand-signal regression.
     fresh_cap = fresh.get("caption") or ""
-    if len(fresh_cap) >= len(existing.get("caption") or ""):
-        existing["caption"] = fresh_cap
+    cur_cap = existing.get("caption") or ""
+    if len(fresh_cap) >= len(cur_cap):
+        cur_has_brand = bool(brand_tag) and _is_real_ugc_caption(cur_cap, brand_tag)
+        fresh_has_brand = bool(brand_tag) and _is_real_ugc_caption(fresh_cap, brand_tag)
+        if not (cur_has_brand and not fresh_has_brand):
+            existing["caption"] = fresh_cap
+    # Backfill the author from the walk when discovery left it blank. `_author`
+    # is the bridge's internal field (TS maps it onto author_handle); also mirror
+    # to `author_handle` in case the existing dict already uses that key.
+    fresh_author = fresh.get("_author") or fresh.get("author_handle")
+    if fresh_author:
+        if not (existing.get("_author") or "").strip():
+            existing["_author"] = fresh_author
+        if not (existing.get("author_handle") or "").strip():
+            existing["author_handle"] = fresh_author
+    # Backfill a real per-creator video_url if discovery only had a bare one.
+    fresh_url = fresh.get("video_url") or ""
+    cur_url = existing.get("video_url") or ""
+    if fresh_url and ("/@" in fresh_url) and ("/@" not in cur_url):
+        existing["video_url"] = fresh_url
 
 
 async def _user_search_seeds(api, tag):

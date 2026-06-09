@@ -123,14 +123,31 @@ export class TikTokOssProvider implements DataProvider {
       );
     }
     // Map the Python bridge's `_author` field onto our typed `author_handle`.
+    // Fallback: when the bridge couldn't supply an author (e.g. the tikwm feed
+    // item had no author.unique_id), parse the handle out of the video_url —
+    // every TikTok URL is `https://www.tiktok.com/@<handle>/video/<id>`, so the
+    // author is ALREADY present in data we hold. This is free (no extra fetch /
+    // no /user/info lookup) and recovers the rows that previously rendered as
+    // "(unknown)". Prefer the explicit field; only derive from the URL when it's
+    // missing, so a real author is never overwritten by a URL parse.
     return (parsed as Array<RawVideo & { _author?: string }>).map((v) => {
-      const author = v._author;
       const out: RawVideo = { ...v };
       delete (out as { _author?: string })._author;
+      const author = v._author?.trim() || authorFromUrl(out.video_url);
       if (author) out.author_handle = author;
       return out;
     });
   }
+}
+
+// Extract the @handle from a TikTok video URL. Returns "" when the URL has no
+// /@handle/ segment (e.g. a bare `tiktok.com/video/<id>` the relay sometimes
+// returns). Strips a leading @ and lower-cases for consistency with the rest of
+// the pipeline (handles are case-insensitive on TikTok).
+export function authorFromUrl(url: string | undefined): string {
+  if (!url) return "";
+  const m = url.match(/tiktok\.com\/@([^/?#]+)/i);
+  return m ? m[1]!.replace(/^@/, "").toLowerCase() : "";
 }
 
 function parseErrorBody(stdout: string): string | null {
