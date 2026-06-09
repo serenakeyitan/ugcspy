@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { isHashtagMatch, parseQuery } from "../src/commands/search.ts";
+import { Database } from "bun:sqlite";
+import { isHashtagMatch, parseQuery, readCachedVideos } from "../src/commands/search.ts";
+import { migrate } from "../src/db/schema.ts";
 
 describe("parseQuery", () => {
   test("@handle → user mode", () => {
@@ -133,5 +135,73 @@ describe("isHashtagMatch (precision filter for hashtag results)", () => {
 
   test("@brandfoo is NOT a mention match (boundary applies to mentions too)", () => {
     expect(isHashtagMatch("Talking about @befreedom", "befreed")).toBe(false);
+  });
+});
+
+describe("readCachedVideos trailing-window filter", () => {
+  // The DB accumulates every video ever fetched for a competitor, so a prior
+  // `--days 365` run leaves year-old rows behind. A later `--days 30` query must
+  // NOT resurface those stale rows from cache (the bug: a 31-day-old clip
+  // appearing in a "last 30 days" view). And it must NOT collapse to one row per
+  // creator — top videos rank by views, multiple per creator allowed.
+  function seed(): { db: Database; competitorId: number } {
+    const db = new Database(":memory:");
+    migrate(db);
+    const competitorId = (
+      db
+        .prepare(`INSERT INTO competitors (handle, platform) VALUES ('#befreed','tiktok') RETURNING id`)
+        .get() as { id: number }
+    ).id;
+    const ins = db.prepare(
+      `INSERT INTO videos (competitor_id, platform, external_id, posted_at, view_count, author_handle)
+       VALUES (?, 'tiktok', ?, ?, ?, ?)`,
+    );
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString();
+    // mya: 3 videos — one 31 days old (outside 30d), two inside
+    ins.run(competitorId, "mya-31d", daysAgo(31), 2_600_000, "growthwithmya7");
+    ins.run(competitorId, "mya-10d", daysAgo(10), 500_000, "growthwithmya7");
+    ins.run(competitorId, "mya-5d", daysAgo(5), 70_000, "growthwithmya7");
+    // jacob: 2 videos, both inside 30d
+    ins.run(competitorId, "jacob-8d", daysAgo(8), 790_000, "jacob.befreed");
+    ins.run(competitorId, "jacob-3d", daysAgo(3), 215_000, "jacob.befreed");
+    return { db, competitorId };
+  }
+
+  test("30-day window excludes the 31-day-old video", () => {
+    const { db, competitorId } = seed();
+    const rows = readCachedVideos(db, competitorId, "tiktok", 30);
+    const ids = rows.map((r) => r.external_id);
+    expect(ids).not.toContain("mya-31d"); // 31d old → excluded
+    expect(ids).toContain("mya-10d");
+    expect(ids).toContain("jacob-8d");
+    expect(rows.length).toBe(4); // 5 seeded, 1 outside the window
+  });
+
+  test("no window (undefined) returns everything, including the 31-day video", () => {
+    const { db, competitorId } = seed();
+    const rows = readCachedVideos(db, competitorId, "tiktok");
+    expect(rows.length).toBe(5);
+    expect(rows.map((r) => r.external_id)).toContain("mya-31d");
+  });
+
+  test("ranking keeps MULTIPLE videos per creator (no one-per-creator collapse)", () => {
+    const { db, competitorId } = seed();
+    const rows = readCachedVideos(db, competitorId, "tiktok", 30);
+    // sort by views desc the way runSearch does
+    rows.sort((a, b) => b.view_count - a.view_count);
+    const myaRows = rows.filter((r) => r.author_handle === "growthwithmya7");
+    const jacobRows = rows.filter((r) => r.author_handle === "jacob.befreed");
+    expect(myaRows.length).toBe(2); // both in-window mya videos present
+    expect(jacobRows.length).toBe(2); // both jacob videos present
+    // top of the in-window ranking is jacob's 790k (mya's 2.6M is out of window)
+    expect(rows[0]!.external_id).toBe("jacob-8d");
+  });
+
+  test("365-day window keeps the 31-day video and it ranks #1 by views", () => {
+    const { db, competitorId } = seed();
+    const rows = readCachedVideos(db, competitorId, "tiktok", 365);
+    rows.sort((a, b) => b.view_count - a.view_count);
+    expect(rows[0]!.external_id).toBe("mya-31d"); // 2.6M tops the year view
+    expect(rows.length).toBe(5);
   });
 });

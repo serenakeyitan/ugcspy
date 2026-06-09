@@ -158,7 +158,7 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
 
   for (const platform of platforms) {
     const competitorId = upsertCompetitor(db, query.key, platform);
-    const cached = readCachedVideos(db, competitorId, platform);
+    const cached = readCachedVideos(db, competitorId, platform, opts.days);
     let videos = cached;
 
     if (opts.refresh || cached.length === 0) {
@@ -184,7 +184,7 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
         }
         const droppedCount = raw.length - filtered.length;
         upsertVideos(db, competitorId, filtered);
-        videos = readCachedVideos(db, competitorId, platform);
+        videos = readCachedVideos(db, competitorId, platform, opts.days);
         const suffix =
           droppedCount > 0
             ? ` (filtered ${droppedCount} unrelated/own-account post${droppedCount === 1 ? "" : "s"})`
@@ -303,11 +303,27 @@ function upsertVideos(
   tx(videos);
 }
 
-function readCachedVideos(
+export function readCachedVideos(
   db: ReturnType<typeof openDb>,
   competitorId: number,
   platform: Platform,
+  windowDays?: number,
 ): VideoRecord[] {
+  // Honor the trailing-window flag on CACHED reads too. The DB accumulates
+  // every video ever fetched for a competitor (a prior `--days 365` run leaves
+  // year-old rows behind), so without this filter a later `--days 30` query
+  // would still surface those stale older rows — e.g. a 31-day-old clip showing
+  // up in a "last 30 days" view. The fetch path already applies the same cutoff;
+  // this keeps the cached path consistent with it.
+  if (windowDays && windowDays > 0) {
+    const cutoff = new Date(Date.now() - windowDays * 86_400_000).toISOString();
+    return db
+      .prepare(
+        `SELECT * FROM videos WHERE competitor_id = ? AND platform = ? AND posted_at >= ?
+         ORDER BY posted_at DESC`,
+      )
+      .all(competitorId, platform, cutoff) as VideoRecord[];
+  }
   return db
     .prepare(`SELECT * FROM videos WHERE competitor_id = ? AND platform = ? ORDER BY posted_at DESC`)
     .all(competitorId, platform) as VideoRecord[];
