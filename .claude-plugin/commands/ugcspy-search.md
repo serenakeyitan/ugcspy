@@ -48,7 +48,7 @@ Don't force the question if the user clearly only wanted the list. But if they s
 
 ## Wall time
 
-Hashtag-mode first-run on an active brand takes ~60-90 seconds (four discovery passes with concurrency=12 parallelism by default, plus repeat-querying within each hashtag). Tell the user this BEFORE invoking. User-mode (`@brand`) is much faster (~10-20s, single fetch).
+Hashtag-mode first-run on an active brand takes ~60-90 seconds: browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay) followed by a yt-dlp coverage walk of each creator's catalog (16-way concurrent by default, `UGCSPY_WALK_CONCURRENCY`). Tell the user this BEFORE invoking. User-mode (`@brand`) is much faster (~10-20s, single fetch).
 
 Subsequent searches on the same brand serve from cache instantly. Use `--refresh` for a fresh fetch.
 
@@ -56,4 +56,4 @@ Subsequent searches on the same brand serve from cache instantly. Use `--refresh
 
 If the user gets `tiktok-oss: TikTokApi not installed`, suggest `ugcspy install-deps`.
 
-If the user gets a bot-detection error ("TikTok returned an empty response"), suggest setting `MS_TOKEN` from their browser cookies — see README troubleshooting.
+Hashtag mode is browser-free (HTTP via the tikwm relay), so it doesn't need `MS_TOKEN`. If discovery returns few or zero candidates on a brand you'd expect to have UGC, tikwm is likely throttling — wait a bit and retry, and/or raise `UGCSPY_HASHTAG_FEED_DELAY` to widen the gap between feed reads. `MS_TOKEN` only matters for the `user`/`keyword` modes (and the optional Chromium fallback) — see README troubleshooting.

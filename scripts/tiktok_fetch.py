@@ -339,32 +339,33 @@ async def run_user(handle: str, days: int) -> None:
 async def run_hashtag(tag: str, days: int) -> None:
     """Fetch videos tagged with #tag posted by any creator. This is the
     third-party-UGC discovery path — finds creators promoting a brand, not
-    the brand's own posts.
+    the brand's own posts. BROWSER-FREE by default.
 
-    Coverage strategy (FOUR-pass with bounded parallelism): TikTok's
-    hashtag endpoint returns ~140-200 per call and dedupes aggressively
-    per-creator. Single-hashtag is wildly incomplete; we work around it
-    via four passes:
+    Two stages (TikTok's single-hashtag feed dedupes hard per-creator, so one
+    challenge call is wildly incomplete; we separate "find creators" from "pull
+    their videos"):
 
-      Pass 0: user-search for handles matching the brand (`Search.users`).
-              Surfaces dedicated UGC creators like @laura.befreed and the
-              official account @befreedapp.
-      Pass 1: hashtag fetch — primary tag + brand-app variant (parallel).
-      Pass 2: discover campaign codes (#brand_NNNN) from pass-1 captions,
-              fetch each one (parallel).
-      Pass 3: enumerate seed creators from passes 0-2 + pull each one's
-              full recent feed (parallel). Re-apply caption filter.
+      STAGE 1 — DISCOVERY (pure HTTP via the tikwm relay, no Chromium).
+        Find creator HANDLES from two complementary sources, then union +
+        signal-rank into a ranked roster:
+          • ALL brand hashtags — the main #<brand> challenge PLUS every
+            campaign-code/compound variant (#befreed_0124, #usebefreed), each
+            feed deep-paged (_tikwm_discover_all_brand_hashtags).
+          • Follow-graph snowball — walk who the high-signal seeds FOLLOW
+            (tikwm /api/user/following, depth-1), recovering the low-view long
+            tail that never reaches a challenge feed's top pages.
 
-    Parallelization cap: 8 concurrent fetches. Verified empirically — 4
-    sequential fetches took 21s, 4 parallel took 7s (~3x speedup); 8
-    parallel took 7.2s with zero rate-limit errors. Going beyond 8 is
-    untested and risks tripping TikTok's anti-abuse rules.
+      STAGE 2 — COVERAGE (yt-dlp, 16-way concurrent — UGCSPY_WALK_CONCURRENCY).
+        Walk each ranked creator's FULL public catalog from www.tiktok.com
+        (not rate-limited; ~6-7s/creator), apply the per-video brand filter,
+        and rescue captions yt-dlp clipped at the ~72-char boundary by
+        re-fetching the full caption from tikwm before dropping the video.
 
-    Each task returns its own video list; merging happens serially after
-    asyncio.gather to avoid race conditions on shared state.
+    Discovery is browser-free; Chromium is an OPTIONAL extra source only
+    (UGCSPY_USE_CHROMIUM=1, off by default — it crashes/hangs on most hosts).
 
-    Result on BeFreed: ~440 videos, max 334K views. Wall time:
-    ~95s sequential -> ~45s parallel (estimated)."""
+    Each task returns its own list; merges happen serially after asyncio.gather
+    to avoid races on shared state."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     videos: list[dict] = []
     seen_ids: set[str] = set()
@@ -504,34 +505,23 @@ def _union_seeds(chromium_seeds: list[str], tikwm_seeds: list[str]) -> list[str]
 
 
 def _concurrency_limit():
-    """Concurrency cap for parallel hashtag/creator fetches.
+    """Concurrency cap for the LEGACY CHROMIUM hashtag-fetch passes only.
 
-    Default is 12 — empirically validated against fresh-IP probes:
+    This governs the optional Chromium/TikTokApi discovery passes (active only
+    when UGCSPY_USE_CHROMIUM=1) — see _fetch_hashtag_isolated. It does NOT govern
+    the default browser-free path: Stage-2 yt-dlp walk concurrency is
+    UGCSPY_WALK_CONCURRENCY (default 16, see _creator_walk_concurrency), and the
+    pure-HTTP hashtag sweep is paced by UGCSPY_HASHTAG_FEED_DELAY.
 
-      Probe (16 hashtags, fresh IP, May 2026):
-        c=4  -> 6.8s,  387 videos, 0 errors
-        c=8  -> 11.4s, 1186 videos, 0 errors  <-- old default
-        c=12 -> 7.0s,  1172 videos, 0 errors  <-- new default
-        c=16 -> 7.0s,  1207 videos, 0 errors
+    Default 12 — empirically validated against fresh-IP Chromium probes (16
+    hashtags, May 2026): c=4 -> 6.8s, c=8 -> 11.4s, c=12 -> 7.0s, c=16 -> 7.0s,
+    all 0 errors. Past 12 the per-request latency dominates, so 12 is the
+    conservative pick. Override via `UGCSPY_CONCURRENCY=16 ugcspy search ...`
+    (Chromium mode only).
 
-      Full pipeline E2E:
-        c=8  -> 67s, 410-440 videos
-        c=12 -> 68s, 444 videos
-        c=16 -> 62s, 444 videos
-
-    The probe gain from 8 -> 12 is real (1.6x faster, same coverage).
-    Past 12 the per-request latency dominates, so 16 is only ~10%
-    faster end-to-end. We pick 12 as conservative enough to not risk
-    rate-limiting on slower IPs while capturing the meaningful gain.
-
-    Users with MS_TOKEN set (browser-cookie-authed sessions) have a
-    higher rate-limit ceiling and may safely go to 16 or 24.
-    Override via env: `UGCSPY_CONCURRENCY=16 ugcspy search ...`
-
-    Cautionary tale (commit 2610607): pushing scraping aggressively
-    AFTER an IP is already throttled returns ZERO videos for ~10-20
-    minutes — not just "less, but slower". The 12 default has measured
-    safety margin; don't bump it without fresh-IP probe data."""
+    Cautionary tale (commit 2610607): pushing the Chromium scrape aggressively
+    AFTER an IP is already throttled returns ZERO videos for ~10-20 minutes —
+    not just "less, but slower". Don't bump it without fresh-IP probe data."""
     raw = os.environ.get("UGCSPY_CONCURRENCY", "")
     try:
         n = int(raw)
@@ -813,10 +803,11 @@ def _tikwm_discover_all_brand_hashtags(
     brand challenges that creator appeared in (a strong signal — someone in many
     brand challenges is a core brand creator; floats them up the walk order).
 
-    Replaces the noisy full-text keyword search (Method A): every creator here
-    came from a real brand HASHTAG feed, so the source is high-purity by
-    construction. The main tag is paged deepest (densest feed); variants are
-    paged shallower (each is small — most return everything in 1-2 pages).
+    History: this replaced the old full-text keyword search ("Method A"), which
+    was removed — it was ~8% precise and forced the walk to chew through ~90%
+    noise. Every creator here instead came from a real brand HASHTAG feed, so the
+    source is high-purity by construction. The main tag is paged deepest (densest
+    feed); variants are paged shallower (each is small — usually 1-2 pages).
 
     Outage-resilient: each page is fetched via _tikwm_get (retry + backoff), so
     normal feed variance no longer aborts the sweep. Only a genuine fetch failure

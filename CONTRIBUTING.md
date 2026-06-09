@@ -24,7 +24,7 @@ bun run dev -- <subcommand>
 
 ## Testing real-data paths
 
-The `tiktok-oss` provider needs Python and a Chromium binary. Either run:
+The `tiktok-oss` provider needs Python. Hashtag mode (the default discovery path) is browser-free — it runs over pure HTTP via the tikwm relay plus yt-dlp, so no Chromium is required. Chromium is only needed for the `user`/`keyword` modes and the optional Chromium fallback (`UGCSPY_USE_CHROMIUM=1`, off by default), which drive TikTokApi. Either run:
 
 ```bash
 bun run src/cli.ts install-deps
@@ -34,7 +34,7 @@ Or do it manually if you want to control where deps land:
 
 ```bash
 python3 -m pip install --user -r scripts/requirements.txt
-python3 -m playwright install chromium
+python3 -m playwright install chromium   # only for user/keyword modes + Chromium fallback; skip for hashtag mode
 ```
 
 Then point at a known DTC handle:
@@ -43,7 +43,7 @@ Then point at a known DTC handle:
 bun run src/cli.ts search @glossier --platform tiktok --limit 5
 ```
 
-This actually hits TikTok and may take 20-40 seconds on the first call (cold Chromium start + bot-detection negotiation). Subsequent calls are served from `~/.ugcspy/db.sqlite`.
+This actually hits TikTok. A handle search runs in `user` mode (TikTokApi), so the first call may take 20-40 seconds (cold Chromium start + bot-detection negotiation). Hashtag/brand searches take the browser-free path (tikwm HTTP discovery + yt-dlp coverage walk) and skip Chromium entirely. Subsequent calls are served from `~/.ugcspy/db.sqlite`.
 
 ## Project layout
 
@@ -72,8 +72,8 @@ src/
   types.ts                   # platform-wide types
 
 scripts/
-  tiktok_fetch.py            # Python bridge — 4-pass hashtag discovery
-  requirements.txt           # pip deps (TikTokApi + playwright)
+  tiktok_fetch.py            # Python bridge — browser-free hashtag discovery (tikwm) + yt-dlp coverage walk
+  requirements.txt           # pip deps (yt-dlp for hashtag mode; TikTokApi + playwright for user/keyword modes + Chromium fallback)
 
 test/                        # bun:test suites
 .claude-plugin/              # Claude Code plugin

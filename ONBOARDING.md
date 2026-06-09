@@ -35,7 +35,7 @@ mkdir -p ~/code && cd ~/code && git clone https://github.com/serenakeyitan/ugcsp
 
 `cd ~/code/ugcspy` for the rest.
 
-## Step 3 — JS deps + Python deps + Chromium
+## Step 3 — JS deps + Python deps
 
 ```bash
 bun install
@@ -44,7 +44,7 @@ bun run src/cli.ts install-deps              # core: ~30s + ~150MB
 bun run src/cli.ts install-deps --with-audio  # +Whisper: ~3-5min + ~1.5GB total
 ```
 
-The core install downloads a Chromium binary (~150MB, ~30s) used to bypass TikTok bot detection. Tell the user upfront.
+The core install pulls down the Python deps for the `user` and `keyword` modes (and an optional Chromium binary, ~150MB, used only as a fallback — see below). The default `ugcspy search <brand>` hashtag flow is browser-free and does NOT need Chromium to run. Tell the user upfront so the download size isn't a surprise.
 
 `--with-audio` ALSO installs openai-whisper + torch for spoken-narrative capture (口型 / lip-sync source for AI remix). Strongly recommended if the user plans to use `/ugcspy-decode` or `/ugcspy-remix` — the spoken audio is the primary content for most UGC formats, and without Whisper the decoder only sees on-screen overlay text. Skip if the user only wants `ugcspy search` + `/ugcspy-fork`.
 
@@ -100,16 +100,23 @@ If `--version` prints an older number, the user has a stale install on PATH. Run
 ugcspy search befreed --platform tiktok --limit 10
 ```
 
-Wall time ~60-90s (four-pass discovery). A Chromium window briefly flashes — that's normal.
+Wall time ~60-90s. Discovery runs browser-free over pure HTTP (the tikwm relay) — no Chromium window, no login. The wall time is mostly Stage 2 coverage: yt-dlp walking each ranked creator's full catalog (16-way concurrent by default).
 
-## Step 7 — Bot-detection fallback (only if step 6 returns 0 videos)
+## Step 7 — Fallbacks (only if step 6 returns 0 videos)
 
-If TikTok flagged the IP, set `MS_TOKEN` from browser cookies:
+Hashtag discovery is browser-free and does not use `MS_TOKEN`, so a 0-result run is almost always a transient relay/network blip — retry the search first; the stable tikwm client (retry + backoff) usually self-heals. If you want to widen the gap between feed reads on a flaky connection, bump `UGCSPY_HASHTAG_FEED_DELAY`.
+
+If retries still return nothing, you can enable the optional Chromium fallback (OFF by default because it crashes/hangs on most hosts):
+
+```bash
+UGCSPY_USE_CHROMIUM=1 ugcspy search befreed --platform tiktok --limit 10
+```
+
+`MS_TOKEN` only matters for the `user` and `keyword` modes (which go through TikTokApi), not for hashtag search. If you do need it for those modes, set it from browser cookies:
 
 1. Open tiktok.com in Chrome → DevTools → Application → Cookies → tiktok.com
 2. Copy the `msToken` value
 3. `echo 'export MS_TOKEN="<value>"' >> ~/.zshrc && source ~/.zshrc`
-4. Retry the search
 
 ## Step 8 — (Optional) Install video-recipe deps
 
@@ -185,8 +192,8 @@ The most common flow for "I found a great video, I want to make something like i
 
 - First search per brand takes ~60-90s; cached after.
 - Free path covers TikTok only; Instagram needs paid ScrapeCreators.
-- Coverage ceiling ~440 videos per active brand; viral posts that don't tag #brand are unreachable on the free path.
-- TikTok rate-limits aggressive scraping (10-20 min cooldown). Default concurrency=12 is empirically safe.
+- Creator coverage is ~89% of the brand's UGC roster (51/57 for BeFreed); the unreachable few are very-low-view creators whose videos never enter any challenge feed, so the hashtag + follow-graph snowball never sees them.
+- Stage 2 coverage walks each creator's full public catalog from www.tiktok.com — that path is not rate-limited, so the 16-way default (`UGCSPY_WALK_CONCURRENCY=16`) is safe. Lower it if a host is CPU-bound.
 - video-recipe step 4 (vision reading) needs Claude Code or another harness with file + vision tools.
 
 ---
@@ -197,7 +204,7 @@ The most common flow for "I found a great video, I want to make something like i
 git clone https://github.com/serenakeyitan/ugcspy.git
 cd ugcspy
 bun install
-bun run src/cli.ts install-deps     # ~30s + 150MB Chromium download
+bun run src/cli.ts install-deps     # ~30s + ~150MB (Python deps + optional Chromium fallback; hashtag search is browser-free)
 # (add --with-audio if you'll use /ugcspy-decode or /ugcspy-remix — adds Whisper for spoken-audio capture, ~3-5min + ~1.5GB)
 bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
 bun run build                        # produces dist/cli.js
