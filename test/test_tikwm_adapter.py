@@ -248,6 +248,61 @@ def test_merge_upgrades_to_fuller_caption_when_brand_kept():
     assert "0124" in existing["caption"]
 
 
+# ── pure-hashtag discovery: brand-tag name filter ────────────────────────────
+# Replaces the noisy full-text keyword search. challenge/search matches loosely,
+# so its result list mixes real brand tags with coincidental ones; _is_brand_hashtag
+# filters at the NAME level. Leans inclusive (a false keep is filtered later by the
+# per-video walk; a false reject permanently loses a creator).
+
+def test_brand_hashtag_keeps_real_brand_tags():
+    for name in [
+        "befreed", "#befreed", "befreed_0124", "#befreed_0098",
+        "usebefreed", "befreedaffirmations", "liamlucasbefreed_0001", "befreed🦋",
+    ]:
+        assert tf._is_brand_hashtag(name, "befreed") is True, name
+
+
+def test_brand_hashtag_rejects_coincidental_tags():
+    for name in [
+        "befree", "freed", "beafraid", "be_afraid", "befearless",
+        "befree_fashion", "random", "freedom",
+        "befreedom",  # brand token + 'om' = the unrelated word, denylisted
+    ]:
+        assert tf._is_brand_hashtag(name, "befreed") is False, name
+
+
+def test_brand_hashtag_campaign_code_boundary():
+    # campaign codes (digits/underscore after brand) always qualify
+    assert tf._is_brand_hashtag("befreed_0001", "befreed") is True
+    assert tf._is_brand_hashtag("befreed0130", "befreed") is True
+    # brand at end qualifies
+    assert tf._is_brand_hashtag("xyzbefreed", "befreed") is True
+
+
+def test_discover_all_brand_hashtags_dedups_and_scores(monkeypatch):
+    # Stub the two network helpers: a challenge list with the main tag + 2
+    # variants (one a dup id), and per-challenge creator sets.
+    challenges = [
+        ("befreed", "100"),
+        ("befreed_0124", "200"),
+        ("usebefreed", "300"),
+    ]
+    feeds = {
+        "100": {"alice", "bob"},
+        "200": {"alice", "carol"},  # alice in 2 challenges -> higher score
+        "300": {"dave"},
+    }
+    monkeypatch.setattr(tf, "_tikwm_all_brand_challenges", lambda brand, search_pages=3: challenges)
+    monkeypatch.setattr(tf, "_tikwm_creators_in_challenge", lambda cid, pages: feeds[cid])
+    monkeypatch.setattr(tf, "_hashtag_feed_delay", lambda: 0.0)
+    scores = tf._tikwm_discover_all_brand_hashtags("befreed")
+    assert scores["alice"] == 2  # surfaced in 2 brand challenges
+    assert scores["bob"] == 1
+    assert scores["carol"] == 1
+    assert scores["dave"] == 1
+    assert set(scores) == {"alice", "bob", "carol", "dave"}
+
+
 class _MonkeyPatch:
     """Tiny monkeypatch shim so the inline runner works without pytest."""
 

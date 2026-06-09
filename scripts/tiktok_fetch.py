@@ -338,47 +338,41 @@ async def run_hashtag(tag: str, days: int) -> None:
     videos: list[dict] = []
     seen_ids: set[str] = set()
 
-    # Browser-free discovery (pure HTTP, can't crash). TWO sources, unioned:
-    #   1. keyword search  — creators surfaced by searching brand-related phrases
-    #   2. hashtag search  — creators who tagged #<brand> (the browser-free
-    #                        replacement for the fragile Chromium hashtag passes)
-    # Together these match the Chromium roster WITHOUT the crash/timeout surface.
-    kw_scores = _tikwm_discover_scored(
-        tag,
-        [
-            tag, f"{tag} app", f"{tag} reading", f"reading with {tag}",
-            f"{tag} microlearning", f"{tag} book", f"{tag} learning", f"{tag} podcast",
-            f"{tag} psychology", f"{tag} productivity", f"{tag} self improvement",
-            f"{tag} communication", f"{tag} confidence",
-        ],
-        pages=15,
-    )
-    tikwm_tag = _tikwm_discover_by_hashtag(tag)
-    # Hashtag-sourced creators tagged #<brand> explicitly — a strong signal — so
-    # give them a baseline score that floats them up the walk order.
-    for h in tikwm_tag:
-        kw_scores[h] = kw_scores.get(h, 0) + 3
-    # Source 3: following-graph SNOWBALL. Brand-UGC creators mutually-follow as a
-    # tight collective, so walking who the high-signal seeds FOLLOW surfaces the
-    # long tail that keyword/hashtag search never ranks high enough to return.
-    # Seed it with the strongest keyword/hashtag finds (score>=2), depth-1.
-    snowball_seeds = [h for h, v in kw_scores.items() if v >= 2] or list(kw_scores.keys())
+    # Browser-free discovery (pure HTTP, can't crash). PURE-HASHTAG model — two
+    # complementary sources, no noisy full-text keyword search:
+    #   1. ALL brand hashtags — the main #<brand> tag PLUS every campaign-code
+    #      and compound variant (#befreed_0124, #usebefreed, ...), each feed
+    #      deep-paged. Every creator here came from a real brand HASHTAG, so the
+    #      source is high-purity by construction (vs the old full-text keyword
+    #      search, which was ~8% pure and forced the walk to chew through noise).
+    #   2. Following-graph SNOWBALL — recovers the LOW-VIEW long tail that never
+    #      reaches the top pages of any challenge feed (e.g. creators whose brand
+    #      videos sit at a few hundred views). They can't be hashtag-surfaced, but
+    #      they mutually-follow the core collective, so walking who the core seeds
+    #      follow finds them.
+    # hit_count from source 1 = how many distinct brand challenges a creator was
+    # in; a higher count is a stronger brand signal and floats them up the walk.
+    kw_scores = _tikwm_discover_all_brand_hashtags(tag)
+    # Bonus for multi-challenge presence so core creators lead the walk order.
+    for h in list(kw_scores.keys()):
+        kw_scores[h] = kw_scores[h] + 3  # baseline: surfaced by a real brand tag
+    # Source 2: SNOWBALL from the strongest hashtag finds (depth-1).
+    snowball_seeds = [h for h, v in kw_scores.items() if v >= 4] or list(kw_scores.keys())
     snow_scores = _tikwm_snowball_creators(snowball_seeds)
     # A handle followed by N known brand creators gets +2 per follower-seed: being
     # inside the brand's follow-collective is a strong brand signal on its own.
     for h, n in snow_scores.items():
         kw_scores[h] = kw_scores.get(h, 0) + 2 * n
-    # Rank ALL candidates by signal: creators surfaced most often (brand title,
-    # hashtag, and/or followed by many brand creators) are walked first. Under a
-    # budget the high-confidence brand-UGC creators get crawled; the noise tail
-    # from broad keywords falls below the cut. Discovery stays WIDE; precision is
-    # the yt-dlp coverage pass's job.
+    # Rank ALL candidates by signal: creators in the most brand challenges and/or
+    # followed by many brand creators are walked first. Discovery stays WIDE;
+    # final brand precision is the yt-dlp coverage pass's job.
     tikwm_seeds = [h for h, _ in sorted(kw_scores.items(), key=lambda kv: -kv[1])]
-    strong = sum(1 for v in kw_scores.values() if v >= 2)
+    hashtag_n = len(kw_scores) - len(snow_scores)
+    strong = sum(1 for v in kw_scores.values() if v >= 5)
     print(
-        f"[tiktok_fetch] browser-free discovery: {len(kw_scores)} candidates "
-        f"({len(tikwm_tag)} via hashtag, +{len(snow_scores)} via follow-snowball), "
-        f"{strong} high-signal (score>=2); walking by signal rank.",
+        f"[tiktok_fetch] pure-hashtag discovery: {len(kw_scores)} candidates "
+        f"(~{hashtag_n} via brand hashtags, +{len(snow_scores)} via follow-snowball), "
+        f"{strong} high-signal (multi-challenge); walking by signal rank.",
         file=sys.stderr,
     )
 
@@ -627,6 +621,180 @@ def _tikwm_challenge_id(tag: str) -> Optional[str]:
         if cid:
             return str(cid)
     return None
+
+
+def _is_brand_hashtag(name: str, brand: str) -> bool:
+    """True if a hashtag NAME genuinely belongs to the brand. The challenge/search
+    endpoint matches loosely, so its result list mixes real brand tags with
+    coincidental ones; we filter at the NAME level (no per-video work).
+
+    Keeps:  #befreed, #befreed_0124 (campaign code), #usebefreed (prefix),
+            #befreedaffirmations (brand + suffix word)
+    Rejects: #befree, #freed, #beafraid (don't contain the full brand token);
+             #befreedom (brand token + an ENGLISH-word continuation, i.e. the
+             unrelated word 'freedom').
+
+    Rule: the brand token must appear. It qualifies when it sits at a boundary
+    (followed by a digit, underscore, separator, or end — the campaign-code and
+    most-compound forms), OR when followed by letters that are NOT one of a small
+    deny-list of English continuations that form an unrelated word. We lean
+    INCLUSIVE: a false keep only adds a candidate the per-video brand filter
+    rejects later in the walk; a false reject permanently loses a real creator.
+    Purity is ultimately enforced by the catalog walk, not here."""
+    import re
+
+    nm = (name or "").lstrip("#@").lower()
+    b = brand.lstrip("#@").lower()
+    if not nm or not b or b not in nm:
+        return False
+    # Continuations that turn the brand token into a DIFFERENT English word.
+    # Keep this tiny and brand-specific-agnostic; only the most common traps.
+    DENY_SUFFIX_STARTS = ("om",)  # befreed+om = "freedom"-style coincidence
+    for m in re.finditer(re.escape(b), nm):
+        after = nm[m.end() :]
+        if not after:
+            return True  # brand at end
+        if not after[0].isalpha():
+            return True  # digit / underscore / separator → campaign code etc.
+        if not any(after.startswith(s) for s in DENY_SUFFIX_STARTS):
+            return True  # brand + a non-denylisted word (e.g. 'affirmations')
+    return False
+
+
+def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> list[tuple[str, str]]:
+    """Enumerate EVERY brand-related challenge (the main #<brand> tag plus all
+    campaign-code variants like #befreed_0124 and compounds like #usebefreed),
+    each paired with its CORRECT challenge_id.
+
+    Why this exists: tikwm's challenge/search returns the variant tags, but the
+    old _tikwm_challenge_id() took count=10 and fell back to "first result",
+    which collapsed a variant name onto the wrong (usually the main) challenge_id
+    — so a variant's feed was never actually read. Here we read the search list
+    in full and keep each (name -> its own id), filtered by _is_brand_hashtag so
+    #befree / #freed noise is dropped at the NAME level (no full-text search, no
+    per-video work). PURE HTTP.
+
+    Returns a list of (tag_name, challenge_id), deduped by id, main tag first."""
+    import urllib.parse
+    import urllib.request
+
+    b = brand.lstrip("#@").lower()
+    by_id: dict[str, str] = {}
+    cursor = 0
+    for _ in range(max(1, search_pages)):
+        qs = urllib.parse.urlencode({"keywords": b, "count": 30, "cursor": cursor})
+        url = f"https://www.tikwm.com/api/challenge/search?{qs}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                doc = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception:
+            break
+        if not isinstance(doc, dict) or doc.get("code") != 0:
+            break
+        data = doc.get("data") or {}
+        challenges = data.get("challenge_list") or data.get("challenges") or []
+        if not challenges:
+            break
+        for c in challenges:
+            name = (c.get("cha_name") or c.get("challenge_name") or c.get("title") or "")
+            cid = c.get("challenge_id") or c.get("id")
+            if not cid or not _is_brand_hashtag(name, b):
+                continue
+            cid = str(cid)
+            # keep the first (cleanest) name we saw for each distinct id
+            by_id.setdefault(cid, name.lstrip("#@").lower())
+        if not data.get("hasMore"):
+            break
+        nxt = data.get("cursor")
+        if nxt is None or int(nxt) <= cursor:
+            break
+        cursor = int(nxt)
+
+    # Order: exact main tag first, then the rest (so the densest feed leads).
+    items = [(nm, cid) for cid, nm in by_id.items()]
+    items.sort(key=lambda kv: (kv[0] != b, kv[0]))
+    return items
+
+
+def _tikwm_creators_in_challenge(cid: str, pages: int) -> set[str]:
+    """Deep-page ONE challenge's post feed, collecting every author handle.
+    PURE HTTP. Stops on no-more / empty / stuck cursor / error (fails soft)."""
+    import urllib.parse
+    import urllib.request
+
+    found: set[str] = set()
+    cursor = 0
+    for _ in range(max(1, pages)):
+        qs = urllib.parse.urlencode({"challenge_id": cid, "count": 30, "cursor": cursor})
+        url = f"https://www.tikwm.com/api/challenge/posts?{qs}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
+        try:
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                doc = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception:
+            break
+        if not isinstance(doc, dict) or doc.get("code") != 0:
+            break
+        data = doc.get("data") or {}
+        items = data.get("videos") or []
+        if not items:
+            break
+        for item in items:
+            author = (item.get("author") or {}).get("unique_id")
+            if author:
+                found.add(author.lower())
+        if not data.get("hasMore"):
+            break
+        nxt = data.get("cursor")
+        if nxt is None or int(nxt) <= cursor:
+            break
+        cursor = int(nxt)
+    return found
+
+
+def _tikwm_discover_all_brand_hashtags(
+    brand: str, main_pages: int = 40, variant_pages: int = 5
+) -> dict[str, int]:
+    """OPTIMIZED pure-hashtag discovery: enumerate ALL brand challenges (main +
+    every campaign-code/compound variant) and deep-page each feed, unioning the
+    creators. Returns {handle: hit_count} where hit_count = how many distinct
+    brand challenges that creator appeared in (a strong signal — someone in many
+    brand challenges is a core brand creator; floats them up the walk order).
+
+    Replaces the noisy full-text keyword search (Method A): every creator here
+    came from a real brand HASHTAG feed, so the source is high-purity by
+    construction. The main tag is paged deepest (densest feed); variants are
+    paged shallower (each is small) but collectively recover the long tail that
+    only ever tagged an old campaign code."""
+    import time
+
+    scores: dict[str, int] = {}
+    challenges = _tikwm_all_brand_challenges(brand)
+    delay = _hashtag_feed_delay()
+    main = brand.lstrip("#@").lower()
+    for name, cid in challenges:
+        pages = main_pages if name == main else variant_pages
+        creators = _tikwm_creators_in_challenge(cid, pages)
+        for h in creators:
+            scores[h] = scores.get(h, 0) + 1
+        if delay > 0:
+            time.sleep(delay)
+    return scores
+
+
+def _hashtag_feed_delay() -> float:
+    """Seconds to sleep between challenge-feed reads. tikwm is Cloudflare-gated
+    and throttles bursty callers; a small gap keeps a multi-challenge sweep under
+    the limit. Default 0.3s. Override with UGCSPY_HASHTAG_FEED_DELAY."""
+    raw = os.environ.get("UGCSPY_HASHTAG_FEED_DELAY", "")
+    try:
+        v = float(raw)
+        if v >= 0:
+            return v
+    except (ValueError, TypeError):
+        pass
+    return 0.3
 
 
 def _tikwm_discover_by_hashtag(tag: str, pages: int = 20) -> list[str]:
