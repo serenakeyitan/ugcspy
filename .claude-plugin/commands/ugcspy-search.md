@@ -48,7 +48,7 @@ Don't force the question if the user clearly only wanted the list. But if they s
 
 ## Wall time
 
-Hashtag-mode first-run on an active brand takes ~60-90 seconds: browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay) followed by a yt-dlp coverage walk of each creator's catalog (16-way concurrent by default, `UGCSPY_WALK_CONCURRENCY`). Tell the user this BEFORE invoking. User-mode (`@brand`) is much faster (~10-20s, single fetch).
+Hashtag-mode first-run on an active brand takes a few minutes (~5-8 min for BeFreed): browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay) followed by a yt-dlp coverage walk of each discovered creator's full catalog (16-way concurrent by default, `UGCSPY_WALK_CONCURRENCY`) — the walk dominates. Tell the user this BEFORE invoking. User-mode (`@brand`) is much faster (~10-20s, single fetch).
 
 Subsequent searches on the same brand serve from cache instantly. Use `--refresh` for a fresh fetch.
 

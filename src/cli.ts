@@ -39,10 +39,11 @@ program
 
 program
   .command("install-deps")
-  .description("Install Python deps for the tiktok-oss provider (TikTokApi + Chromium). Add --with-audio for Whisper (~+1.5GB, needed by /ugcspy-decode + /ugcspy-remix for spoken-narrative capture).")
+  .description("Install Python deps for the tiktok-oss provider into a managed venv (TikTokApi + yt-dlp; browser-free). Add --with-browser for the optional Chromium fallback (~150MB). Add --with-audio for Whisper (~+1.5GB, needed by /ugcspy-decode + /ugcspy-remix for spoken-narrative capture).")
+  .option("--with-browser", "Also download the Chromium binary for the optional browser-assisted fallback (UGCSPY_USE_CHROMIUM=1) (~150MB)")
   .option("--with-audio", "Also install openai-whisper + torch for audio transcription (~3-5min, ~1.5GB)")
-  .action(async (options: { withAudio?: boolean }) => {
-    await runInstallDeps({ withAudio: !!options.withAudio });
+  .action(async (options: { withAudio?: boolean; withBrowser?: boolean }) => {
+    await runInstallDeps({ withAudio: !!options.withAudio, withBrowser: !!options.withBrowser });
   });
 
 program

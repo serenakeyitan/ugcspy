@@ -18,6 +18,11 @@ export interface InstallDepsOptions {
    * venv. Needed by /ugcspy-decode + /ugcspy-remix for spoken-audio
    * transcription. decode.py degrades gracefully without it.*/
   withAudio?: boolean;
+  /** When true, ALSO downloads the Chromium binary (~150MB) via playwright.
+   * Only the optional browser-assisted fallbacks use it (UGCSPY_USE_CHROMIUM=1
+   * discovery, legacy TikTokApi user-mode fallback). The default hashtag
+   * search is browser-free and never touches it. */
+  withBrowser?: boolean;
 }
 
 export async function runInstallDeps(opts: InstallDepsOptions = {}): Promise<void> {
@@ -65,21 +70,35 @@ export async function runInstallDeps(opts: InstallDepsOptions = {}): Promise<voi
   }
   pip.succeed("Python packages installed");
 
-  // Step 3: playwright install chromium
-  const browser = ora("playwright install chromium (one-time, ~150MB)").start();
-  const browserResult = await run(py, ["-m", "playwright", "install", "chromium"]);
-  if (!browserResult.ok) {
-    browser.fail("playwright install failed");
-    console.error(chalk.dim(browserResult.stderr.slice(-2000)));
-    process.exit(1);
+  // Step 3 (opt-in): Chromium binary for the browser-assisted fallbacks.
+  // The default hashtag search is browser-free (tikwm relay + yt-dlp), so a
+  // 150MB browser download must not be able to block a fresh install.
+  if (opts.withBrowser) {
+    const browser = ora("playwright install chromium (one-time, ~150MB)").start();
+    const browserResult = await run(py, ["-m", "playwright", "install", "chromium"]);
+    if (!browserResult.ok) {
+      browser.fail("playwright install failed");
+      console.error(chalk.dim(browserResult.stderr.slice(-2000)));
+      process.exit(1);
+    }
+    browser.succeed("Chromium downloaded");
+  } else {
+    console.log(
+      chalk.dim(
+        "Skipped Chromium download (~150MB) — the default hashtag search is browser-free.\n" +
+          "If you later enable the browser-assisted fallback (UGCSPY_USE_CHROMIUM=1), first run: " +
+          chalk.cyan("ugcspy install-deps --with-browser"),
+      ),
+    );
   }
-  browser.succeed("Chromium downloaded");
 
-  // Step 4: smoke-test the bridge can at least import everything via the venv
+  // Step 4: smoke-test the bridge can at least import everything via the venv.
+  // yt_dlp is included because the default Stage-2 coverage walk shells out to
+  // the venv's yt-dlp binary — a missing module here means zero search results.
   const smoke = ora("Verifying bridge imports").start();
   const smokeResult = await run(py, [
     "-c",
-    "import asyncio, json; from TikTokApi import TikTokApi; print('ok')",
+    "import asyncio, json, yt_dlp; from TikTokApi import TikTokApi; print('ok')",
   ]);
   if (!smokeResult.ok || !smokeResult.stdout.includes("ok")) {
     smoke.fail("Bridge import check failed");
@@ -116,10 +135,10 @@ export async function runInstallDeps(opts: InstallDepsOptions = {}): Promise<voi
   }
 
   console.log(chalk.green("\n✓ tiktok-oss is ready.\n"));
-  console.log(`Try: ${chalk.cyan("ugcspy search @glossier --platform tiktok")}`);
+  console.log(`Try: ${chalk.cyan("ugcspy search befreed --platform tiktok --limit 10")}`);
   console.log(
     chalk.dim(
-      "Note: a Chromium window briefly flashes during scrapes — TikTok's bot detection blocks pure headless. See README for MS_TOKEN if you hit rate limits.",
+      "Hashtag search runs browser-free (tikwm relay + yt-dlp). The first search on an active brand takes a few minutes while Stage 2 walks every discovered creator's catalog; results are cached after that, ranked by views.",
     ),
   );
   if (opts.withAudio) {

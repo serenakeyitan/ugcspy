@@ -17,7 +17,7 @@ Install the latest ugcspy from https://github.com/serenakeyitan/ugcspy/releases/
 https://github.com/serenakeyitan/ugcspy/blob/main/ONBOARDING.md end-to-end.
 ```
 
-That's the whole prompt. Claude fetches [ONBOARDING.md](ONBOARDING.md), runs the 9 steps via Bash, and stops with a working `ugcspy` plus optionally the bundled `video-recipe` agent. ~5 minutes mostly waiting for downloads.
+That's the whole prompt. Claude fetches [ONBOARDING.md](ONBOARDING.md), runs the 9 steps via Bash, and stops with a working `ugcspy` plus optionally the bundled `video-recipe` agent. ~2-3 minutes (the core install is browser-free — no Chromium download).
 
 **Latest release:** [v0.2.0](https://github.com/serenakeyitan/ugcspy/releases/latest)
 
@@ -36,26 +36,26 @@ The two products share a natural workflow: ugcspy finds the top UGC videos for a
 git clone https://github.com/serenakeyitan/ugcspy.git
 cd ugcspy
 bun install
-bun run src/cli.ts install-deps     # ~30s + 150MB Chromium download
+bun run src/cli.ts install-deps     # ~30-60s — TikTokApi + yt-dlp into a managed venv; browser-free
 bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
 bun run build                        # produces dist/cli.js
 npm install --global .               # symlinks ugcspy onto PATH
-ugcspy search befreed --platform tiktok --limit 10
+ugcspy search befreed --platform tiktok --limit 10   # first run on an active brand: ~5-8 min
 ```
 
 After publishing to npm: `npm install -g ugcspy`.
 
 ---
 
-## Quick start (~60 seconds, after install)
+## Quick start (after install)
 
 ```bash
 ugcspy search befreed --platform tiktok --limit 10
 ```
 
-That's it. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.
+That's it — the table is the brand's **top UGC videos ranked by views** (last 30 days by default), with the creators behind them. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.
 
-**Heads up on wall time.** A first-run hashtag search (`ugcspy search befreed`) takes ~60-90 seconds for an active UGC brand. We run four discovery passes (user search → hashtags → campaign codes → seed-creator walk) with up to 12 concurrent fetches per pass, plus repeat-query within each hashtag until saturation. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh fetch. See [Why hashtag mode is the default](#why-hashtag-mode-is-the-default) for the architecture.
+**Heads up on wall time.** A FIRST search on an active UGC brand takes a few minutes, not seconds — BeFreed (~150 discovered creators) runs ~5-8 minutes. Stage 1 discovers every creator via brand-hashtag feeds + a follow-graph snowball (pure HTTP); Stage 2 walks each creator's full catalog with yt-dlp, 16-way concurrent — that walk is where the time goes. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh crawl. See [How hashtag search actually works](#how-hashtag-search-actually-works-browser-free-two-stage) for the architecture.
 
 If you only want to try the CLI shape without setting up the scraper, pick `mock` in `ugcspy init` instead of `tiktok-oss` — it serves deterministic synthetic data with zero setup.
 
@@ -232,7 +232,7 @@ bun run src/cli.ts watch remove 1
 
 **Recommended path:**
 - Try `mock` first to see how the CLI works.
-- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. It wraps [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, v7.3.3 shipped April 2026) via a Python subprocess.
+- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. The default path runs on the tikwm relay (discovery) + yt-dlp (coverage); [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, v7.3.3 shipped April 2026) is kept for the `user`/`keyword`-mode fallbacks — all via a Python subprocess.
 - Add `scrapecreators` if you need Instagram Reels coverage or hit rate limits on the OSS path.
 
 **Why no free Instagram option?** No production-grade free Instagram Reels scraper is currently maintained. Meta is more aggressive than TikTok about killing scrapers, and the leading repos either require login (ban risk for the user's account) or have been abandoned. ScrapeCreators is the honest answer for IG until that changes.
@@ -248,7 +248,7 @@ Hashtag mode is **browser-free** by default — discovery goes through the tikwm
 
 **Walk phase is slow on a big roster.** Stage 2 walks each creator's catalog with yt-dlp at `UGCSPY_WALK_CONCURRENCY` (default 16). yt-dlp hits `www.tiktok.com` directly (not rate-limited like tikwm), so you can raise it on a fast connection — or lower it if you see empty walks on a constrained machine.
 
-**Optional Chromium fallback.** Discovery is browser-free by default. If you want the legacy Chromium-assisted discovery as an *extra* source (e.g. on a residential IP where it's stable), set `UGCSPY_USE_CHROMIUM=1` — `install-deps` provisions the Chromium venv for it. It's off by default because it crashes/times out on most hosts and the tikwm sources cover the same ground.
+**Optional Chromium fallback.** Discovery is browser-free by default — the Chromium binary isn't even downloaded unless you ask for it. If you want the legacy Chromium-assisted discovery as an *extra* source (e.g. on a residential IP where it's stable), provision it once with `ugcspy install-deps --with-browser` (~150MB), then set `UGCSPY_USE_CHROMIUM=1`. It's off by default because it crashes/times out on most hosts and the tikwm sources cover the same ground.
 
 **"TikTokApi not installed."** The `user` and `keyword` modes still use TikTokApi. Run `ugcspy install-deps` to provision the managed venv (one-time). Hashtag mode's pure-HTTP discovery doesn't require it.
 

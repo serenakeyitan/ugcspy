@@ -1,2 +1,3 @@
 TikTokApi>=7.0.0
 playwright>=1.48.0
+yt-dlp  # Stage-2 catalog walk + caption rescue; TikTok extractor churns upstream, so no version pin
