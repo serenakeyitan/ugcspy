@@ -465,8 +465,9 @@ async def run_hashtag(tag: str, days: int) -> None:
     # (if any) UNION tikwm-discovered creators (always available).
     #   - breadth: how many creators (UGCSPY_MAX_SEED_CREATORS, default 200).
     #   - concurrency: how many catalog walks at once (UGCSPY_WALK_CONCURRENCY,
-    #     default 4). Measured: yt-dlp walks are not meaningfully throttled, so
-    #     parallel is safe; the knob is just caution for huge rosters.
+    #     default 16). Measured: yt-dlp walks are not meaningfully throttled and
+    #     a single walk is ~6-7s, so wall-time is serial fan-out — concurrency
+    #     divides it directly. Parallel is safe (hits tiktok.com, not tikwm).
     chromium_seeds = _merge_seed_creators(videos, tag, user_search_seeds)
     seed_creators = _union_seeds(chromium_seeds, tikwm_seeds)
     if seed_creators:
@@ -1036,16 +1037,20 @@ def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> di
 
 
 def _creator_walk_concurrency() -> int:
-    """How many creator catalog-walks run at once in pass 3. Default 4.
-    Measured: yt-dlp's creator/item_list walk is NOT meaningfully rate-limited —
-    8 consecutive walks across two rounds returned identical per-creator counts
-    (149/91/129/55), and a creator's count reflects their real catalog size, not
-    throttling. So parallel walks are safe; UGCSPY_WALK_CONCURRENCY is left as a
-    knob only for caution on very large rosters.
+    """How many creator catalog-walks run at once in pass 3 — the dominant cost
+    of a search (each walk is a yt-dlp item_list fetch). Measured: yt-dlp's walk
+    is NOT meaningfully rate-limited — repeated parallel walks return identical
+    per-creator counts (a count reflects real catalog size, not throttling) — and
+    a single creator's walk is fast (~6-7s even for a 150-video catalog). So the
+    wall-time is dominated by SERIAL fan-out across the roster, which concurrency
+    directly divides. Override with UGCSPY_WALK_CONCURRENCY.
 
-    Default 8: with wide discovery now surfacing a ~200-creator high-signal
-    roster (up from ~38), 4-way walking was the wall-time bottleneck. 8-way
-    halves it with no measured throttle cost. Lower it if you ever see empties."""
+    Default 16: with the pure-hashtag roster (~200 creators) the walk fan-out is
+    the bottleneck; 16-way roughly halves it vs 8 with no measured throttle cost
+    (yt-dlp hits www.tiktok.com directly, not the rate-limited tikwm relay). The
+    per-walk caption-truncation rescue does call tikwm, but only for the handful
+    of clipped brand videos per creator, so concurrent walks don't burst tikwm.
+    Lower it if you ever see empty walks (a sign of local CPU/network limits)."""
     raw = os.environ.get("UGCSPY_WALK_CONCURRENCY", "")
     try:
         n = int(raw)
@@ -1053,7 +1058,7 @@ def _creator_walk_concurrency() -> int:
             return n
     except (ValueError, TypeError):
         pass
-    return 8
+    return 16
 
 
 def _creator_walk_delay() -> float:
