@@ -118,6 +118,86 @@ def test_scored_discovery_ranks_by_signal(monkeypatch):
     assert scores["alice"] >= 4 and scores["bob"] == 1
 
 
+# ── yt-dlp flat-playlist caption-truncation rescue ───────────────────────────
+# THE BUG: yt-dlp's --flat-playlist clips a video's caption to ~72 chars and
+# appends a literal "...". When the brand hashtag sits at that boundary,
+# `#befreed_0124` arrives as `#befree...`, _is_real_ugc_caption rejects it, and a
+# genuine (often high-view) brand video is silently dropped. Fix: detect the clip
+# signature, re-fetch the full caption from tikwm, and — if tikwm is throttled —
+# KEEP the video rather than lose it. These guard both the detector and the
+# keep-on-throttle behavior so the regression can't return.
+
+def test_detects_truncated_brand_tag_prefix():
+    # the exact clipped caption yt-dlp produced for the 2.6M purple video
+    clipped = "If your favorite color is purple you need to tune in!! 💜 #befree..."
+    assert tf._is_real_ugc_caption(clipped, "befreed") is False
+    assert tf._caption_maybe_truncates_brand(clipped, "befreed") is True
+
+
+def test_full_caption_needs_no_rescue():
+    full = "tune in!! #befreed_0124 #purple #hobbiesinyour20s #greenscreen "
+    assert tf._is_real_ugc_caption(full, "befreed") is True
+    assert tf._caption_maybe_truncates_brand(full, "befreed") is False
+
+
+def test_truncation_detector_has_no_false_positives():
+    # genuinely-unrelated captions must NOT trigger a (wasteful) rescue
+    for neg in [
+        "If your favorite color is blue 💙 #1dfaf_blue #colorblue",
+        "The books you read #dfff_disg #readingisfundamental",
+        "a video about freedom and being free #motivation",  # 'free' != prefix of 'befreed'
+        "check it out...",  # ellipsis but no brand bytes
+        "loved this!! #b",  # fragment too short
+    ]:
+        assert tf._caption_maybe_truncates_brand(neg, "befreed") is False, neg
+
+
+def _run_one_creator(monkeypatch, catalog, tikwm_return):
+    """Drive _fetch_one_creator for a single synthetic creator with the yt-dlp
+    walk and the tikwm rescue both stubbed. Returns the kept videos list."""
+    import asyncio
+    from datetime import datetime, timezone, timedelta
+
+    monkeypatch.setattr(tf, "_ytdlp_creator_catalog", lambda h, max_retries=3: catalog)
+    monkeypatch.setattr(tf, "_tikwm_video_caption", lambda vid, author="x": tikwm_return)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=365)
+    videos: list = []
+    seen: set = set()
+    asyncio.run(tf._fetch_one_creator(None, "someone", videos, seen, cutoff, "befreed"))
+    return videos
+
+
+def _clipped_catalog():
+    from datetime import datetime, timezone
+
+    return [{
+        "platform": "tiktok", "external_id": "PURPLE",
+        "posted_at": datetime.now(timezone.utc).isoformat(),
+        "caption": "loved this!! #befree...", "thumbnail_url": "", "video_url": "",
+        "view_count": 2600000, "like_count": 1, "comment_count": 0, "share_count": 0,
+        "_author": "someone",
+    }]
+
+
+def test_rescue_keeps_video_when_tikwm_throttled(monkeypatch):
+    # tikwm returns None (throttled). The video MUST survive (this is the bug).
+    kept = _run_one_creator(monkeypatch, _clipped_catalog(), None)
+    assert [v["external_id"] for v in kept] == ["PURPLE"]
+    assert kept[0]["view_count"] == 2600000  # walk's correct count preserved
+
+
+def test_rescue_keeps_and_upgrades_when_tikwm_confirms(monkeypatch):
+    full = "loved this!! #befreed_0124 #purple"
+    kept = _run_one_creator(monkeypatch, _clipped_catalog(), full)
+    assert len(kept) == 1 and kept[0]["caption"] == full  # caption upgraded
+
+
+def test_rescue_drops_only_on_confirmed_non_match(monkeypatch):
+    # tikwm answers and the FULL caption genuinely has no brand → correct drop
+    kept = _run_one_creator(monkeypatch, _clipped_catalog(), "loved this!! #freedom #free")
+    assert kept == []
+
+
 class _MonkeyPatch:
     """Tiny monkeypatch shim so the inline runner works without pytest."""
 

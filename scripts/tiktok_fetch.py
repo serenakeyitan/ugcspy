@@ -455,7 +455,10 @@ async def run_hashtag(tag: str, days: int) -> None:
                 for c in seed_creators[:max_seeds]
             ],
         )
-        _merge_into_videos(pass_3_results, videos, seen_ids)
+        # prefer_metrics=True: the yt-dlp walk is authoritative for CURRENT
+        # view/like counts. Let it overwrite the stale snapshots the discovery
+        # feed (Pass 1/2) captured, instead of first-writer-wins dropping it.
+        _merge_into_videos(pass_3_results, videos, seen_ids, prefer_metrics=True)
 
     print(json.dumps(videos))
 
@@ -839,19 +842,62 @@ async def _gather_with_concurrency(limit, coros):
     return await asyncio.gather(*(bounded(c) for c in coros))
 
 
-def _merge_into_videos(per_task_results, videos, seen_ids):
+def _merge_into_videos(per_task_results, videos, seen_ids, prefer_metrics=False):
     """Serial merge of per-task results into the shared videos list,
     deduplicating by external_id. Runs after all parallel fetches
-    complete, so no race conditions."""
+    complete, so no race conditions.
+
+    prefer_metrics: when True, a result for an already-seen external_id does
+    NOT get dropped — instead it UPGRADES the metrics (view/like/comment/share
+    counts) and caption of the entry already in `videos`. This matters because
+    the discovery passes (tikwm keyword/hashtag feed) snapshot a video's view
+    count at the moment it was indexed, which can be weeks stale. The yt-dlp
+    creator walk (Pass 3) reports each video's CURRENT counts. First-writer-wins
+    dedup would otherwise freeze a video at its stale discovery-feed view count
+    even after it went viral — e.g. a clip indexed at 162K that has since grown
+    to 2.6M would keep showing 162K, mis-ranking it. So the authoritative walk
+    is allowed to overwrite the snapshot's metrics in place."""
+    # Index existing entries by external_id only when we may need to update them.
+    index = (
+        {v.get("external_id"): v for v in videos if v.get("external_id")}
+        if prefer_metrics
+        else {}
+    )
     for task_videos in per_task_results:
         if not task_videos:
             continue
         for v in task_videos:
             ext = v.get("external_id")
-            if not ext or ext in seen_ids:
+            if not ext:
+                continue
+            if ext in seen_ids:
+                if prefer_metrics:
+                    _upgrade_metrics(index.get(ext), v)
                 continue
             seen_ids.add(ext)
             videos.append(v)
+            if prefer_metrics:
+                index[ext] = v
+
+
+def _upgrade_metrics(existing, fresh):
+    """Overwrite an existing video dict's engagement metrics + caption with the
+    fresh (authoritative yt-dlp walk) copy. Only fields the walk reliably
+    provides are touched; identity fields (external_id, posted_at, author) and
+    anything the walk left empty are preserved. A metric is only overwritten
+    when the fresh value is a higher non-zero count, so a walk that momentarily
+    reports 0 (e.g. a transient API hiccup) never regresses a good snapshot."""
+    if existing is None or not isinstance(fresh, dict):
+        return
+    for key in ("view_count", "like_count", "comment_count", "share_count"):
+        new = fresh.get(key)
+        if isinstance(new, int) and new > (existing.get(key) or 0):
+            existing[key] = new
+    # The walk's caption is the full current description; prefer it when it is
+    # at least as long as what discovery captured (longer == less truncated).
+    fresh_cap = fresh.get("caption") or ""
+    if len(fresh_cap) >= len(existing.get("caption") or ""):
+        existing["caption"] = fresh_cap
 
 
 async def _user_search_seeds(api, tag):
@@ -1037,6 +1083,101 @@ def _is_real_ugc_caption(caption, tag):
     return bool(pattern.search(caption))
 
 
+def _caption_maybe_truncates_brand(caption, tag) -> bool:
+    """True when a caption looks like yt-dlp's flat-playlist clipped the brand
+    tag mid-word, so the real (untruncated) caption might still carry it.
+
+    THE BUG this guards: yt-dlp's --flat-playlist NON-DETERMINISTICALLY truncates
+    a video's caption to ~72 chars. When the brand hashtag sits right at that
+    boundary, `#befreed_0124` arrives as `#befree` (or `#befreedX` cut to a
+    partial), and _is_real_ugc_caption rejects it — silently dropping a genuine
+    (often high-view) brand video. We can't tell from yt-dlp alone, so we detect
+    the *signature* of that clip and let the caller re-fetch the full caption
+    from tikwm before discarding.
+
+    Signals (any):
+      1. A run that is a NON-EMPTY PREFIX of the brand token appears immediately
+         after '#' or '@' at/near the very end of the caption (the classic
+         '...#befree' cut). Requires len>=3 so we don't rescue on a stray '#b'.
+      2. The caption length is at the known truncation ceiling (<=73) AND it
+         ends without sentence/space terminator AND the brand prefix's first few
+         letters appear — a weaker fallback for odd clips.
+    Conservative by design: a false positive only costs one extra tikwm call;
+    a false negative loses the video, so we lean slightly toward rescuing."""
+    import re
+    if not caption:
+        return False
+    brand = tag.lstrip("@#").lower()
+    if len(brand) < 4:
+        return False
+    cap = caption.rstrip()
+    low = cap.lower()
+    # yt-dlp marks a clipped caption with a trailing literal "..." ellipsis
+    # (the '...#befree...' we saw on the 2.6M purple video). That ellipsis is
+    # BOTH the truncation signal and noise that hides the real tail token, so
+    # strip a trailing run of dots / unicode ellipsis before inspecting the end.
+    had_ellipsis = bool(re.search(r"(\.{2,}|…)\s*$", low))
+    low = re.sub(r"(\.{2,}|…)\s*$", "", low).rstrip()
+    # Signal 1: trailing "#<prefix>" or "@<prefix>" where prefix is a strict,
+    # non-empty (>=3 char) prefix of the brand and the tag is NOT already a
+    # complete accepted form (those are handled by _is_real_ugc_caption).
+    m = re.search(r"[#@]([a-z0-9_]+)$", low)
+    if m:
+        frag = m.group(1)
+        # full or campaign-suffixed forms are NOT truncation — they'd have passed
+        if frag == brand or frag.startswith(brand):
+            return False
+        if len(frag) >= 3 and brand.startswith(frag) and frag != brand:
+            return True
+    # Signal 2: caption was explicitly ellipsis-clipped AND the brand's leading
+    # bytes appear near the tail — catches clips where the '#' itself got cut or
+    # the fragment is shorter than 3 chars but the ellipsis confirms truncation.
+    if had_ellipsis and brand[:4] in low[-15:]:
+        return True
+    # Signal 3 (no ellipsis): caption sits at the known ~72-char ceiling and the
+    # brand prefix appears near the tail without a sentence terminator.
+    if len(cap) <= 73 and brand[:4] in low[-12:] and not low.endswith((".", "!", "?")):
+        return True
+    return False
+
+
+def _tikwm_video_caption(video_id: str, author: str = "x") -> Optional[str]:
+    """Fetch ONE video's FULL (untruncated) caption from tikwm. Used to rescue
+    walk videos whose flat-playlist caption looks like it clipped the brand tag
+    (see _caption_maybe_truncates_brand). tikwm returns the complete description
+    in data.title. PURE HTTP, short timeout, None on any failure (caller then
+    falls back to the truncated caption / drops the video as before)."""
+    import urllib.request
+
+    import time
+
+    url = (
+        "https://www.tikwm.com/api/?url="
+        f"https://www.tiktok.com/@{author}/video/{video_id}"
+    )
+    # tikwm is Cloudflare-gated and throttles bursty callers (the snowball can be
+    # hammering it concurrently). A single failed call here would silently drop a
+    # genuine brand video, so retry a couple times with backoff before giving up.
+    for attempt in range(3):
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                doc = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception:
+            time.sleep(1.2 * (attempt + 1))
+            continue
+        if not isinstance(doc, dict) or doc.get("code") != 0:
+            # code!=0 is tikwm's throttle/err envelope — retry rather than treat
+            # it as an authoritative "no brand tag" (which would drop the video).
+            time.sleep(1.2 * (attempt + 1))
+            continue
+        title = (doc.get("data") or {}).get("title")
+        return title if isinstance(title, str) and title else ""
+    return None  # all retries failed → caller keeps the truncated caption
+
+
 # ─── yt-dlp creator catalog walk (defeats the TikTokApi per-creator cap) ──────
 #
 # Why yt-dlp instead of TikTokApi for the per-creator walk:
@@ -1059,6 +1200,23 @@ def _is_real_ugc_caption(caption, tag):
 #   creators capped at 55) — so the caller falls back to the old TikTokApi path
 #   on an empty result, and a future persistent-dedup layer can accumulate
 #   partial walks across runs.
+
+def _ytdlp_rescue_budget() -> int:
+    """Max tikwm full-caption rescue calls per creator walk (see
+    _fetch_one_creator). Bounds the cost of recovering brand videos whose
+    flat-playlist caption clipped the tag. Default 25 — comfortably covers a
+    creator's handful of truncated high-view posts without hammering tikwm.
+    Set UGCSPY_YTDLP_RESCUE=0 to disable rescue entirely (pure yt-dlp, faster
+    but loses tag-at-boundary videos)."""
+    raw = os.environ.get("UGCSPY_YTDLP_RESCUE", "")
+    try:
+        n = int(raw)
+        if n >= 0:
+            return n
+    except (ValueError, TypeError):
+        pass
+    return 25
+
 
 def _ytdlp_bin() -> str:
     """Resolve the yt-dlp binary. This script runs under the managed venv's
@@ -1171,6 +1329,10 @@ async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
     # ~8min), defeating _gather_with_concurrency entirely.
     catalog = await asyncio.to_thread(_ytdlp_creator_catalog, handle)
     if catalog:
+        # Bound how many truncation-rescue tikwm calls this walk may make, so a
+        # creator whose captions are heavily clipped can't explode wall time or
+        # trip tikwm's rate limit. Each rescue is one HTTP call (~0.3-1s).
+        rescue_budget = _ytdlp_rescue_budget()
         for raw in catalog:
             ext = raw["external_id"]
             if ext in seen_ids:
@@ -1178,8 +1340,37 @@ async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
             posted_at = datetime.fromisoformat(raw["posted_at"])
             if posted_at < cutoff:
                 continue
-            if not _is_real_ugc_caption(raw.get("caption") or "", tag):
-                continue
+            cap = raw.get("caption") or ""
+            if not _is_real_ugc_caption(cap, tag):
+                # The brand filter rejected this caption. yt-dlp's flat-playlist
+                # truncates captions to ~72 chars NON-DETERMINISTICALLY, which
+                # can clip the brand tag (`#befreed_0124` -> `#befree`) and drop
+                # a genuine — often high-view — brand video. If the caption shows
+                # that clip signature, re-fetch the FULL caption from tikwm and
+                # re-test before discarding. Otherwise it's a real non-match.
+                if rescue_budget > 0 and _caption_maybe_truncates_brand(cap, tag):
+                    rescue_budget -= 1
+                    full = await asyncio.to_thread(
+                        _tikwm_video_caption, ext, raw.get("_author") or handle.lstrip("@")
+                    )
+                    if full is None:
+                        # tikwm was unreachable/throttled — we COULDN'T verify.
+                        # The truncation signature (brand prefix clipped right at
+                        # the '...') is already strong evidence the tag is there,
+                        # and dropping silently is exactly the bug we're fixing
+                        # (a high-view brand video vanishing because a rescue call
+                        # got rate-limited). So KEEP it with the truncated caption
+                        # rather than lose it. A later refresh re-fetches metrics.
+                        pass
+                    elif not _is_real_ugc_caption(full, tag):
+                        # tikwm answered and the FULL caption genuinely lacks the
+                        # brand — this was a real non-match (the prefix was
+                        # coincidental, e.g. '#befree' of an unrelated word). Drop.
+                        continue
+                    else:
+                        raw["caption"] = full  # verified: keep untruncated caption
+                else:
+                    continue
             seen_ids.add(ext)
             # Match the legacy shape: _author is stripped downstream by the TS
             # provider mapping (or kept for hashtag/keyword paths). Leave it.
