@@ -100,48 +100,68 @@ The BigSpy-for-UGC question is "who's posting about this brand?", not "what is t
 
 A precision filter rejects videos that TikTok's hashtag endpoint over-matches (e.g. "be freed" / "freed" appearing in unrelated contexts collide with `#befreed`). Only videos with an explicit `#brand`, `#brand_NNNN` campaign code, or `@brand` mention are kept.
 
-### How hashtag search actually works (four-pass discovery + repeat-querying)
+### How hashtag search actually works (browser-free, two-stage)
 
-Single-hashtag scraping has a soft ceiling: TikTok returns ~140-200 results per call and ranks them with an opaque algo that aggressively dedupes per-creator. A creator with 30 `#befreed` posts will only show 1-2 in any single hashtag feed call. So one hashtag query is **wildly incomplete** for any active UGC brand.
+Single-hashtag scraping has a soft ceiling: TikTok's `#befreed` challenge feed dedupes hard per-creator and only surfaces a handful of each creator's posts. So one hashtag call is **wildly incomplete** for any active UGC brand. ugcspy fixes this by separating two jobs that people usually conflate:
 
-To compensate, hashtag-mode search runs four passes plus repeat-querying within each pass (typically ~150 seconds for an active brand):
+- **Discovery** — *which creators exist?* (find handles). Done over HTTP via the [tikwm](https://www.tikwm.com) relay. No browser.
+- **Coverage** — *all of each creator's brand videos?* Done with **yt-dlp**, which walks a creator's full public catalog directly from `www.tiktok.com`.
 
-1. **Pass 0 — user search.** Query TikTok's `Search.users` endpoint for handles matching the brand (e.g. `@laura.befreed`, `@befreedapp`). Most candidates are noise (`@palestine_willbefreed`, `@befreedwinefarm`); pass 3's caption filter sorts them out for free.
-2. **Pass 1 — hashtag fetch.** Pull `#brand` + `#brandapp` (the common SaaS pattern: `#notionapp`, `#befreedapp`).
-3. **Pass 2 — campaign codes.** Extract `#brand_NNNN` patterns from pass-1 captions and fetch each. Brand-controlled campaign codes are the strongest UGC signal (only paid creators use them).
-4. **Pass 3 — seed creators.** Union all creators from passes 0-2 (handle-name match + caption-filter-pass + user-search seeds), then pull each one's full recent feed (count=50). Re-apply the caption filter so off-brand posts don't sneak in.
+The flow:
 
-**Repeat-querying within passes 1-2.** TikTok rotates the hashtag feed slightly between calls — same query gives different videos each round. Each hashtag is queried up to 3 times, breaking early when a round adds fewer than 5 new videos. Empirical gain: `#befreed` returns 142 unique videos in round 1, 198 unique after 5 rounds (+39%). Smaller campaign-code feeds gain more (`#befreed_0085`: 55 → 80, +45%).
-
-**Bounded parallelism (concurrency=12).** Hashtag and creator fetches inside each pass run concurrently. Tested empirically across multiple fresh-IP runs:
-
-| Concurrency | Probe (16 hashtags) | Pipeline E2E | Errors |
-|---|---:|---:|---:|
-| 4 | 6.8s | n/a | 0 |
-| 8 | 11.4s | ~67s | 0 |
-| **12** | **7.0s** | **~68s** | **0** |
-| 16 | 7.0s | ~62s | 0 |
-
-Past 12 the per-request latency dominates, so 16 is only ~10% faster end-to-end. We pick 12 as the default — conservative enough to be safe on slower IPs, fast enough to capture the meaningful gain.
-
-If you have an `MS_TOKEN` cookie set (see Troubleshooting), your session has a higher rate-limit ceiling and you can crank concurrency up via env var:
-
-```bash
-export MS_TOKEN="<your-token>"
-export UGCSPY_CONCURRENCY=16    # or 24 if your token is fresh
-ugcspy search befreed
+```
+  ugcspy search "#befreed"
+        │
+        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ STAGE 1 — DISCOVERY  (find creator handles, pure HTTP)       │
+│                                                              │
+│  ① ALL brand hashtags          ② Follow-graph snowball       │
+│     challenge/search → every       walk who the core seeds   │
+│     #befreed* tag (main +          FOLLOW (depth-1) → recover │
+│     #befreed_0124, #usebefreed)    the low-view long tail     │
+│     deep-page each feed            that never reaches a feed  │
+│         │                              │                      │
+│         └──────────────┬───────────────┘                     │
+│                        ▼                                      │
+│            union + score by signal                           │
+│            (in N brand challenges, followed by N seeds)       │
+│            → ranked creator roster                            │
+└────────────────────────┬─────────────────────────────────────┘
+                         ▼
+┌─────────────────────────────────────────────────────────────┐
+│ STAGE 2 — COVERAGE  (yt-dlp, 16-way concurrent)              │
+│                                                              │
+│  for each creator (highest signal first):                    │
+│     yt-dlp walks their FULL catalog                          │
+│         │                                                    │
+│         ▼                                                    │
+│     brand filter per video  (#befreed / #befreed_NNNN /      │
+│         │                    @befreed / plain "befreed")     │
+│         │   ↳ caption clipped at the 72-char boundary?       │
+│         │     re-fetch the full caption from tikwm (rescue)  │
+│         ▼                                                    │
+│     keep brand videos, with CURRENT view counts              │
+└────────────────────────┬─────────────────────────────────────┘
+                         ▼
+            dedup + rank by views  →  SQLite cache  →  table
 ```
 
-Cautionary note: pushing concurrency aggressively after an IP gets throttled returns ZERO videos for 10-20 minutes — not just "slower". See [commit 2610607](https://github.com/serenakeyitan/ugcspy/commit/2610607) for the post-mortem.
+**Why two stages.** Discovery (tikwm) finds *names*; it doesn't need every video. Coverage (yt-dlp) pulls *all* videos for a found name — verified 100% catalog (e.g. 151/151 for `@annaa.learns`) and reaches years-old posts. A single yt-dlp walk is fast (~6-7s even for 150 videos), so Stage 2's wall-time is dominated by fan-out across the roster, which is why it runs **16-way concurrent** (`UGCSPY_WALK_CONCURRENCY`).
 
-Result for BeFreed: 60 videos via single-hashtag → 410-440 videos via four-pass + repeat-query + parallel. Ceiling went from 41K views to 335K views. Wall time: ~15s single-pass → ~160s four-pass sequential → **~67s four-pass parallel**.
+**Brand precision.** A video is only kept if its caption carries the brand via `#brand`, a `#brand_NNNN` campaign code, an `@brand` mention, or the plain-text brand token. The discovery stage is intentionally *wide* (it collects every creator a hashtag surfaces); precision is enforced here, per video.
+
+**The caption-truncation rescue.** yt-dlp's flat-playlist clips captions to ~72 chars and appends `…`. When the brand tag sits at that boundary, `#befreed_0124` arrives as `#befree…` and the filter would wrongly drop a genuine — often high-view — brand video. ugcspy detects the clip signature and re-fetches that one video's **full** caption from tikwm before discarding it. (This is what surfaced @growthwithmya7's 2.6M "purple" video as the true #1 BeFreed clip — it had been silently dropped.)
+
+**The stable tikwm client.** tikwm honors `count` loosely (8–18 videos for a requested 30) and intermittently serves a transient empty/error page mid-feed. Every tikwm call goes through a retry-with-backoff helper that tolerates this variance, so a deep challenge walk is **deterministic** — the same query returns the same creators run after run (measured 176/176/176, where the naive client swung 29↔111).
+
+**Coverage vs the trade-off.** Pure-hashtag + snowball reaches ~89% of a brand's real creator roster (51/57 for BeFreed) — cleanly and fast. The creators it can't reach are a handful of very-low-view accounts whose videos never enter *any* TikTok challenge feed; no hashtag method can surface them. (An earlier full-text keyword search caught them but at ~8% precision, forcing the walk to chew through ~90% noise — so it was dropped in favor of the clean hashtag path.)
 
 **What we cannot do (free path limits):**
-- **Pull a brand's "following" list.** TikTok gates this behind auth; TikTokApi doesn't expose it. If `@befreedapp` follows 30 UGC creators we don't surface another way, we miss them.
-- **Pull a brand's "liked" list.** TikTok hides likes by default for most accounts.
-- **Use `Search.videos` for keyword matching** — TikTokApi v7 only exposes `Search.users`.
+- **Pull a brand's "following"/"liked" lists.** TikTok gates these behind auth.
+- **Reach the very-low-view long tail.** Creators whose brand videos sit at a few hundred views never enter a challenge feed, so hashtag discovery can't see them.
 
-For these, you'd need paid ScrapeCreators (handles auth-required endpoints).
+For those, you'd need paid ScrapeCreators (handles auth-required endpoints) or residential proxies.
 
 ## Claude Code plugin
 
@@ -223,20 +243,14 @@ Brand SMMs already pay $300-1000/mo for Trendpop, Pentos, Sprout, Dash. None of 
 
 ## Troubleshooting
 
-**"TikTok returned an empty response. They are detecting you're a bot."**
-The `tiktok-oss` provider already uses `chromium + headless=False` to bypass detection — you'll see a brief Chromium window flash open during scrapes, that's intentional. If you still get blocked:
+**Search returned far fewer creators than expected / "0 candidates".**
+Hashtag mode is **browser-free** by default — discovery goes through the tikwm relay (pure HTTP, no Chromium). tikwm is an unofficial relay and can rate-limit a bursty caller. The client retries with backoff and tolerates feed variance, so a normal run is stable; but if you hammer it with many runs back-to-back it can hard-block the IP for a while (returns 403). Wait a few minutes and retry, or space runs out. You can tune the gap between challenge-feed reads with `UGCSPY_HASHTAG_FEED_DELAY` (seconds, default 0.3).
 
-```bash
-# Grab an MS token from your own browser, then:
-export MS_TOKEN="<paste-token-from-tiktok.com-cookies>"
-ugcspy search @glossier
-```
+**Walk phase is slow on a big roster.** Stage 2 walks each creator's catalog with yt-dlp at `UGCSPY_WALK_CONCURRENCY` (default 16). yt-dlp hits `www.tiktok.com` directly (not rate-limited like tikwm), so you can raise it on a fast connection — or lower it if you see empty walks on a constrained machine.
 
-To get the token: open tiktok.com in Chrome, DevTools → Application → Cookies → `https://www.tiktok.com` → copy the `msToken` value.
+**Optional Chromium fallback.** Discovery is browser-free by default. If you want the legacy Chromium-assisted discovery as an *extra* source (e.g. on a residential IP where it's stable), set `UGCSPY_USE_CHROMIUM=1` — `install-deps` provisions the Chromium venv for it. It's off by default because it crashes/times out on most hosts and the tikwm sources cover the same ground.
 
-**"TikTokApi not installed."** You haven't run `ugcspy install-deps` yet, or the install failed silently. Re-run it.
-
-**Chromium window keeps flashing.** That's how `tiktok-oss` works — pure headless mode is blocked by TikTok. If this is a dealbreaker (e.g. running on a server with no display), use `scrapecreators` (paid, headless-friendly) instead.
+**"TikTokApi not installed."** The `user` and `keyword` modes still use TikTokApi. Run `ugcspy install-deps` to provision the managed venv (one-time). Hashtag mode's pure-HTTP discovery doesn't require it.
 
 **The brand name is ambiguous (e.g. `#headway` matches a book-summary app AND a therapy platform AND a dance studio).** The hashtag itself doesn't disambiguate — the precision filter only confirms each result has `#headway`, not which Headway. Use a more specific hashtag if the brand has one (e.g. `headwayapp`, `liquiddeath` is unambiguous, `notion` collides with the unrelated word but is mostly safe), or pipe `--json` and filter on related hashtags (`booksummary`, `microlearning`) yourself.
 
