@@ -717,24 +717,35 @@ def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> list[tuple
     return items
 
 
-def _tikwm_creators_in_challenge(cid: str, pages: int) -> set[str]:
+def _tikwm_creators_in_challenge(cid: str, pages: int) -> tuple[set[str], bool]:
     """Deep-page ONE challenge's post feed, collecting every author handle.
-    PURE HTTP. Stops on no-more / empty / stuck cursor / error (fails soft)."""
+    PURE HTTP. Returns (creators, throttled). `throttled` is True when tikwm
+    returned its rate-limit envelope (code != 0) or a connection error — the
+    caller uses this to ABORT the rest of a multi-challenge sweep instead of
+    grinding through every remaining challenge getting nothing. Stops on
+    no-more / empty / stuck cursor / error (fails soft).
+
+    Timeout is short (8s): a healthy challenge-posts call answers in ~1-2s; a
+    long hang means tikwm is throttling, and we'd rather fail fast and back off
+    than stall the whole sweep on 20s timeouts per page."""
     import urllib.parse
     import urllib.request
 
     found: set[str] = set()
     cursor = 0
+    throttled = False
     for _ in range(max(1, pages)):
         qs = urllib.parse.urlencode({"challenge_id": cid, "count": 30, "cursor": cursor})
         url = f"https://www.tikwm.com/api/challenge/posts?{qs}"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 doc = json.loads(resp.read().decode("utf-8", "replace"))
         except Exception:
+            throttled = True  # connection/timeout — treat as throttle signal
             break
         if not isinstance(doc, dict) or doc.get("code") != 0:
+            throttled = True  # tikwm rate-limit / error envelope
             break
         data = doc.get("data") or {}
         items = data.get("videos") or []
@@ -750,11 +761,11 @@ def _tikwm_creators_in_challenge(cid: str, pages: int) -> set[str]:
         if nxt is None or int(nxt) <= cursor:
             break
         cursor = int(nxt)
-    return found
+    return found, throttled
 
 
 def _tikwm_discover_all_brand_hashtags(
-    brand: str, main_pages: int = 40, variant_pages: int = 5
+    brand: str, main_pages: int = 40, variant_pages: int = 3
 ) -> dict[str, int]:
     """OPTIMIZED pure-hashtag discovery: enumerate ALL brand challenges (main +
     every campaign-code/compound variant) and deep-page each feed, unioning the
@@ -765,19 +776,37 @@ def _tikwm_discover_all_brand_hashtags(
     Replaces the noisy full-text keyword search (Method A): every creator here
     came from a real brand HASHTAG feed, so the source is high-purity by
     construction. The main tag is paged deepest (densest feed); variants are
-    paged shallower (each is small) but collectively recover the long tail that
-    only ever tagged an old campaign code."""
+    paged shallower (each is small — most return everything in 1-2 pages).
+
+    Throttle-resilient: if tikwm starts rate-limiting mid-sweep, ABORT the
+    remaining challenges immediately (returning whatever we gathered) rather than
+    grinding through 20 variants on 8s timeouts each. The main tag is read FIRST
+    (densest, highest value), so an early throttle still yields the core roster."""
     import time
 
     scores: dict[str, int] = {}
     challenges = _tikwm_all_brand_challenges(brand)
     delay = _hashtag_feed_delay()
     main = brand.lstrip("#@").lower()
+    consecutive_throttle = 0
     for name, cid in challenges:
         pages = main_pages if name == main else variant_pages
-        creators = _tikwm_creators_in_challenge(cid, pages)
+        creators, throttled = _tikwm_creators_in_challenge(cid, pages)
         for h in creators:
             scores[h] = scores.get(h, 0) + 1
+        if throttled:
+            consecutive_throttle += 1
+            # Two throttled feeds in a row → tikwm is rate-limiting; stop the
+            # sweep with what we have instead of stalling on every remaining one.
+            if consecutive_throttle >= 2:
+                print(
+                    f"[tiktok_fetch] hashtag sweep aborted early (tikwm throttling); "
+                    f"{len(scores)} creators from challenges read so far.",
+                    file=sys.stderr,
+                )
+                break
+        else:
+            consecutive_throttle = 0
         if delay > 0:
             time.sleep(delay)
     return scores

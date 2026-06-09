@@ -293,7 +293,8 @@ def test_discover_all_brand_hashtags_dedups_and_scores(monkeypatch):
         "300": {"dave"},
     }
     monkeypatch.setattr(tf, "_tikwm_all_brand_challenges", lambda brand, search_pages=3: challenges)
-    monkeypatch.setattr(tf, "_tikwm_creators_in_challenge", lambda cid, pages: feeds[cid])
+    # _tikwm_creators_in_challenge now returns (creators, throttled)
+    monkeypatch.setattr(tf, "_tikwm_creators_in_challenge", lambda cid, pages: (feeds[cid], False))
     monkeypatch.setattr(tf, "_hashtag_feed_delay", lambda: 0.0)
     scores = tf._tikwm_discover_all_brand_hashtags("befreed")
     assert scores["alice"] == 2  # surfaced in 2 brand challenges
@@ -301,6 +302,29 @@ def test_discover_all_brand_hashtags_dedups_and_scores(monkeypatch):
     assert scores["carol"] == 1
     assert scores["dave"] == 1
     assert set(scores) == {"alice", "bob", "carol", "dave"}
+
+
+def test_hashtag_sweep_aborts_on_consecutive_throttle(monkeypatch):
+    # main tag returns creators fine, then two throttled feeds in a row → abort,
+    # so the 4th challenge is never read.
+    challenges = [("befreed", "1"), ("befreed_0124", "2"), ("usebefreed", "3"), ("befreed_0099", "4")]
+    calls = []
+
+    def fake_feed(cid, pages):
+        calls.append(cid)
+        if cid == "1":
+            return {"alice", "bob"}, False
+        if cid in ("2", "3"):
+            return set(), True  # throttled
+        return {"should_not_reach"}, False
+
+    monkeypatch.setattr(tf, "_tikwm_all_brand_challenges", lambda brand, search_pages=3: challenges)
+    monkeypatch.setattr(tf, "_tikwm_creators_in_challenge", fake_feed)
+    monkeypatch.setattr(tf, "_hashtag_feed_delay", lambda: 0.0)
+    scores = tf._tikwm_discover_all_brand_hashtags("befreed")
+    # core roster from the main tag survives; the 4th challenge ("4") never read
+    assert scores == {"alice": 1, "bob": 1}
+    assert "4" not in calls
 
 
 class _MonkeyPatch:
