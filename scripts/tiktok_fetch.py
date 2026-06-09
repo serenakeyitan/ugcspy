@@ -136,6 +136,37 @@ TIKWM_PAGE_SIZE = 30
 TIKWM_MAX_PAGES = 10  # cursor pages; ~30/page → up to ~300 candidates per keyword
 
 
+def _tikwm_get(url: str, *, retries: int = 3, timeout: int = 15):
+    """Robust single GET against tikwm with retry + backoff. The relay is flaky
+    in ways that are NOT permanent rate-limits (measured): it intermittently
+    returns a transient `code` != 0 envelope, a slow response, or a dropped
+    connection, then succeeds on the very next try. The old code treated ANY of
+    these as a hard "throttled" signal and aborted the whole walk — which is why
+    identical runs swung between 111 and 29 candidates (feed variance, not real
+    throttling). Here we distinguish:
+      - returns the parsed dict on a clean `code == 0` response;
+      - retries (exp backoff) on connection error / timeout / non-zero envelope;
+      - returns None only after all retries are exhausted (genuine outage).
+    Pure stdlib HTTP, no crash."""
+    import time
+    import urllib.request
+
+    last = None
+    for attempt in range(max(1, retries)):
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                doc = json.loads(resp.read().decode("utf-8", "replace"))
+            if isinstance(doc, dict) and doc.get("code") == 0:
+                return doc
+            last = doc  # non-zero envelope → transient, retry
+        except Exception as e:
+            last = e
+        if attempt < retries - 1:
+            time.sleep(0.8 * (2 ** attempt))  # 0.8, 1.6, 3.2s backoff
+    return None
+
+
 def _tikwm_item_to_raw(item: dict) -> Optional[dict]:
     """Map a tikwm /api/feed/search item to our RawVideo shape. Field names
     differ from TikTokApi: title→caption, play_count→view_count, etc. Returns
@@ -719,49 +750,57 @@ def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> list[tuple
 
 def _tikwm_creators_in_challenge(cid: str, pages: int) -> tuple[set[str], bool]:
     """Deep-page ONE challenge's post feed, collecting every author handle.
-    PURE HTTP. Returns (creators, throttled). `throttled` is True when tikwm
-    returned its rate-limit envelope (code != 0) or a connection error — the
-    caller uses this to ABORT the rest of a multi-challenge sweep instead of
-    grinding through every remaining challenge getting nothing. Stops on
-    no-more / empty / stuck cursor / error (fails soft).
+    Returns (creators, hard_fail). `hard_fail` is True ONLY when a page genuinely
+    could not be fetched after retries (real outage) — NOT for normal feed
+    variance, which the old code wrongly read as a rate-limit and aborted on.
 
-    Timeout is short (8s): a healthy challenge-posts call answers in ~1-2s; a
-    long hang means tikwm is throttling, and we'd rather fail fast and back off
-    than stall the whole sweep on 20s timeouts per page."""
+    Measured reality (why this is robust now): tikwm honors `count` loosely
+    (returns 8–18 videos for a requested 30) and occasionally serves a transient
+    empty/error page mid-feed while `hasMore` is still true. The fix:
+      - every page goes through _tikwm_get (retry + backoff), so a transient
+        blip is retried, not fatal;
+      - a single empty page does NOT end the walk — we advance the cursor and
+        give the feed TOLERANCE consecutive empties before concluding it's truly
+        exhausted (real end-of-feed = hasMore False, or the cursor stops moving);
+      - hard_fail is reserved for _tikwm_get returning None (all retries failed).
+    This makes coverage deterministic across runs instead of swinging with luck."""
     import urllib.parse
-    import urllib.request
 
     found: set[str] = set()
     cursor = 0
-    throttled = False
+    empty_streak = 0
+    TOLERANCE = 2  # consecutive empty/blip pages tolerated before stopping
     for _ in range(max(1, pages)):
         qs = urllib.parse.urlencode({"challenge_id": cid, "count": 30, "cursor": cursor})
-        url = f"https://www.tikwm.com/api/challenge/posts?{qs}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
-        try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                doc = json.loads(resp.read().decode("utf-8", "replace"))
-        except Exception:
-            throttled = True  # connection/timeout — treat as throttle signal
-            break
-        if not isinstance(doc, dict) or doc.get("code") != 0:
-            throttled = True  # tikwm rate-limit / error envelope
-            break
+        doc = _tikwm_get(f"https://www.tikwm.com/api/challenge/posts?{qs}")
+        if doc is None:
+            # genuine fetch failure after retries — report so the caller can
+            # decide, but return what we gathered (don't lose it).
+            return found, True
         data = doc.get("data") or {}
         items = data.get("videos") or []
-        if not items:
-            break
         for item in items:
             author = (item.get("author") or {}).get("unique_id")
             if author:
                 found.add(author.lower())
-        if not data.get("hasMore"):
-            break
+        has_more = data.get("hasMore")
         nxt = data.get("cursor")
+        if not items:
+            empty_streak += 1
+            if empty_streak >= TOLERANCE or not has_more:
+                break
+        else:
+            empty_streak = 0
+        if not has_more:
+            break
         if nxt is None or int(nxt) <= cursor:
+            # cursor didn't advance: nudge past it once, else stop
+            if items:
+                cursor += len(items)
+                continue
             break
         cursor = int(nxt)
-    return found, throttled
+    return found, False
 
 
 def _tikwm_discover_all_brand_hashtags(
@@ -778,35 +817,37 @@ def _tikwm_discover_all_brand_hashtags(
     construction. The main tag is paged deepest (densest feed); variants are
     paged shallower (each is small — most return everything in 1-2 pages).
 
-    Throttle-resilient: if tikwm starts rate-limiting mid-sweep, ABORT the
-    remaining challenges immediately (returning whatever we gathered) rather than
-    grinding through 20 variants on 8s timeouts each. The main tag is read FIRST
-    (densest, highest value), so an early throttle still yields the core roster."""
+    Outage-resilient: each page is fetched via _tikwm_get (retry + backoff), so
+    normal feed variance no longer aborts the sweep. Only a genuine fetch failure
+    after retries (hard_fail) counts; two hard-fails in a row means the relay is
+    actually down, so we stop with what we have. The main tag is read FIRST
+    (densest, highest value), so even a mid-sweep outage still yields the core
+    roster."""
     import time
 
     scores: dict[str, int] = {}
     challenges = _tikwm_all_brand_challenges(brand)
     delay = _hashtag_feed_delay()
     main = brand.lstrip("#@").lower()
-    consecutive_throttle = 0
+    consecutive_fail = 0
     for name, cid in challenges:
         pages = main_pages if name == main else variant_pages
-        creators, throttled = _tikwm_creators_in_challenge(cid, pages)
+        creators, hard_fail = _tikwm_creators_in_challenge(cid, pages)
         for h in creators:
             scores[h] = scores.get(h, 0) + 1
-        if throttled:
-            consecutive_throttle += 1
-            # Two throttled feeds in a row → tikwm is rate-limiting; stop the
-            # sweep with what we have instead of stalling on every remaining one.
-            if consecutive_throttle >= 2:
+        if hard_fail:
+            consecutive_fail += 1
+            # Two genuine fetch failures in a row → relay is down; stop with what
+            # we have instead of grinding through every remaining challenge.
+            if consecutive_fail >= 2:
                 print(
-                    f"[tiktok_fetch] hashtag sweep aborted early (tikwm throttling); "
-                    f"{len(scores)} creators from challenges read so far.",
+                    f"[tiktok_fetch] hashtag sweep stopped early (tikwm unreachable "
+                    f"after retries); {len(scores)} creators gathered so far.",
                     file=sys.stderr,
                 )
                 break
         else:
-            consecutive_throttle = 0
+            consecutive_fail = 0
         if delay > 0:
             time.sleep(delay)
     return scores
