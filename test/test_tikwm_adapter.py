@@ -292,11 +292,12 @@ def test_discover_all_brand_hashtags_dedups_and_scores(monkeypatch):
         "200": {"alice", "carol"},  # alice in 2 challenges -> higher score
         "300": {"dave"},
     }
-    monkeypatch.setattr(tf, "_tikwm_all_brand_challenges", lambda brand, search_pages=3: challenges)
+    monkeypatch.setattr(tf, "_tikwm_all_brand_challenges", lambda brand, search_pages=3: (challenges, False))
     # _tikwm_creators_in_challenge now returns (creators, throttled)
     monkeypatch.setattr(tf, "_tikwm_creators_in_challenge", lambda cid, pages: (feeds[cid], False))
     monkeypatch.setattr(tf, "_hashtag_feed_delay", lambda: 0.0)
-    scores = tf._tikwm_discover_all_brand_hashtags("befreed")
+    scores, relay_down = tf._tikwm_discover_all_brand_hashtags("befreed")
+    assert relay_down is False
     assert scores["alice"] == 2  # surfaced in 2 brand challenges
     assert scores["bob"] == 1
     assert scores["carol"] == 1
@@ -318,13 +319,201 @@ def test_hashtag_sweep_aborts_on_consecutive_throttle(monkeypatch):
             return set(), True  # throttled
         return {"should_not_reach"}, False
 
-    monkeypatch.setattr(tf, "_tikwm_all_brand_challenges", lambda brand, search_pages=3: challenges)
+    monkeypatch.setattr(tf, "_tikwm_all_brand_challenges", lambda brand, search_pages=3: (challenges, False))
     monkeypatch.setattr(tf, "_tikwm_creators_in_challenge", fake_feed)
     monkeypatch.setattr(tf, "_hashtag_feed_delay", lambda: 0.0)
-    scores = tf._tikwm_discover_all_brand_hashtags("befreed")
+    scores, relay_down = tf._tikwm_discover_all_brand_hashtags("befreed")
     # core roster from the main tag survives; the 4th challenge ("4") never read
     assert scores == {"alice": 1, "bob": 1}
+    assert relay_down is True  # hard-fails must surface as a relay-down signal
     assert "4" not in calls
+
+
+# ── _tikwm_get retry/backoff contract ─────────────────────────────────────────
+# _tikwm_get encodes the fix for the nondeterministic 111-vs-29 discovery swings:
+# dict only on a clean code==0 envelope, retry with backoff on connection error /
+# timeout / non-zero envelope, None only after all retries. Every other test stubs
+# ABOVE it; these execute the function itself so a regression (single-shot
+# "simplification", inverted code check, returning the non-zero envelope) fails.
+
+import json as _json
+import time as _time
+import urllib.request as _urlreq
+
+
+class _FakeResp:
+    """Context-manager response stub for urllib.request.urlopen."""
+
+    def __init__(self, payload):
+        self._body = _json.dumps(payload).encode("utf-8")
+
+    def read(self, n=-1):
+        return self._body if n is None or n < 0 else self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+def _scripted_urlopen(script, calls):
+    """urlopen stub: pops the next step from `script`; an Exception raises,
+    anything else is wrapped in _FakeResp. Records each call in `calls`."""
+
+    def fake_urlopen(req, timeout=0):
+        calls.append(req.full_url)
+        step = script.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return _FakeResp(step)
+
+    return fake_urlopen
+
+
+def test_tikwm_get_retries_transients_then_returns_doc(monkeypatch):
+    # connection error → non-zero envelope → clean doc: must return the doc.
+    calls: list = []
+    script = [
+        ConnectionError("reset by peer"),
+        {"code": 1, "msg": "throttle"},
+        {"code": 0, "data": {"ok": True}},
+    ]
+    sleeps: list = []
+    monkeypatch.setattr(_urlreq, "urlopen", _scripted_urlopen(script, calls))
+    monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+    doc = tf._tikwm_get("https://example.invalid/api")
+    assert doc == {"code": 0, "data": {"ok": True}}
+    assert len(calls) == 3  # exactly 3 attempts
+    assert len(sleeps) == 2  # backoff between attempts, none after success
+
+
+def test_tikwm_get_returns_none_after_all_retries(monkeypatch):
+    calls: list = []
+    script = [ConnectionError("a"), {"code": -1}, ConnectionError("b")]
+    monkeypatch.setattr(_urlreq, "urlopen", _scripted_urlopen(script, calls))
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+    assert tf._tikwm_get("https://example.invalid/api") is None
+    assert len(calls) == 3  # all retries consumed before giving up
+
+
+def test_tikwm_get_clean_first_try_is_single_call_no_sleep(monkeypatch):
+    calls: list = []
+    sleeps: list = []
+    script = [{"code": 0, "data": {"videos": []}}]
+    monkeypatch.setattr(_urlreq, "urlopen", _scripted_urlopen(script, calls))
+    monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+    doc = tf._tikwm_get("https://example.invalid/api")
+    assert doc == {"code": 0, "data": {"videos": []}}
+    assert len(calls) == 1 and sleeps == []
+
+
+def test_tikwm_get_rejects_oversized_body(monkeypatch):
+    # An over-cap body is a failed attempt (untrusted relay must not OOM us).
+    class _HugeResp:
+        def read(self, n=-1):
+            size = tf.TIKWM_MAX_BODY + 1 if (n is None or n < 0) else n
+            return b"x" * size
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(_urlreq, "urlopen", lambda req, timeout=0: _HugeResp())
+    monkeypatch.setattr(_time, "sleep", lambda s: None)
+    assert tf._tikwm_get("https://example.invalid/api", retries=1) is None
+
+
+# ── _tikwm_creators_in_challenge: tolerance / cursor state machine ────────────
+# The deterministic-coverage logic: TOLERANCE=2 consecutive-empty allowance, the
+# stuck-cursor nudge, the self-advance on a stuck EMPTY page (without which the
+# tolerance is dead code — tikwm echoes the cursor on blip pages), and the
+# partial-set hard_fail return. All previously monkeypatched away by sweep tests.
+
+
+def _challenge_page(handles, has_more=True, cursor=0):
+    return {
+        "code": 0,
+        "data": {
+            "videos": [{"author": {"unique_id": h}} for h in handles],
+            "hasMore": has_more,
+            "cursor": cursor,
+        },
+    }
+
+
+def _scripted_tikwm_get(pages, calls):
+    """tf._tikwm_get stub returning scripted pages in call order; records the
+    requested cursor (parsed from the URL) per call."""
+    import urllib.parse
+
+    def fake_get(url, **kwargs):
+        qs = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+        calls.append(int(qs["cursor"][0]))
+        return pages[len(calls) - 1]
+
+    return fake_get
+
+
+def test_challenge_walk_tolerates_single_empty_pages(monkeypatch):
+    # [items, empty, items, empty, empty] → pages 1+3 collected, walk stops only
+    # after TWO consecutive empties (the docstring's TOLERANCE promise).
+    calls: list = []
+    pages = [
+        _challenge_page(["a1", "a2"], cursor=30),
+        _challenge_page([], cursor=60),
+        _challenge_page(["b1"], cursor=90),
+        _challenge_page([], cursor=120),
+        _challenge_page([], cursor=150),
+    ]
+    monkeypatch.setattr(tf, "_tikwm_get", _scripted_tikwm_get(pages, calls))
+    found, hard_fail = tf._tikwm_creators_in_challenge("cid", pages=10)
+    assert found == {"a1", "a2", "b1"}
+    assert hard_fail is False
+    assert len(calls) == 5  # stopped at the 2nd consecutive empty, not page 10
+
+
+def test_challenge_walk_self_advances_on_stuck_empty_page(monkeypatch):
+    # A transient empty page that ECHOES the cursor (tikwm's usual blip shape)
+    # must not end the walk — the cursor self-advances and page 3 is collected.
+    calls: list = []
+    pages = [
+        _challenge_page(["a"], cursor=30),
+        _challenge_page([], cursor=30),  # empty AND cursor stuck at 30
+        _challenge_page(["b"], has_more=False, cursor=60),
+    ]
+    monkeypatch.setattr(tf, "_tikwm_get", _scripted_tikwm_get(pages, calls))
+    found, hard_fail = tf._tikwm_creators_in_challenge("cid", pages=10)
+    assert found == {"a", "b"}
+    assert hard_fail is False
+    assert calls == [0, 30, 60]  # the blip page was skipped past, not fatal
+
+
+def test_challenge_walk_nudges_stuck_cursor_with_items(monkeypatch):
+    # A non-empty page whose cursor didn't advance: nudge past it and continue.
+    calls: list = []
+    pages = [
+        _challenge_page(["a"], cursor=0),  # echoes cursor 0
+        _challenge_page(["b"], has_more=False, cursor=0),
+    ]
+    monkeypatch.setattr(tf, "_tikwm_get", _scripted_tikwm_get(pages, calls))
+    found, hard_fail = tf._tikwm_creators_in_challenge("cid", pages=10)
+    assert found == {"a", "b"}
+    assert hard_fail is False
+    assert calls == [0, 1]  # nudged by len(items), kept walking
+
+
+def test_challenge_walk_returns_partial_set_on_outage(monkeypatch):
+    # _tikwm_get None (all retries failed) on page 2 → (page-1 creators, True),
+    # NOT an empty set — partial coverage is kept, outage is reported.
+    calls: list = []
+    pages = [_challenge_page(["a1", "a2"], cursor=30), None]
+    monkeypatch.setattr(tf, "_tikwm_get", _scripted_tikwm_get(pages, calls))
+    found, hard_fail = tf._tikwm_creators_in_challenge("cid", pages=10)
+    assert found == {"a1", "a2"}
+    assert hard_fail is True
 
 
 class _MonkeyPatch:
@@ -361,5 +550,7 @@ if __name__ == "__main__":
             failed += 1
             print(f"  ✗ {fn.__name__}")
             traceback.print_exc()
+        finally:
+            mp.undo()  # patches must not leak into the next test
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)

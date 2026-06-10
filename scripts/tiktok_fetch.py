@@ -28,6 +28,36 @@ def fail(msg: str, code: int = 1) -> None:
     sys.exit(code)
 
 
+def _as_int(value) -> Optional[int]:
+    """Parse an UNTRUSTED external value (tikwm/yt-dlp cursor, count, ts) as an
+    int; None when unparseable. The relay is an unofficial third party — a
+    malformed field must fail soft (end-of-feed / dropped item), never crash
+    the run with a ValueError traceback."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """_as_int with a default — for metric counts where 0 is the sane fallback."""
+    n = _as_int(value)
+    return n if n is not None else default
+
+
+def _safe_ts(value) -> Optional[datetime]:
+    """Parse an untrusted epoch timestamp into an aware UTC datetime, or None on
+    a non-numeric / out-of-range value. One malformed item drops that ITEM,
+    never the whole search."""
+    n = _as_int(value)
+    if n is None:
+        return None
+    try:
+        return datetime.fromtimestamp(n, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def main() -> None:
     try:
         payload = json.loads(sys.stdin.read())
@@ -86,7 +116,18 @@ async def _create_api():
         kwargs["ms_tokens"] = [ms_token]
     api = TikTokApi()
     await api.__aenter__()
-    await api.create_sessions(**kwargs)
+    try:
+        await api.create_sessions(**kwargs)
+    except BaseException:
+        # create_sessions failing ('No valid sessions found' is the common case
+        # on datacenter hosts) used to leak the already-entered context: a
+        # headful Chromium + playwright driver lingering for the rest of the
+        # run. Close the browser before propagating.
+        try:
+            await api.__aexit__(None, None, None)
+        except Exception:
+            pass
+        raise
     return api
 
 
@@ -96,7 +137,9 @@ def _video_to_raw(d: dict, fallback_handle: Optional[str] = None) -> Optional[di
     create_ts = d.get("createTime") or 0
     if not create_ts:
         return None
-    posted_at = datetime.fromtimestamp(create_ts, tz=timezone.utc)
+    posted_at = _safe_ts(create_ts)
+    if posted_at is None:
+        return None
     stats = d.get("stats", {}) or {}
     video_id = d.get("id") or ""
     author = (d.get("author") or {}).get("uniqueId") or fallback_handle or ""
@@ -109,10 +152,10 @@ def _video_to_raw(d: dict, fallback_handle: Optional[str] = None) -> Optional[di
         "caption": (d.get("desc") or "")[:1000],
         "thumbnail_url": (d.get("video", {}) or {}).get("cover", ""),
         "video_url": f"https://www.tiktok.com/@{author}/video/{video_id}" if author else f"https://www.tiktok.com/video/{video_id}",
-        "view_count": int(stats.get("playCount", 0) or 0),
-        "like_count": int(stats.get("diggCount", 0) or 0),
-        "comment_count": int(stats.get("commentCount", 0) or 0),
-        "share_count": int(stats.get("shareCount", 0) or 0),
+        "view_count": _safe_int(stats.get("playCount", 0) or 0),
+        "like_count": _safe_int(stats.get("diggCount", 0) or 0),
+        "comment_count": _safe_int(stats.get("commentCount", 0) or 0),
+        "share_count": _safe_int(stats.get("shareCount", 0) or 0),
         "_author": author,  # used for downstream UI; stripped on serialization if not in RawVideo
     }
 
@@ -134,6 +177,7 @@ def _video_to_raw(d: dict, fallback_handle: Optional[str] = None) -> Optional[di
 TIKWM_SEARCH_URL = "https://www.tikwm.com/api/feed/search"
 TIKWM_PAGE_SIZE = 30
 TIKWM_MAX_PAGES = 10  # cursor pages; ~30/page → up to ~300 candidates per keyword
+TIKWM_MAX_BODY = 10 * 1024 * 1024  # 10MB cap on relay responses (untrusted source)
 
 
 def _tikwm_get(url: str, *, retries: int = 3, timeout: int = 15):
@@ -156,7 +200,12 @@ def _tikwm_get(url: str, *, retries: int = 3, timeout: int = 15):
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                doc = json.loads(resp.read().decode("utf-8", "replace"))
+                body = resp.read(TIKWM_MAX_BODY + 1)
+            if len(body) > TIKWM_MAX_BODY:
+                # Untrusted relay: never slurp an unbounded body. Treat an
+                # oversized response as a failed attempt (retry, then None).
+                raise ValueError("tikwm response exceeded the 10MB cap")
+            doc = json.loads(body.decode("utf-8", "replace"))
             if isinstance(doc, dict) and doc.get("code") == 0:
                 return doc
             last = doc  # non-zero envelope → transient, retry
@@ -171,12 +220,16 @@ def _tikwm_item_to_raw(item: dict) -> Optional[dict]:
     """Map a tikwm /api/feed/search item to our RawVideo shape. Field names
     differ from TikTokApi: title→caption, play_count→view_count, etc. Returns
     None on a malformed/old item."""
+    if not isinstance(item, dict):
+        return None  # untrusted relay: a non-object item drops, never crashes
     create_ts = item.get("create_time") or 0
     video_id = item.get("video_id") or item.get("id") or ""
     if not create_ts or not video_id:
         return None
     author = (item.get("author") or {}).get("unique_id") or ""
-    posted_at = datetime.fromtimestamp(int(create_ts), tz=timezone.utc)
+    posted_at = _safe_ts(create_ts)
+    if posted_at is None:
+        return None  # malformed/hostile timestamp → drop the item, not the run
     return {
         "platform": "tiktok",
         "external_id": str(video_id),
@@ -188,30 +241,26 @@ def _tikwm_item_to_raw(item: dict) -> Optional[dict]:
             if author
             else f"https://www.tiktok.com/video/{video_id}"
         ),
-        "view_count": int(item.get("play_count", 0) or 0),
-        "like_count": int(item.get("digg_count", 0) or 0),
-        "comment_count": int(item.get("comment_count", 0) or 0),
-        "share_count": int(item.get("share_count", 0) or 0),
+        "view_count": _safe_int(item.get("play_count", 0) or 0),
+        "like_count": _safe_int(item.get("digg_count", 0) or 0),
+        "comment_count": _safe_int(item.get("comment_count", 0) or 0),
+        "share_count": _safe_int(item.get("share_count", 0) or 0),
         "_author": author,
     }
 
 
 def _tikwm_fetch_page(keyword: str, cursor: int) -> Optional[dict]:
-    """One tikwm search page. Returns the parsed `data` object or None on any
-    failure (network, non-JSON/Cloudflare, code!=0). Fails soft by design."""
+    """One tikwm search page. Returns the parsed `data` object or None only
+    after _tikwm_get's retry + backoff is exhausted (genuine outage). The old
+    single-shot urlopen made one transient blip silently truncate keyword
+    results — the exact 111-vs-29 swing _tikwm_get was written to fix. Fails
+    soft by design."""
     import urllib.parse
-    import urllib.request
 
     qs = urllib.parse.urlencode({"keywords": keyword, "count": TIKWM_PAGE_SIZE, "cursor": cursor})
     url = f"{TIKWM_SEARCH_URL}?{qs}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            body = resp.read().decode("utf-8", "replace")
-        doc = json.loads(body)
-    except Exception:
-        return None  # network / timeout / non-JSON (Cloudflare challenge)
-    if not isinstance(doc, dict) or doc.get("code") != 0:
+    doc = _tikwm_get(url, timeout=20)
+    if doc is None:
         return None
     data = doc.get("data")
     return data if isinstance(data, dict) else None
@@ -245,10 +294,10 @@ def run_keyword(keyword: str, days: int) -> None:
             videos.append(raw)
         if not data.get("hasMore"):
             break
-        next_cursor = data.get("cursor")
-        if next_cursor is None or int(next_cursor) <= cursor:
-            break  # guard against a stuck/looping cursor
-        cursor = int(next_cursor)
+        next_cursor = _as_int(data.get("cursor"))
+        if next_cursor is None or next_cursor <= cursor:
+            break  # guard against a stuck/looping/non-numeric cursor
+        cursor = next_cursor
 
     print(json.dumps(videos))
 
@@ -384,12 +433,34 @@ async def run_hashtag(tag: str, days: int) -> None:
     #      follow finds them.
     # hit_count from source 1 = how many distinct brand challenges a creator was
     # in; a higher count is a stronger brand signal and floats them up the walk.
-    kw_scores = _tikwm_discover_all_brand_hashtags(tag)
+    kw_scores, relay_down = _tikwm_discover_all_brand_hashtags(tag)
+
+    # Chromium discovery is OFF by default now (it crashes/times out and the two
+    # tikwm sources cover the same ground). Set UGCSPY_USE_CHROMIUM=1 to re-enable
+    # it as an additional source (e.g. on a residential IP where it's stable).
+    use_chromium = os.environ.get("UGCSPY_USE_CHROMIUM", "").strip() == "1"
+
+    # An OUTAGE must not masquerade as an authoritative empty: zero creators
+    # BECAUSE tikwm was unreachable is not "this brand has no UGC". Fail loud
+    # (JSON error + nonzero exit) so the caller can retry, instead of emitting
+    # [] with exit 0. A genuinely-empty brand (relay healthy, zero creators)
+    # still completes normally below.
+    if not kw_scores and relay_down and not use_chromium:
+        print(
+            "[tiktok_fetch] discovery found 0 creators because tikwm was "
+            "unreachable after retries — reporting an outage, not an empty brand.",
+            file=sys.stderr,
+        )
+        fail("tikwm relay unreachable during hashtag discovery (outage, not an empty brand); retry later")
+
     # Bonus for multi-challenge presence so core creators lead the walk order.
     for h in list(kw_scores.keys()):
         kw_scores[h] = kw_scores[h] + 3  # baseline: surfaced by a real brand tag
-    # Source 2: SNOWBALL from the strongest hashtag finds (depth-1).
-    snowball_seeds = [h for h, v in kw_scores.items() if v >= 4] or list(kw_scores.keys())
+    # Source 2: SNOWBALL from the strongest hashtag finds (depth-1), strongest
+    # FIRST — _tikwm_snowball_creators caps at 60 seeds, so the order decides
+    # WHICH creators get walked. (The old `v >= 4` filter was a no-op after the
+    # +3 baseline and left the cap slicing arbitrary dict order.)
+    snowball_seeds = [h for h, _ in sorted(kw_scores.items(), key=lambda kv: -kv[1])]
     snow_scores = _tikwm_snowball_creators(snowball_seeds)
     # A handle followed by N known brand creators gets +2 per follower-seed: being
     # inside the brand's follow-collective is a strong brand signal on its own.
@@ -407,11 +478,6 @@ async def run_hashtag(tag: str, days: int) -> None:
         f"{strong} high-signal (multi-challenge); walking by signal rank.",
         file=sys.stderr,
     )
-
-    # Chromium discovery is OFF by default now (it crashes/times out and the two
-    # tikwm sources cover the same ground). Set UGCSPY_USE_CHROMIUM=1 to re-enable
-    # it as an additional source (e.g. on a residential IP where it's stable).
-    use_chromium = os.environ.get("UGCSPY_USE_CHROMIUM", "").strip() == "1"
 
     api = None
     chromium_ok = False
@@ -542,7 +608,7 @@ def _max_seed_creators() -> int:
     try:
         n = int(raw)
         if n >= 1:
-            return n
+            return min(n, 2000)  # clamp: a roster beyond this is hours of walks
     except (ValueError, TypeError):
         pass
     return 200
@@ -606,10 +672,10 @@ def _tikwm_discover_scored(
                 scores[h] = scores.get(h, 0) + 1 + (2 if is_brand_title else 0)
             if not data.get("hasMore"):
                 break
-            nxt = data.get("cursor")
-            if nxt is None or int(nxt) <= cursor:
+            nxt = _as_int(data.get("cursor"))
+            if nxt is None or nxt <= cursor:
                 break
-            cursor = int(nxt)
+            cursor = nxt
     return scores
 
 
@@ -683,7 +749,7 @@ def _is_brand_hashtag(name: str, brand: str) -> bool:
     return False
 
 
-def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> list[tuple[str, str]]:
+def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> tuple[list[tuple[str, str]], bool]:
     """Enumerate EVERY brand-related challenge (the main #<brand> tag plus all
     campaign-code variants like #befreed_0124 and compounds like #usebefreed),
     each paired with its CORRECT challenge_id.
@@ -694,25 +760,26 @@ def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> list[tuple
     — so a variant's feed was never actually read. Here we read the search list
     in full and keep each (name -> its own id), filtered by _is_brand_hashtag so
     #befree / #freed noise is dropped at the NAME level (no full-text search, no
-    per-video work). PURE HTTP.
+    per-video work). PURE HTTP, via _tikwm_get (retry + backoff) — this is the
+    FIRST link in the discovery chain, and a single transient blip here used to
+    silently zero the entire hashtag search (empty roster, clean exit 0).
 
-    Returns a list of (tag_name, challenge_id), deduped by id, main tag first."""
+    Returns (items, fetch_failed): items is a list of (tag_name, challenge_id),
+    deduped by id, main tag first; fetch_failed is True when a page genuinely
+    could not be fetched after retries (relay outage), so the caller can tell
+    an outage apart from a brand with no hashtags."""
     import urllib.parse
-    import urllib.request
 
     b = brand.lstrip("#@").lower()
     by_id: dict[str, str] = {}
     cursor = 0
+    fetch_failed = False
     for _ in range(max(1, search_pages)):
         qs = urllib.parse.urlencode({"keywords": b, "count": 30, "cursor": cursor})
         url = f"https://www.tikwm.com/api/challenge/search?{qs}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                doc = json.loads(resp.read().decode("utf-8", "replace"))
-        except Exception:
-            break
-        if not isinstance(doc, dict) or doc.get("code") != 0:
+        doc = _tikwm_get(url, timeout=20)
+        if doc is None:
+            fetch_failed = True
             break
         data = doc.get("data") or {}
         challenges = data.get("challenge_list") or data.get("challenges") or []
@@ -728,15 +795,25 @@ def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> list[tuple
             by_id.setdefault(cid, name.lstrip("#@").lower())
         if not data.get("hasMore"):
             break
-        nxt = data.get("cursor")
-        if nxt is None or int(nxt) <= cursor:
+        nxt = _as_int(data.get("cursor"))
+        if nxt is None or nxt <= cursor:
             break
-        cursor = int(nxt)
+        cursor = nxt
 
     # Order: exact main tag first, then the rest (so the densest feed leads).
     items = [(nm, cid) for cid, nm in by_id.items()]
     items.sort(key=lambda kv: (kv[0] != b, kv[0]))
-    return items
+    if not items:
+        reason = (
+            "tikwm unreachable after retries"
+            if fetch_failed
+            else "no brand-matching hashtags in the search results"
+        )
+        print(
+            f"[tiktok_fetch] challenge enumeration for '{b}' came back empty ({reason}).",
+            file=sys.stderr,
+        )
+    return items, fetch_failed
 
 
 def _tikwm_creators_in_challenge(cid: str, pages: int) -> tuple[set[str], bool]:
@@ -775,7 +852,7 @@ def _tikwm_creators_in_challenge(cid: str, pages: int) -> tuple[set[str], bool]:
             if author:
                 found.add(author.lower())
         has_more = data.get("hasMore")
-        nxt = data.get("cursor")
+        nxt = _as_int(data.get("cursor"))
         if not items:
             empty_streak += 1
             if empty_streak >= TOLERANCE or not has_more:
@@ -784,19 +861,26 @@ def _tikwm_creators_in_challenge(cid: str, pages: int) -> tuple[set[str], bool]:
             empty_streak = 0
         if not has_more:
             break
-        if nxt is None or int(nxt) <= cursor:
-            # cursor didn't advance: nudge past it once, else stop
+        if nxt is None or nxt <= cursor:
+            # cursor didn't advance: nudge past it and keep walking.
             if items:
                 cursor += len(items)
-                continue
-            break
-        cursor = int(nxt)
+            else:
+                # Transient empty page that ECHOED the cursor (tikwm's usual
+                # blip shape): self-advance so the TOLERANCE allowance above can
+                # actually fire — breaking here ended the walk on the FIRST
+                # mid-feed blip, which is the run-to-run nondeterminism this
+                # state machine exists to fix. (empty_streak < TOLERANCE is
+                # guaranteed here; the streak check above breaks otherwise.)
+                cursor += TIKWM_PAGE_SIZE
+            continue
+        cursor = nxt
     return found, False
 
 
 def _tikwm_discover_all_brand_hashtags(
     brand: str, main_pages: int = 40, variant_pages: int = 3
-) -> dict[str, int]:
+) -> tuple[dict[str, int], bool]:
     """OPTIMIZED pure-hashtag discovery: enumerate ALL brand challenges (main +
     every campaign-code/compound variant) and deep-page each feed, unioning the
     creators. Returns {handle: hit_count} where hit_count = how many distinct
@@ -814,11 +898,15 @@ def _tikwm_discover_all_brand_hashtags(
     after retries (hard_fail) counts; two hard-fails in a row means the relay is
     actually down, so we stop with what we have. The main tag is read FIRST
     (densest, highest value), so even a mid-sweep outage still yields the core
-    roster."""
+    roster.
+
+    Returns (scores, relay_down): relay_down is True when the relay genuinely
+    failed after retries at any point (challenge enumeration or a feed read),
+    so the caller can distinguish 'no creators exist' from 'tikwm was down'."""
     import time
 
     scores: dict[str, int] = {}
-    challenges = _tikwm_all_brand_challenges(brand)
+    challenges, relay_down = _tikwm_all_brand_challenges(brand)
     delay = _hashtag_feed_delay()
     main = brand.lstrip("#@").lower()
     consecutive_fail = 0
@@ -828,6 +916,7 @@ def _tikwm_discover_all_brand_hashtags(
         for h in creators:
             scores[h] = scores.get(h, 0) + 1
         if hard_fail:
+            relay_down = True
             consecutive_fail += 1
             # Two genuine fetch failures in a row → relay is down; stop with what
             # we have instead of grinding through every remaining challenge.
@@ -842,7 +931,7 @@ def _tikwm_discover_all_brand_hashtags(
             consecutive_fail = 0
         if delay > 0:
             time.sleep(delay)
-    return scores
+    return scores, relay_down
 
 
 def _hashtag_feed_delay() -> float:
@@ -899,28 +988,24 @@ def _tikwm_discover_by_hashtag(tag: str, pages: int = 20) -> list[str]:
                 found.add(author.lower())
         if not data.get("hasMore"):
             break
-        nxt = data.get("cursor")
-        if nxt is None or int(nxt) <= cursor:
+        nxt = _as_int(data.get("cursor"))
+        if nxt is None or nxt <= cursor:
             break
-        cursor = int(nxt)
+        cursor = nxt
     return sorted(found)
 
 
 def _tikwm_user_id(handle: str) -> Optional[str]:
     """Resolve a TikTok handle to tikwm's numeric user id (needed because the
-    /following endpoint takes a numeric id, not a handle). PURE HTTP."""
+    /following endpoint takes a numeric id, not a handle). PURE HTTP, via the
+    retry client — with 4 snowball workers hammering tikwm, a single Cloudflare
+    blip on this resolution silently zeroed the seed's entire following list."""
     import urllib.parse
-    import urllib.request
 
     qs = urllib.parse.urlencode({"unique_id": handle.lstrip("@")})
     url = f"https://www.tikwm.com/api/user/info?{qs}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            doc = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception:
-        return None
-    if not isinstance(doc, dict) or doc.get("code") != 0:
+    doc = _tikwm_get(url, retries=2, timeout=20)
+    if doc is None:
         return None
     uid = ((doc.get("data") or {}).get("user") or {}).get("id")
     return str(uid) if uid else None
@@ -1046,7 +1131,7 @@ def _creator_walk_concurrency() -> int:
     try:
         n = int(raw)
         if n >= 1:
-            return n
+            return min(n, 64)  # clamp: past this it's just local CPU/net thrash
     except (ValueError, TypeError):
         pass
     return 16
@@ -1315,14 +1400,16 @@ def _discover_campaign_codes(videos, tag):
     `#befreed_0117` mentioned in the captions of pass-1 results, that's
     a live campaign code worth querying directly for more coverage.
 
-    Returns a sorted list of unique 4-digit codes (max 12 to bound runtime)."""
+    Returns a sorted list of unique codes (max 12 to bound runtime)."""
     import re
     code_pattern = re.compile(r"#" + re.escape(tag) + r"_(\d{2,4})\b", re.IGNORECASE)
     seen_codes = set()
     for v in videos:
         for match in code_pattern.finditer(v.get("caption") or ""):
-            code = match.group(1).zfill(4)
-            seen_codes.add(code)
+            # Keep the code VERBATIM: hashtag names are literal strings, so
+            # zero-padding '#befreed_117' to 'befreed_0117' queried a different
+            # (almost certainly empty) hashtag and never read the real feed.
+            seen_codes.add(match.group(1))
     # Cap at 12 to bound wall time (each adds ~3-8s scrape)
     return sorted(seen_codes)[:12]
 
@@ -1390,9 +1477,15 @@ def _caption_maybe_truncates_brand(caption, tag) -> bool:
     m = re.search(r"[#@]([a-z0-9_]+)$", low)
     if m:
         frag = m.group(1)
-        # full or campaign-suffixed forms are NOT truncation — they'd have passed
-        if frag == brand or frag.startswith(brand):
-            return False
+        if frag.startswith(brand):
+            # frag EXTENDS the brand token. Complete accepted forms (#befreed,
+            # #befreed_0124, #befreedapp) pass _is_real_ugc_caption and never
+            # reach this function — so a brand-extending frag here is either a
+            # clipped accepted form ('#befreed_0124' cut at the underscore
+            # arrives as '#befreed_'; '#befreedapp' cut to '#befreeda') which we
+            # rescue, or a genuinely different tag ('#befreedom') which we drop.
+            rest = frag[len(brand):]
+            return rest == "_" or bool(rest and "app".startswith(rest))
         if len(frag) >= 3 and brand.startswith(frag) and frag != brand:
             return True
     # Signal 2: caption was explicitly ellipsis-clipped AND the brand's leading
@@ -1478,7 +1571,7 @@ def _ytdlp_rescue_budget() -> int:
     try:
         n = int(raw)
         if n >= 0:
-            return n
+            return min(n, 200)  # clamp: rescue calls hit the rate-limited relay
     except (ValueError, TypeError):
         pass
     return 25
@@ -1536,7 +1629,19 @@ def _ytdlp_creator_catalog(handle: str, max_retries: int = 3) -> list[dict]:
     last_err = ""
     for attempt in range(max_retries):
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=walk_timeout)
+            # encoding/errors pinned: yt-dlp emits UTF-8 JSON, but text=True
+            # alone decodes with the LOCALE encoding and errors='strict' — on a
+            # non-UTF-8 locale an emoji-laden caption raised UnicodeDecodeError
+            # (a ValueError, NOT json.JSONDecodeError) and escaped the except
+            # below, aborting the whole multi-minute search.
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=walk_timeout,
+            )
             if proc.returncode != 0:
                 last_err = (proc.stderr or "")[-200:]
                 time.sleep(2 * (attempt + 1))  # backoff before retry
@@ -1546,6 +1651,11 @@ def _ytdlp_creator_catalog(handle: str, max_retries: int = 3) -> list[dict]:
             last_err = str(e)[-200:]
             time.sleep(2 * (attempt + 1))
             continue
+        if not isinstance(doc, dict):
+            # valid JSON but not the expected object — treat as a failed attempt
+            last_err = f"yt-dlp emitted non-object JSON ({type(doc).__name__})"
+            time.sleep(2 * (attempt + 1))
+            continue
         entries = doc.get("entries") or []
         out: list[dict] = []
         for e in entries:
@@ -1553,19 +1663,31 @@ def _ytdlp_creator_catalog(handle: str, max_retries: int = 3) -> list[dict]:
             if raw is not None:
                 out.append(raw)
         return out
-    return []  # all retries failed → caller falls back to TikTokApi
+    # All retries failed → caller falls back to TikTokApi (or empty). Say WHY:
+    # a silent [] makes a broken/blocked yt-dlp extractor indistinguishable from
+    # "this creator posted nothing in the window".
+    print(
+        f"[tiktok_fetch] yt-dlp walk failed for @{handle.lstrip('@')} after "
+        f"{max_retries} attempts: {last_err}",
+        file=sys.stderr,
+    )
+    return []
 
 
 def _ytdlp_entry_to_raw(e: dict, fallback_handle: str) -> Optional[dict]:
     """Map a yt-dlp --flat-playlist entry to our RawVideo shape. yt-dlp field
     names differ from TikTokApi: title/description→caption, timestamp→posted_at,
     repost_count→share_count. Returns None on a malformed entry."""
+    if not isinstance(e, dict):
+        return None  # a non-object entry drops, never crashes the walk
     video_id = e.get("id") or ""
     ts = e.get("timestamp")
     if not video_id or not ts:
         return None
     author = e.get("uploader") or e.get("channel") or fallback_handle.lstrip("@")
-    posted_at = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+    posted_at = _safe_ts(ts)
+    if posted_at is None:
+        return None  # malformed timestamp → drop the entry, not the walk
     return {
         "platform": "tiktok",
         "external_id": str(video_id),
@@ -1574,10 +1696,10 @@ def _ytdlp_entry_to_raw(e: dict, fallback_handle: str) -> Optional[dict]:
         "thumbnail_url": e.get("thumbnail") or "",
         "video_url": e.get("url")
         or f"https://www.tiktok.com/@{author}/video/{video_id}",
-        "view_count": int(e.get("view_count", 0) or 0),
-        "like_count": int(e.get("like_count", 0) or 0),
-        "comment_count": int(e.get("comment_count", 0) or 0),
-        "share_count": int(e.get("repost_count", 0) or 0),
+        "view_count": _safe_int(e.get("view_count", 0) or 0),
+        "like_count": _safe_int(e.get("like_count", 0) or 0),
+        "comment_count": _safe_int(e.get("comment_count", 0) or 0),
+        "share_count": _safe_int(e.get("repost_count", 0) or 0),
         "_author": author,
     }
 
@@ -1593,54 +1715,61 @@ async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
     # walks. Calling it directly would block the loop and serialize every walk to
     # 1-at-a-time (the bug that made a 200-creator roster take ~1h instead of
     # ~8min), defeating _gather_with_concurrency entirely.
-    catalog = await asyncio.to_thread(_ytdlp_creator_catalog, handle)
-    if catalog:
-        # Bound how many truncation-rescue tikwm calls this walk may make, so a
-        # creator whose captions are heavily clipped can't explode wall time or
-        # trip tikwm's rate limit. Each rescue is one HTTP call (~0.3-1s).
-        rescue_budget = _ytdlp_rescue_budget()
-        for raw in catalog:
-            ext = raw["external_id"]
-            if ext in seen_ids:
-                continue
-            posted_at = datetime.fromisoformat(raw["posted_at"])
-            if posted_at < cutoff:
-                continue
-            cap = raw.get("caption") or ""
-            if not _is_real_ugc_caption(cap, tag):
-                # The brand filter rejected this caption. yt-dlp's flat-playlist
-                # truncates captions to ~72 chars NON-DETERMINISTICALLY, which
-                # can clip the brand tag (`#befreed_0124` -> `#befree`) and drop
-                # a genuine — often high-view — brand video. If the caption shows
-                # that clip signature, re-fetch the FULL caption from tikwm and
-                # re-test before discarding. Otherwise it's a real non-match.
-                if rescue_budget > 0 and _caption_maybe_truncates_brand(cap, tag):
-                    rescue_budget -= 1
-                    full = await asyncio.to_thread(
-                        _tikwm_video_caption, ext, raw.get("_author") or handle.lstrip("@")
-                    )
-                    if full is None:
-                        # tikwm was unreachable/throttled — we COULDN'T verify.
-                        # The truncation signature (brand prefix clipped right at
-                        # the '...') is already strong evidence the tag is there,
-                        # and dropping silently is exactly the bug we're fixing
-                        # (a high-view brand video vanishing because a rescue call
-                        # got rate-limited). So KEEP it with the truncated caption
-                        # rather than lose it. A later refresh re-fetches metrics.
-                        pass
-                    elif not _is_real_ugc_caption(full, tag):
-                        # tikwm answered and the FULL caption genuinely lacks the
-                        # brand — this was a real non-match (the prefix was
-                        # coincidental, e.g. '#befree' of an unrelated word). Drop.
-                        continue
-                    else:
-                        raw["caption"] = full  # verified: keep untruncated caption
-                else:
+    try:
+        catalog = await asyncio.to_thread(_ytdlp_creator_catalog, handle)
+        if catalog:
+            # Bound how many truncation-rescue tikwm calls this walk may make, so a
+            # creator whose captions are heavily clipped can't explode wall time or
+            # trip tikwm's rate limit. Each rescue is one HTTP call (~0.3-1s).
+            rescue_budget = _ytdlp_rescue_budget()
+            for raw in catalog:
+                ext = raw["external_id"]
+                if ext in seen_ids:
                     continue
-            seen_ids.add(ext)
-            # Match the legacy shape: _author is stripped downstream by the TS
-            # provider mapping (or kept for hashtag/keyword paths). Leave it.
-            videos.append(raw)
+                posted_at = datetime.fromisoformat(raw["posted_at"])
+                if posted_at < cutoff:
+                    continue
+                cap = raw.get("caption") or ""
+                if not _is_real_ugc_caption(cap, tag):
+                    # The brand filter rejected this caption. yt-dlp's flat-playlist
+                    # truncates captions to ~72 chars NON-DETERMINISTICALLY, which
+                    # can clip the brand tag (`#befreed_0124` -> `#befree`) and drop
+                    # a genuine — often high-view — brand video. If the caption shows
+                    # that clip signature, re-fetch the FULL caption from tikwm and
+                    # re-test before discarding. Otherwise it's a real non-match.
+                    if rescue_budget > 0 and _caption_maybe_truncates_brand(cap, tag):
+                        rescue_budget -= 1
+                        full = await asyncio.to_thread(
+                            _tikwm_video_caption, ext, raw.get("_author") or handle.lstrip("@")
+                        )
+                        if full is None:
+                            # tikwm was unreachable/throttled — we COULDN'T verify.
+                            # The truncation signature (brand prefix clipped right at
+                            # the '...') is already strong evidence the tag is there,
+                            # and dropping silently is exactly the bug we're fixing
+                            # (a high-view brand video vanishing because a rescue call
+                            # got rate-limited). So KEEP it with the truncated caption
+                            # rather than lose it. A later refresh re-fetches metrics.
+                            pass
+                        elif not _is_real_ugc_caption(full, tag):
+                            # tikwm answered and the FULL caption genuinely lacks the
+                            # brand — this was a real non-match (the prefix was
+                            # coincidental, e.g. '#befree' of an unrelated word). Drop.
+                            continue
+                        else:
+                            raw["caption"] = full  # verified: keep untruncated caption
+                    else:
+                        continue
+                seen_ids.add(ext)
+                # Match the legacy shape: _author is stripped downstream by the TS
+                # provider mapping (or kept for hashtag/keyword paths). Leave it.
+                videos.append(raw)
+            return
+    except Exception as e:
+        # Docstring contract: per-creator failures are swallowed. One bad walk
+        # must degrade to a skipped creator (keeping whatever it already merged),
+        # never abort the whole multi-minute pass-3 gather with a raw traceback.
+        print(f"[tiktok_fetch] creator walk failed for @{handle}: {e}", file=sys.stderr)
         return
 
     # Fallback: the old TikTokApi path (newest ~50 only, but better than zero
