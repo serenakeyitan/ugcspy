@@ -179,4 +179,11 @@ describe("bridgeTimeoutMs", () => {
     expect(bridgeTimeoutMs({ UGCSPY_BRIDGE_TIMEOUT_MS: "0" })).toBe(1_800_000);
     expect(bridgeTimeoutMs({ UGCSPY_BRIDGE_TIMEOUT_MS: "-5" })).toBe(1_800_000);
   });
+
+  test("partially-numeric values fall back instead of parsing the prefix ('1h' must not become 1ms)", () => {
+    expect(bridgeTimeoutMs({ UGCSPY_BRIDGE_TIMEOUT_MS: "30000ms" })).toBe(1_800_000);
+    expect(bridgeTimeoutMs({ UGCSPY_BRIDGE_TIMEOUT_MS: "1h" })).toBe(1_800_000);
+    expect(bridgeTimeoutMs({ UGCSPY_BRIDGE_TIMEOUT_MS: "1e6" })).toBe(1_800_000);
+    expect(bridgeTimeoutMs({ UGCSPY_BRIDGE_TIMEOUT_MS: " 5000 " })).toBe(5000); // trimmed whole-integer ok
+  });
 });

@@ -129,12 +129,14 @@ export function resolveBridgePython(hasVenv: boolean, mode: unknown): string {
 }
 
 // Bridge deadline in ms (default 30min). Invalid/absent env values fall back
-// to the default. Exported for tests.
+// to the default. The whole value must be a positive integer — parseInt would
+// accept the prefix of "30000ms" or "1h" (1h → 1ms, killing the bridge
+// instantly on a typo). Exported for tests.
 export function bridgeTimeoutMs(
   env: Record<string, string | undefined> = process.env,
 ): number {
-  const raw = env.UGCSPY_BRIDGE_TIMEOUT_MS;
-  const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  const raw = env.UGCSPY_BRIDGE_TIMEOUT_MS?.trim();
+  const n = raw && /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : NaN;
   return Number.isFinite(n) && n > 0 ? n : 1_800_000;
 }
 
