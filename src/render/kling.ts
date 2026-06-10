@@ -1,8 +1,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { createHmac } from "node:crypto";
+import { getRenderTempDir } from "./temp-dir.ts";
 import {
   RenderError,
   type ClipGenRequest,
@@ -264,13 +263,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`${endpoint}/${taskId}`);
       if (!statusRes.ok) continue; // transient — retry on next tick
-      const statusJson = (await statusRes.json()) as {
+      let statusJson: {
         data?: {
           task_status?: string;
           task_status_msg?: string;
           task_result?: { videos?: { id?: string; url?: string }[] };
         };
       };
+      try {
+        statusJson = (await statusRes.json()) as typeof statusJson;
+      } catch {
+        continue; // transient — non-JSON 200 body (gateway/CDN error page); retry on next tick
+      }
       const status = statusJson.data?.task_status;
       if (status === "succeed") {
         const video = statusJson.data?.task_result?.videos?.[0];
@@ -278,6 +282,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
         // Capture the VIDEO id (distinct from the task id). Lip-sync's
         // video_id field needs THIS, not taskId — see ClipGenResult.video_id.
         videoId = video?.id ?? null;
+        // Same defensive parsing as lipSyncClip/lipSyncWithText: a succeed
+        // payload without a URL must throw a TRUTHFUL unexpected-shape error
+        // (with the raw response as evidence), not fall through to the fake
+        // "timed out after 8min" below. Issue #30.
+        if (!videoUrl) {
+          throw new RenderError(
+            `Kling job ${taskId} reported succeed but returned no video URL. ` +
+              `Unexpected response shape. Raw response: ` +
+              `${JSON.stringify(statusJson).slice(0, 500)}`,
+            this.name,
+          );
+        }
         break;
       }
       if (status === "failed") {
@@ -350,13 +366,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`/v1/general/advanced-custom-elements/${taskId}`);
       if (!statusRes.ok) continue;
-      const statusJson = (await statusRes.json()) as {
+      let statusJson: {
         data?: {
           task_status?: string;
           task_status_msg?: string;
           task_result?: { elements?: { element_id?: number }[] };
         };
       };
+      try {
+        statusJson = (await statusRes.json()) as typeof statusJson;
+      } catch {
+        continue; // transient — non-JSON 200 body; retry on next tick
+      }
       const status = statusJson.data?.task_status;
       if (status === "succeed") {
         elementId = statusJson.data?.task_result?.elements?.[0]?.element_id ?? null;
@@ -455,13 +476,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`/v1/videos/lip-sync/${taskId}`);
       if (!statusRes.ok) continue;
-      const statusJson = (await statusRes.json()) as {
+      let statusJson: {
         data?: {
           task_status?: string;
           task_status_msg?: string;
           task_result?: { videos?: { url?: string; duration?: string }[] };
         };
       };
+      try {
+        statusJson = (await statusRes.json()) as typeof statusJson;
+      } catch {
+        continue; // transient — non-JSON 200 body; retry on next tick
+      }
       const status = statusJson.data?.task_status;
       if (status === "succeed") {
         const v = statusJson.data?.task_result?.videos?.[0];
@@ -584,13 +610,18 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
       await sleep(KlingProvider.POLL_INTERVAL_MS);
       const statusRes = await this.fetchSigned(`/v1/videos/lip-sync/${taskId}`);
       if (!statusRes.ok) continue;
-      const statusJson = (await statusRes.json()) as {
+      let statusJson: {
         data?: {
           task_status?: string;
           task_status_msg?: string;
           task_result?: { videos?: { url?: string; duration?: string }[] };
         };
       };
+      try {
+        statusJson = (await statusRes.json()) as typeof statusJson;
+      } catch {
+        continue; // transient — non-JSON 200 body; retry on next tick
+      }
       const status = statusJson.data?.task_status;
       if (status === "succeed") {
         const v = statusJson.data?.task_result?.videos?.[0];
@@ -744,13 +775,12 @@ export class KlingProvider implements VideoGenProvider, LipSyncProvider {
   }
 
   /**
-   * Download a finished video to the shared temp dir and return its path.
-   * `prefix` namespaces the filename per job kind (e.g. "kling", "kling-lipsync").
+   * Download a finished video to the per-process private render dir (see
+   * temp-dir.ts) and return its path. `prefix` namespaces the filename per
+   * job kind (e.g. "kling", "kling-lipsync").
    */
   private async downloadToTemp(url: string, prefix: string, label: string): Promise<string> {
-    const outDir = join(tmpdir(), "ugcspy-renders");
-    await mkdir(outDir, { recursive: true });
-    const outPath = join(outDir, `${prefix}.mp4`);
+    const outPath = join(getRenderTempDir(), `${prefix}.mp4`);
     const dl = await fetch(url);
     if (!dl.ok) {
       throw new RenderError(`Kling ${label} download failed: ${dl.status}`, this.name);

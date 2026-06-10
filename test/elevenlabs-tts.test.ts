@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { statSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { ElevenLabsTtsProvider } from "../src/render/elevenlabs-tts.ts";
 
 /**
@@ -147,6 +149,23 @@ describe("ElevenLabsTtsProvider", () => {
     await expect(
       provider.generateVoiceover({ text: "hi", voice_id: "abc" }),
     ).rejects.toThrow(/empty/);
+  });
+
+  test("writes the mp3 into a private per-process render dir (mkdtemp, 0700)", async () => {
+    // Hardening: outputs used to land in a FIXED, world-guessable
+    // /tmp/ugcspy-renders with default perms — pre-creatable (and then
+    // owned/readable) by any local user on a shared host. The shared
+    // helper (src/render/temp-dir.ts) now mkdtemps a per-process dir:
+    // unpredictable suffix + 0o700.
+    global.fetch = makeMockFetch([{ status: 200, bodyBuffer: new ArrayBuffer(10) }]) as typeof fetch;
+    const provider = new ElevenLabsTtsProvider("key");
+    const result = await provider.generateVoiceover({ text: "hi", voice_id: "v" });
+    const dir = dirname(result.mp3_path);
+    // mkdtemp prefix + random suffix — NOT the old fixed "ugcspy-renders".
+    expect(basename(dir)).toMatch(/^ugcspy-renders-.+/);
+    if (process.platform !== "win32") {
+      expect(statSync(dir).mode & 0o777).toBe(0o700);
+    }
   });
 
   test("cost scales linearly with text length", async () => {

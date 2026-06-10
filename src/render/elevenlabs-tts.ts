@@ -1,8 +1,7 @@
 import { writeFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { RenderError, type TtsProvider, type TtsRequest, type TtsResult } from "./types.ts";
+import { getRenderTempDir } from "./temp-dir.ts";
 
 /**
  * ElevenLabs Text-to-Speech adapter.
@@ -96,9 +95,7 @@ export class ElevenLabsTtsProvider implements TtsProvider {
       );
     }
 
-    const outDir = join(tmpdir(), "ugcspy-renders");
-    await mkdir(outDir, { recursive: true });
-    const outPath = join(outDir, `tts-elevenlabs-${Date.now()}.mp3`);
+    const outPath = join(getRenderTempDir(), `tts-elevenlabs-${Date.now()}.mp3`);
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length === 0) {
       throw new RenderError(

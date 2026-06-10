@@ -86,6 +86,9 @@ interface MockResponse {
   status?: number;
   json?: unknown;
   bodyBuffer?: ArrayBuffer;
+  // Simulate a 200 whose body is NOT JSON (gateway/CDN error page) —
+  // json() rejects with a SyntaxError like the real fetch Response.
+  jsonThrows?: boolean;
 }
 
 function makeMockFetch(responses: MockResponse[]) {
@@ -109,7 +112,10 @@ function makeMockFetch(responses: MockResponse[]) {
     return {
       ok: status >= 200 && status < 300,
       status,
-      json: async () => r?.json,
+      json: async () => {
+        if (r?.jsonThrows) throw new SyntaxError("Unexpected token '<', \"<html>\" is not valid JSON");
+        return r?.json;
+      },
       text: async () => JSON.stringify(r?.json),
       arrayBuffer: async () => r?.bodyBuffer ?? new ArrayBuffer(0),
     } as unknown as Response;
@@ -438,6 +444,50 @@ describe("KlingProvider.generateClip quality params", () => {
       }),
     ).rejects.toThrow(/at most 3 elements/);
   });
+
+  test("throws truthful error when succeed response has no video URL (issue #30)", async () => {
+    // Pre-fix, generateClip broke out of the poll loop with videoUrl=null and
+    // fell through to the factually wrong "timed out after 8min" error — the
+    // same bug class already fixed in lipSyncClip / lipSyncWithText /
+    // createElement. Mirror their succeed-without-URL contract here.
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "q-nourl" } } },
+      { status: 200, json: { data: { task_status: "succeed", task_result: { videos: [] } } } },
+    ]) as typeof fetch;
+    await expect(
+      new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5 }),
+    ).rejects.toThrow(/succeed but returned no video URL/);
+  }, 15000);
+
+  test("retries the poll when a 200 response has a non-JSON body (transient gateway error)", async () => {
+    // The poll loop already retries on !res.ok; a 200 with a non-JSON body
+    // (CDN/gateway error page) must be retried the same way, not crash the
+    // whole render with an escaped SyntaxError while the paid job keeps
+    // running server-side.
+    global.fetch = makeMockFetch([
+      { status: 200, json: { code: 0, data: { task_id: "q-badjson" } } },
+      // first poll: 200 whose body is an HTML error page — json() throws
+      { status: 200, jsonThrows: true },
+      // second poll: real succeed payload
+      {
+        status: 200,
+        json: {
+          data: {
+            task_status: "succeed",
+            task_result: { videos: [{ url: "https://kling.cdn/v.mp4", duration: "5" }] },
+          },
+        },
+      },
+      { status: 200, bodyBuffer: new ArrayBuffer(10) },
+    ]) as typeof fetch;
+    const result = await new KlingProvider("a", "s").generateClip({ prompt: "p", duration_sec: 5 });
+    expect(result.external_id).toBe("q-badjson");
+    // Two polls hit the status endpoint: the bad-JSON one was consumed and
+    // retried instead of being fatal.
+    expect(
+      captured.filter((r) => r.url.includes("/v1/videos/text2video/q-badjson")).length,
+    ).toBe(2);
+  }, 20000);
 });
 
 /**

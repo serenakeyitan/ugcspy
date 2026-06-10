@@ -1,8 +1,7 @@
 import { writeFileSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { RenderError, type TtsProvider, type TtsRequest, type TtsResult } from "./types.ts";
+import { getRenderTempDir } from "./temp-dir.ts";
 
 /**
  * OpenAI TTS — $15 per 1M characters for the standard model, $30 for HD.
@@ -55,9 +54,7 @@ export class OpenAITtsProvider implements TtsProvider {
       );
     }
 
-    const outDir = join(tmpdir(), "ugcspy-renders");
-    await mkdir(outDir, { recursive: true });
-    const outPath = join(outDir, `tts-${Date.now()}.mp3`);
+    const outPath = join(getRenderTempDir(), `tts-${Date.now()}.mp3`);
     const buf = Buffer.from(await res.arrayBuffer());
     writeFileSync(outPath, buf);
 
