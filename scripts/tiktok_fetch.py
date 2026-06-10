@@ -79,6 +79,16 @@ def main() -> None:
         run_keyword(keyword, days)
         return
 
+    # Transcript mode needs whisper + yt-dlp + ffmpeg, NOT TikTokApi/Chromium —
+    # dispatch it before the TikTokApi import so it works on a core install
+    # that added --with-audio but never touched the browser fallbacks.
+    if mode == "transcript":
+        url = (payload.get("url") or "").strip()
+        if not url:
+            fail("missing url")
+        run_transcript(url)
+        return
+
     try:
         from TikTokApi import TikTokApi  # noqa: F401
     except ImportError:
@@ -1798,6 +1808,206 @@ async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
         raise
     except Exception:
         return
+
+
+# ---------------------------------------------------------------------------
+# Transcript mode — spoken narrative + talking/non-talking signal for ONE video.
+#
+# Pipeline: yt-dlp downloads the audio track only (~1-2MB, no video), Whisper
+# transcribes it, and the result is normalized so music beds can't masquerade
+# as speech. The normalization logic is a parity copy of
+# vendor/video-recipe/scripts/transcribe.py::_result_to_doc — duplicated here
+# (not imported) because the npm-packed CLI ships scripts/ but NOT vendor/,
+# and the bridge must stay self-contained. test_transcript_mode.py asserts the
+# two stay behaviorally identical; change them together.
+
+# A Whisper segment with no_speech_prob above this is treated as non-speech
+# (music bed / ambience / silence) and its text is BLANKED — Whisper
+# hallucinates plausible lyrics over music, and fake lyrics must not make a
+# montage look like a talking video. 0.6 matches Whisper's own decoder default.
+TRANSCRIPT_NO_SPEECH_PROB = 0.6
+
+# Maximum audio bytes we'll hand to Whisper. A TikTok video is minutes long;
+# anything bigger than this is a mis-resolved URL (livestream, playlist), not
+# a UGC clip.
+TRANSCRIPT_MAX_AUDIO_BYTES = 100 * 1024 * 1024
+
+
+def _transcript_non_lexical_re():
+    import re
+
+    # Non-lexical vocalizations (sighs, "mmm", "uh", bracketed cues like
+    # [Music]) — real audio events, but not scripted speech.
+    return re.compile(
+        r"^[\s\W]*(?:"
+        r"u+h+|u+m+|m+h+m+|h+m+|m+m+|a+h+|o+h+|e+r+|hmm+|uh-huh|mm-hmm|"
+        r"\[.*?\]|\(.*?\)|♪+"
+        r")[\s\W]*$",
+        re.IGNORECASE,
+    )
+
+
+def _transcript_normalize(result: dict) -> dict:
+    """Whisper raw result → transcript doc with per-segment kind tags and a
+    whole-track audio_kind summary ("speech" | "music" | "mixed").
+
+    Parity contract with vendor/video-recipe/scripts/transcribe.py
+    (_result_to_doc): same thresholds, same kind tags, same audio_kind rules.
+    Extra key on top of that contract: lexical_word_count (talking-classifier
+    input, derived from speech-segment text so it works without per-word
+    timestamps)."""
+    non_lexical = _transcript_non_lexical_re()
+    segments_in = result.get("segments") or []
+    segments: list[dict] = []
+    words: list[dict] = []
+    duration = 0.0
+    speech_seg_count = 0
+    nonspeech_seg_count = 0
+    lexical_word_count = 0
+    for seg in segments_in:
+        if not isinstance(seg, dict):
+            continue
+        try:
+            start = float(seg.get("start", 0.0))
+            end = float(seg.get("end", start))
+            no_speech_prob = float(seg.get("no_speech_prob", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        text = str(seg.get("text", "")).strip()
+        if end > duration:
+            duration = end
+
+        if no_speech_prob >= TRANSCRIPT_NO_SPEECH_PROB:
+            nonspeech_seg_count += 1
+            segments.append(
+                {
+                    "start": round(start, 3),
+                    "end": round(end, 3),
+                    "text": "",
+                    "kind": "non_speech",
+                    "no_speech_prob": round(no_speech_prob, 3),
+                }
+            )
+            continue
+
+        kind = "non_lexical" if (text and non_lexical.match(text)) else "speech"
+        if kind == "speech":
+            speech_seg_count += 1
+            lexical_word_count += len(text.split())
+        segments.append(
+            {
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+                "kind": kind,
+                "no_speech_prob": round(no_speech_prob, 3),
+            }
+        )
+        if kind != "speech":
+            continue
+        for w in seg.get("words", []) or []:
+            wstart = float(w.get("start", w.get("startTime", start)))
+            wend = float(w.get("end", w.get("endTime", end)))
+            wtext = str(w.get("word", w.get("text", ""))).strip()
+            if not wtext:
+                continue
+            words.append({"start": round(wstart, 3), "end": round(wend, 3), "word": wtext})
+
+    if speech_seg_count == 0 and nonspeech_seg_count > 0:
+        audio_kind = "music"
+    elif nonspeech_seg_count > 0:
+        audio_kind = "mixed"
+    else:
+        audio_kind = "speech"
+
+    return {
+        "language": result.get("language"),
+        "duration_sec": round(duration, 3),
+        "segments": segments,
+        "words": words,
+        "audio_kind": audio_kind,
+        "lexical_word_count": lexical_word_count,
+    }
+
+
+def _transcript_download_audio(url: str, tmpdir: str) -> str:
+    """Download ONLY the audio track to tmpdir; returns the file path.
+    bestaudio keeps the transfer at ~1-2MB for a TikTok clip and Whisper reads
+    the container directly via ffmpeg — no conversion pass needed."""
+    import glob
+    import subprocess
+
+    out_tmpl = os.path.join(tmpdir, "audio.%(ext)s")
+    # "--" stops yt-dlp option parsing so a crafted URL can't inject flags.
+    cmd = [
+        _ytdlp_bin(),
+        "-f",
+        "bestaudio/best",
+        "--no-playlist",
+        "--no-warnings",
+        "-o",
+        out_tmpl,
+        "--",
+        url,
+    ]
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+    )
+    if proc.returncode != 0:
+        tail = (proc.stderr or "").strip()[-400:]
+        raise RuntimeError(f"yt-dlp audio download failed: {tail or 'no stderr'}")
+    files = glob.glob(os.path.join(tmpdir, "audio.*"))
+    if not files:
+        raise RuntimeError("yt-dlp reported success but produced no audio file")
+    path = files[0]
+    if os.path.getsize(path) > TRANSCRIPT_MAX_AUDIO_BYTES:
+        raise RuntimeError(
+            f"audio track exceeds {TRANSCRIPT_MAX_AUDIO_BYTES} bytes — not a short-form clip"
+        )
+    return path
+
+
+def run_transcript(url: str) -> None:
+    """Emit one JSON transcript doc for a single video URL (exit 0), or a JSON
+    error envelope (exit 1). Needs whisper (--with-audio) + ffmpeg; both
+    checked up front with actionable messages."""
+    import shutil
+    import tempfile
+
+    if not url.startswith(("http://", "https://")):
+        fail("transcript url must be http(s)")
+    try:
+        import whisper
+    except ImportError:
+        fail(
+            "whisper not installed in the active interpreter. Run `ugcspy install-deps --with-audio` (one-time, ~3-5min + ~1.5GB)."
+        )
+    if shutil.which("ffmpeg") is None:
+        fail(
+            "ffmpeg not found on PATH — whisper needs it to read audio. Install it: `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Linux)."
+        )
+
+    tmpdir = tempfile.mkdtemp(prefix="ugcspy-transcript-")
+    try:
+        audio_path = _transcript_download_audio(url, tmpdir)
+        model_name = os.environ.get("UGCSPY_WHISPER_MODEL", "base").strip() or "base"
+        model = whisper.load_model(model_name)
+        # fp16 warnings on CPU are harmless; whisper falls back to fp32 itself.
+        result = model.transcribe(audio_path)
+        doc = _transcript_normalize(result if isinstance(result, dict) else {})
+        doc["video_url"] = url
+        doc["whisper_model"] = model_name
+        print(json.dumps(doc))
+    except RuntimeError as e:
+        fail(str(e))
+    except Exception as e:  # noqa: BLE001 — one video's failure must surface as JSON, not a traceback
+        fail(f"transcription failed: {type(e).__name__}: {e}")
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":

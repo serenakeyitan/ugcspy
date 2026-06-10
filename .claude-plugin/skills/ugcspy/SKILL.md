@@ -55,6 +55,14 @@ Precision filter: hashtag results only keep videos whose caption carries the bra
 
 The standalone CLI has **no `fork` command** — brief generation is plugin-only. Route to `/ugcspy-fork <video-id-or-url>`: it generates the brief (hook variations, format notes, beat sheet, b-roll, CTA) in chat using the user's Claude Code subscription, with an optional save to `~/.ugcspy/briefs/`.
 
+### Transcript (hook + spoken narrative + talking/non-talking)
+
+```bash
+ugcspy transcript <brand|video-id|tiktok-url> [--top N] [--talking | --non-talking] [--json]
+```
+
+When the user asks for "the hook and transcript of the top 3 videos", "what does the #1 video say", or wants to filter "talking" vs "non-talking" (montage/music) content — route here (or `/ugcspy-transcript`). It audio-only-downloads each video, Whisper-transcribes locally, prints the spoken hook (first real speech line) + full transcript, and classifies TALKING vs NON-TALKING. Music beds can't fake it: Whisper's hallucinated lyrics are blanked via the no_speech_prob gate before words are counted. Transcripts cache in SQLite — each video is transcribed once (~10-40s), instant after. Filters scan down the ranked list bounded at max(4×N, 12) transcriptions and report the scan count. Needs `install-deps --with-audio` + ffmpeg; the errors name the fix.
+
 ### Watch + daemon (optional — Slack breakout alerts)
 
 Power-user feature, not part of the core flow. Most users live in `search`. Surface this only when the user explicitly asks for monitoring/alerts/automation.

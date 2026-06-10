@@ -68,6 +68,14 @@ export function migrate(db: Database): void {
   // patched to current shape on every open.
   for (const stmt of [
     `ALTER TABLE videos ADD COLUMN author_handle TEXT`,
+    // Whisper transcript cache (ugcspy transcript) — one-shot per video; the
+    // audio of a posted clip never changes, so no re-transcribe path needed.
+    `ALTER TABLE videos ADD COLUMN transcript TEXT`,
+    `ALTER TABLE videos ADD COLUMN transcript_kind TEXT`,
+    `ALTER TABLE videos ADD COLUMN transcript_lang TEXT`,
+    `ALTER TABLE videos ADD COLUMN transcript_words INTEGER`,
+    `ALTER TABLE videos ADD COLUMN transcript_duration_sec REAL`,
+    `ALTER TABLE videos ADD COLUMN transcribed_at TEXT`,
   ]) {
     try {
       db.exec(stmt);

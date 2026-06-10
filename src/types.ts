@@ -38,6 +38,41 @@ export interface VideoRecord extends RawVideo {
   // For hashtag results, this is the third-party creator. For handle results,
   // this matches the queried handle (or null if pre-migration data).
   author_handle?: string | null;
+  // Whisper transcript cache (ugcspy transcript). NULL until transcribed —
+  // transcription is expensive (~10-40s/video), the content of a posted video
+  // never changes, so it's fetched once and cached forever.
+  transcript?: string | null;
+  transcript_kind?: AudioKind | null;
+  transcript_lang?: string | null;
+  transcript_words?: number | null;
+  transcript_duration_sec?: number | null;
+  transcribed_at?: string | null;
+}
+
+// Whole-track audio classification from the Whisper bridge: "speech" = all
+// segments are real speech, "music" = nothing but a bed (no spoken narrative),
+// "mixed" = both. Whisper's hallucinated lyrics over music beds are blanked
+// upstream (no_speech_prob gate), so "music" is trustworthy.
+export type AudioKind = "speech" | "music" | "mixed";
+
+export interface TranscriptSegment {
+  start: number;
+  end: number;
+  text: string; // blanked ("") for kind === "non_speech"
+  kind: "speech" | "non_lexical" | "non_speech";
+  no_speech_prob?: number;
+}
+
+// One video's transcript doc as emitted by the bridge's transcript mode.
+export interface TranscriptDoc {
+  language: string | null;
+  duration_sec: number;
+  segments: TranscriptSegment[];
+  audio_kind: AudioKind;
+  // Word count over speech segments only — the talking-classifier input.
+  lexical_word_count: number;
+  video_url?: string;
+  whisper_model?: string;
 }
 
 export interface Competitor {

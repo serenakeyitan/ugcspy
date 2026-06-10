@@ -171,6 +171,7 @@ The plugin is the recommended way to use ugcspy. Inside Claude Code:
 |---|---|
 | `/ugcspy-search <brand>` | Runs the search, renders the table inline |
 | `/ugcspy-fork <id>` | Quick creator brief — hook + beat sheet. Generated in chat using your Claude Code subscription. **No API key.** |
+| `/ugcspy-transcript <brand-or-id>` | Spoken hook + full Whisper transcript for the top N videos (or one). `--talking` / `--non-talking` filters montage vs voiceover content from the audio itself. Cached per video. |
 | `/ugcspy-decode <id>` | Deep production decode — format, OCR'd overlay narrative, brand-pitch placement (soft 软广 vs hard sell), shot list. Writes `decode.json` + `decode.html`. Works on both human-shot AND AI-montage videos. |
 | `/ugcspy-remix <target> <source>` | Cross-video format transfer. Decodes BOTH videos and writes a hand-able brief telling creator B how to shoot their own version of video A's format. |
 | `/ugcspy-recipe <id>` | Reverse-engineer an AI-montage into a reproducible `recipe.json` (cuts, per-clip prompts, voiceover) |
@@ -196,6 +197,7 @@ The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcsp
 | `init` | Interactive setup — writes `~/.ugcspy/config.json` (chmod 0600) |
 | `install-deps` | Install Python deps for the `tiktok-oss` provider (one-time) |
 | `search <handle>` | Top videos by reach (default) or recency. The thing you came for. |
+| `transcript <brand\|id\|url>` | Spoken hook + transcript per video, talking/non-talking classification from the audio. Needs `install-deps --with-audio` + ffmpeg; transcribed once, cached in SQLite. |
 | `watch add <handle>` | (Optional) Register a competitor for breakout alerts — see below |
 | `watch list` / `watch remove <id>` | Manage watches |
 | `daemon` | (Optional) Poll watches, post Slack alerts on threshold breach |

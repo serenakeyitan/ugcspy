@@ -1,4 +1,4 @@
-import type { Platform, RawVideo } from "../types.ts";
+import type { Platform, RawVideo, TranscriptDoc } from "../types.ts";
 
 export interface DataProvider {
   readonly name: string;
@@ -13,6 +13,10 @@ export interface DataProvider {
   // discovery — the broad corpus a script writer browses for format inspiration.
   // Optional — only providers with a real video-search source implement it.
   fetchKeywordVideos?(keyword: string, platform: Platform, days: number): Promise<RawVideo[]>;
+  // Download ONE video's audio and transcribe it (hook + spoken narrative +
+  // talking/non-talking signal). Expensive (~10-40s/video) — callers cache the
+  // result in the videos table. Optional — needs an audio pipeline (whisper).
+  fetchTranscript?(videoUrl: string): Promise<TranscriptDoc>;
 }
 
 export class ProviderError extends Error {

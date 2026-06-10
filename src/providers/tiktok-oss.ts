@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import { platform } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { Platform, RawVideo } from "../types.ts";
+import type { Platform, RawVideo, TranscriptDoc, TranscriptSegment } from "../types.ts";
 import { type DataProvider, ProviderError } from "./types.ts";
 import { venvExists, venvPython } from "../lib/venv.ts";
 
@@ -68,7 +68,21 @@ export class TikTokOssProvider implements DataProvider {
     return this.runBridge({ mode: "keyword", keyword, days });
   }
 
+  // Transcribe one video's audio via the bridge's transcript mode (whisper +
+  // yt-dlp in the managed venv). Same deadline contract as the search modes.
+  async fetchTranscript(videoUrl: string): Promise<TranscriptDoc> {
+    const raw = await this.spawnBridge({ mode: "transcript", url: videoUrl });
+    return parseTranscriptOutput(raw.exit, raw.stdout, raw.stderr);
+  }
+
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
+    const raw = await this.spawnBridge(payload);
+    return parseBridgeOutput(raw.exit, raw.stdout, raw.stderr);
+  }
+
+  private async spawnBridge(
+    payload: Record<string, unknown>,
+  ): Promise<{ exit: number; stdout: string; stderr: string }> {
     const pythonBin = resolveBridgePython(venvExists(), payload.mode);
     const scriptPath = resolveScript();
     const proc = Bun.spawn([pythonBin, scriptPath], {
@@ -105,7 +119,7 @@ export class TikTokOssProvider implements DataProvider {
         this.name,
       );
     }
-    return parseBridgeOutput(exit, stdout, stderr);
+    return { exit, stdout, stderr };
   }
 }
 
@@ -231,4 +245,61 @@ function resolveScript(): string {
   }
   // Fall back to the dev path so the error is human-readable.
   return candidates[0]!;
+}
+
+// Pure parse of the bridge's transcript-mode (exit, stdout, stderr) — exported
+// for tests. The transcript payload is an OBJECT (one doc), unlike the search
+// modes' array, and an untrusted-shape doc must fail loudly here rather than
+// crash the renderer downstream.
+export function parseTranscriptOutput(
+  exit: number,
+  stdout: string,
+  stderr: string,
+): TranscriptDoc {
+  const name = "tiktok-oss";
+  if (exit !== 0) {
+    const errBody =
+      parseErrorBody(stdout) ?? (stderr.trim() || `bridge exited ${exit} with no output`);
+    throw new ProviderError(`tiktok-oss: ${errBody}`, name);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new ProviderError(
+      `tiktok-oss: transcript bridge returned non-JSON output: ${stdout.slice(0, 300)}`,
+      name,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ProviderError(
+      `tiktok-oss: transcript bridge returned a non-object: ${stdout.slice(0, 300)}`,
+      name,
+    );
+  }
+  const doc = parsed as Record<string, unknown>;
+  const kind = doc.audio_kind;
+  if (kind !== "speech" && kind !== "music" && kind !== "mixed") {
+    throw new ProviderError(
+      `tiktok-oss: transcript doc has invalid audio_kind: ${String(kind).slice(0, 50)}`,
+      name,
+    );
+  }
+  const segments = Array.isArray(doc.segments)
+    ? (doc.segments as TranscriptSegment[]).filter(
+        (s) => s !== null && typeof s === "object" && typeof s.text === "string",
+      )
+    : [];
+  return {
+    language: typeof doc.language === "string" ? doc.language : null,
+    duration_sec: typeof doc.duration_sec === "number" ? doc.duration_sec : 0,
+    segments,
+    audio_kind: kind,
+    lexical_word_count:
+      typeof doc.lexical_word_count === "number" && Number.isFinite(doc.lexical_word_count)
+        ? doc.lexical_word_count
+        : 0,
+    video_url: typeof doc.video_url === "string" ? doc.video_url : undefined,
+    whisper_model: typeof doc.whisper_model === "string" ? doc.whisper_model : undefined,
+  };
 }

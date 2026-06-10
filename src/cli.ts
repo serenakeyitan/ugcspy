@@ -4,6 +4,7 @@ import { version } from "../package.json";
 import { runInit } from "./commands/init.ts";
 import { runInstallDeps } from "./commands/install-deps.ts";
 import { normalizeSearchOptions, runSearch } from "./commands/search.ts";
+import { runTranscript } from "./commands/transcript.ts";
 import { runWatchAdd, runWatchList, runWatchRemove } from "./commands/watch.ts";
 import { runDaemon } from "./commands/daemon.ts";
 import { runRender } from "./commands/render.ts";
@@ -72,6 +73,28 @@ program
     // normalizeSearchOptions handles the legacy "engagement" sort alias and
     // the --mode whitelist (tested in test/search.test.ts).
     await runSearch(query, normalizeSearchOptions(raw));
+  });
+
+program
+  .command("transcript <query>")
+  .description(
+    "Hook + spoken transcript for videos. <query> = a cached brand/#tag/@handle (top N by views), a video id from `search --json`, or a TikTok URL. Classifies talking vs non-talking from the audio (music-bed lyrics don't count). Needs `install-deps --with-audio` + ffmpeg; ~10-40s per uncached video.",
+  )
+  .option("-t, --top <n>", "how many videos (brand/handle queries)", positiveInt, 3)
+  .option("--talking", "only videos with real speech (scans down the ranked list)")
+  .option("--non-talking", "only music/ambience videos with no real speech")
+  .option("-d, --days <n>", "trailing window in days", positiveInt, 30)
+  .option("-p, --platform <name>", "tiktok", "tiktok")
+  .option("--json", "emit JSON instead of formatted sections")
+  .action(async (query: string, raw) => {
+    await runTranscript(query, {
+      top: raw.top,
+      talking: Boolean(raw.talking),
+      nonTalking: Boolean(raw.nonTalking),
+      days: raw.days,
+      platform: raw.platform as Platform,
+      json: Boolean(raw.json),
+    });
   });
 
 const watch = program.command("watch").description("Manage breakout-alert watches");
