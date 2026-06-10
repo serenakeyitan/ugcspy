@@ -95,10 +95,10 @@ function printNextStep(config: Config): void {
   if (config.scraper_provider === "tiktok-oss") {
     console.log(
       chalk.yellow(
-        "\nThe tiktok-oss provider needs Python + TikTokApi + Chromium installed locally.",
+        "\nThe tiktok-oss provider needs Python deps (TikTokApi + yt-dlp) in a managed venv.",
       ),
     );
-    console.log(`Run ${chalk.cyan("ugcspy install-deps")} now (one-time, ~30s + ~150MB download).`);
+    console.log(`Run ${chalk.cyan("ugcspy install-deps")} now (one-time, ~30-60s; browser-free).`);
     console.log(
       chalk.dim(
         `  If you'll use ${chalk.cyan("/ugcspy-decode")} or ${chalk.cyan("/ugcspy-remix")} for AI-style remixing,`,

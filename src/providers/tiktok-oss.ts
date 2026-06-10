@@ -69,9 +69,9 @@ export class TikTokOssProvider implements DataProvider {
 
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
     // Keyword/niche discovery is pure HTTP (tikwm + stdlib urllib) — it needs
-    // NO TikTokApi/Chromium venv. So if the managed venv isn't set up, fall
-    // back to system python3 for keyword mode rather than forcing a ~150MB
-    // install. user/hashtag modes still require the venv (they use TikTokApi).
+    // NO venv. So if the managed venv isn't set up, fall back to system
+    // python3 for keyword mode rather than forcing an install. user/hashtag
+    // modes still require the venv (yt-dlp walk; TikTokApi fallbacks).
     const isKeyword = payload.mode === "keyword";
     let pythonBin: string;
     if (venvExists()) {
@@ -80,7 +80,7 @@ export class TikTokOssProvider implements DataProvider {
       pythonBin = "python3"; // stdlib-only path; resolved on PATH
     } else {
       throw new ProviderError(
-        `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30s + ~150MB Chromium download). ` +
+        `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30-60s; browser-free). ` +
           `(Tip: keyword/niche search — \`--mode keyword\` — works without the venv.)`,
         this.name,
       );
