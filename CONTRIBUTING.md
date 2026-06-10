@@ -24,18 +24,16 @@ bun run dev -- <subcommand>
 
 ## Testing real-data paths
 
-The `tiktok-oss` provider needs Python. Hashtag mode (the default discovery path) is browser-free — it runs over pure HTTP via the tikwm relay plus yt-dlp, so no Chromium is required. Chromium is only needed for the `user`/`keyword` modes and the optional Chromium fallback (`UGCSPY_USE_CHROMIUM=1`, off by default), which drive TikTokApi. Either run:
+The `tiktok-oss` provider needs Python. Both default modes are browser-free: hashtag discovery runs over pure HTTP via the tikwm relay, and coverage (plus `user` mode) walks catalogs with yt-dlp. Chromium/playwright is only needed for the optional `UGCSPY_USE_CHROMIUM=1` fallbacks (user-mode rescue + an extra discovery source), which drive TikTokApi. `--mode keyword` needs neither TikTokApi nor Chromium — it runs on system `python3` with stdlib only.
+
+Run:
 
 ```bash
-bun run src/cli.ts install-deps
+bun run src/cli.ts install-deps                  # managed venv at ~/.ugcspy/venv
+bun run src/cli.ts install-deps --with-browser   # add Chromium, only for the UGCSPY_USE_CHROMIUM=1 fallbacks
 ```
 
-Or do it manually if you want to control where deps land:
-
-```bash
-python3 -m pip install --user -r scripts/requirements.txt
-python3 -m playwright install chromium   # only for user/keyword modes + Chromium fallback; skip for hashtag mode
-```
+The managed venv is **required** for the `user`/`hashtag` modes — the provider resolves its interpreter from `~/.ugcspy/venv` and refuses to fall back to system Python (except for keyword mode), so a manual `pip install --user` of `scripts/requirements.txt` won't be picked up.
 
 Then point at a known DTC handle:
 
@@ -43,7 +41,7 @@ Then point at a known DTC handle:
 bun run src/cli.ts search @glossier --platform tiktok --limit 5
 ```
 
-This actually hits TikTok. A handle search runs in `user` mode (TikTokApi), so the first call may take 20-40 seconds (cold Chromium start + bot-detection negotiation). Hashtag/brand searches take the browser-free path (tikwm HTTP discovery + yt-dlp coverage walk) and skip Chromium entirely. Subsequent calls are served from `~/.ugcspy/db.sqlite`.
+This actually hits TikTok. A handle search runs in `user` mode — a browser-free yt-dlp walk of the creator's full catalog, so the first call takes ~10-20 seconds (no Chromium, no bot-detection negotiation). Hashtag/brand searches take the two-stage browser-free path (tikwm HTTP discovery + yt-dlp coverage walk). Subsequent calls are served from `~/.ugcspy/db.sqlite`.
 
 ## Project layout
 
@@ -53,19 +51,26 @@ src/
   commands/
     init.ts                  # interactive config wizard
     install-deps.ts          # one-shot Python dep installer
-    search.ts                # `ugcspy search` (hashtag + user modes)
+    search.ts                # `ugcspy search` (hashtag + user + keyword modes)
     watch.ts                 # `ugcspy watch add/list/remove` (optional alerts)
     daemon.ts                # `ugcspy daemon` poll loop (optional alerts)
+    render.ts                # `ugcspy render` — internal clip/TTS renderer used by /ugcspy-reproduce
   providers/
     types.ts                 # DataProvider interface
     mock.ts                  # deterministic synthetic data
-    tiktok-oss.ts            # Bun -> Python bridge to davidteather/TikTok-Api
+    tiktok-oss.ts            # Bun -> Python bridge (tikwm + yt-dlp; TikTokApi fallbacks)
     scrapecreators.ts        # paid TikTok + IG provider (stub)
     index.ts                 # provider switch
+  render/                    # Kling + TTS adapters backing /ugcspy-reproduce
+    kling.ts                 # Kling video generation + lip-sync
+    openai-tts.ts            # OpenAI TTS adapter
+    elevenlabs-tts.ts        # ElevenLabs TTS adapter
+    types.ts                 # render request/response types
   lib/
     breakout.ts              # alert math (medians, thresholds, 24h window)
     config.ts                # ~/.ugcspy/config.json
     slack.ts                 # webhook formatter + poster
+    venv.ts                  # managed venv paths (~/.ugcspy/venv)
   db/
     schema.ts                # SQLite migrations
     index.ts                 # bun:sqlite open
@@ -73,12 +78,14 @@ src/
 
 scripts/
   tiktok_fetch.py            # Python bridge — browser-free hashtag discovery (tikwm) + yt-dlp coverage walk
-  requirements.txt           # pip deps (yt-dlp for hashtag mode; TikTokApi + playwright for user/keyword modes + Chromium fallback)
+  requirements.txt           # pip deps (TikTokApi + yt-dlp; playwright only used by the UGCSPY_USE_CHROMIUM=1 fallbacks)
+  requirements-audio.txt     # optional Whisper deps (install-deps --with-audio)
 
-test/                        # bun:test suites
+test/                        # bun:test suites + Python bridge tests (test_tikwm_adapter.py)
 .claude-plugin/              # Claude Code plugin
   plugin.json                # plugin manifest
-  commands/                  # slash commands: setup, search, fork, watch, daemon
+  commands/                  # slash commands: setup, search, fork, watch, daemon,
+                             #   decode, recipe, remix, reproduce
   skills/ugcspy/SKILL.md     # intent-triggered skill
 ```
 

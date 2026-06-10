@@ -36,27 +36,24 @@ Skip if the user is asking about **paid ads** (different tool — TikTok Creativ
 
 ```bash
 ugcspy search <query> [--platform tiktok|instagram|all] [--limit N] \
-                     [--sort views|recency] [--mode user|hashtag] [--json]
+                     [--sort views|recency] [--mode user|hashtag|keyword] [--json]
 ```
 
 Auto-detects mode from query prefix:
 - `befreed` (no prefix) → hashtag mode = third-party creators promoting BeFreed
 - `@befreed` → user mode = BeFreed's own account posts
 - `#befreed` → explicit hashtag mode
+- `--mode keyword` (explicit flag, never auto-detected) → broad niche/topic discovery — the corpus a script writer browses, NOT limited to videos tagging a brand. E.g. "find skincare routine UGC" → `ugcspy search --mode keyword "skincare routine"`. Pure HTTP, zero setup.
 
 Returns videos ranked by **views descending** (default — BigSpy-style highest-reach-first) or recency. Hashtag mode includes a `Creator` column showing each row's actual poster, plus a "most prolific creators" summary at the bottom (the SMM insight: who's posting about this brand most often).
 
-Precision filter: hashtag results only keep videos whose caption explicitly carries `#brand`, `#brand_NNNN` (campaign codes), or `@brand`. This rejects unrelated videos that TikTok's hashtag endpoint over-matches.
+Precision filter: hashtag results only keep videos whose caption carries the brand via `#brand`, `#brand_NNNN` (campaign codes), `#brandapp`, `@brand`, or the plain-text brand token at word boundaries (e.g. "reading with befreed is so clutch"). This rejects unrelated videos that TikTok's hashtag endpoint over-matches.
 
 **First-run wall time is a few minutes for an active brand (~5-8 min for BeFreed).** The CLI runs two stages: browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay), then a yt-dlp coverage walk of each discovered creator's full catalog (16-way concurrent, `UGCSPY_WALK_CONCURRENCY`) — the walk is where the time goes. Tell the user this is expected before running. Subsequent searches on the same brand serve from cache instantly. Use `--refresh` to force a re-fetch (same time).
 
 ### Fork (video → creator brief)
 
-```bash
-ugcspy fork <video-id-or-url> [--out path] [--copy]
-```
-
-Produces a markdown brief with hook variations, format notes, beat sheet, b-roll, and CTA. Default output path is `~/.ugcspy/briefs/`.
+The standalone CLI has **no `fork` command** — brief generation is plugin-only. Route to `/ugcspy-fork <video-id-or-url>`: it generates the brief (hook variations, format notes, beat sheet, b-roll, CTA) in chat using the user's Claude Code subscription, with an optional save to `~/.ugcspy/briefs/`.
 
 ### Watch + daemon (optional — Slack breakout alerts)
 

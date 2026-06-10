@@ -1,6 +1,6 @@
 ---
 description: Find competitor UGC on TikTok — third-party creators promoting a brand, or a brand's own posts
-argument-hint: "<brand-or-@handle> [--platform tiktok|instagram|all] [--limit N] [--json] [--sort views|recency]"
+argument-hint: "<brand-or-@handle-or-topic> [--mode user|hashtag|keyword] [--platform tiktok|instagram|all] [--limit N] [--json] [--sort views|recency]"
 ---
 
 You are running `ugcspy search` for the user. The CLI binary is `ugcspy` on PATH.
@@ -13,14 +13,15 @@ Run via the Bash tool:
 ugcspy search $ARGUMENTS
 ```
 
-## Two search modes (auto-detected from query prefix)
+## Three search modes (two auto-detected from query prefix, one explicit)
 
 - **Plain word** (e.g. `befreed`, `glossier`, `liquiddeath`) → **hashtag mode**: finds third-party creators promoting the brand. This is the BigSpy-for-UGC default — most users want this.
 - **`@handle`** (e.g. `@befreed`) → **user mode**: pulls the brand's OWN posts.
 - **`#tag`** → explicit hashtag mode.
-- **`--mode user|hashtag`** flag overrides auto-detection.
+- **`--mode keyword "<topic phrase>"`** (never auto-detected) → **keyword mode**: broad niche/topic discovery, NOT limited to videos tagging a brand. Pure HTTP, works with zero setup.
+- **`--mode user|hashtag|keyword`** flag overrides auto-detection.
 
-When a user says "what's working for [brand] on TikTok" or "find creators promoting [brand]", default to hashtag mode (no prefix). When they say "what is [brand] posting", that's user mode (`@brand`).
+When a user says "what's working for [brand] on TikTok" or "find creators promoting [brand]", default to hashtag mode (no prefix). When they say "what is [brand] posting", that's user mode (`@brand`). When they want a topic/niche corpus with no brand tag ("find skincare routine UGC"), that's `--mode keyword "skincare routine"`.
 
 ## Output
 
@@ -56,4 +57,4 @@ Subsequent searches on the same brand serve from cache instantly. Use `--refresh
 
 If the user gets `tiktok-oss: TikTokApi not installed`, suggest `ugcspy install-deps`.
 
-Hashtag mode is browser-free (HTTP via the tikwm relay), so it doesn't need `MS_TOKEN`. If discovery returns few or zero candidates on a brand you'd expect to have UGC, tikwm is likely throttling — wait a bit and retry, and/or raise `UGCSPY_HASHTAG_FEED_DELAY` to widen the gap between feed reads. `MS_TOKEN` only matters for the `user`/`keyword` modes (and the optional Chromium fallback) — see README troubleshooting.
+Hashtag mode is browser-free (HTTP via the tikwm relay), so it doesn't need `MS_TOKEN`. If discovery returns few or zero candidates on a brand you'd expect to have UGC, tikwm is likely throttling — wait a bit and retry, and/or raise `UGCSPY_HASHTAG_FEED_DELAY` to widen the gap between feed reads. `MS_TOKEN` only matters for the optional Chromium/TikTokApi fallbacks (`UGCSPY_USE_CHROMIUM=1`); keyword mode is pure HTTP and ignores it — see README troubleshooting.

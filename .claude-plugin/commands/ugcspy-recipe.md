@@ -9,10 +9,10 @@ User arguments: `$ARGUMENTS`
 
 ## Routing
 
-If `$ARGUMENTS` is a numeric video id from a previous `/ugcspy-search`, resolve it to a URL first:
+If `$ARGUMENTS` is a numeric video id from a previous `/ugcspy-search`, resolve it to a URL first. Note the search table's `#` column is a display position, NOT the database id — if the number came from the table, re-run the same search with `--json` (cached, instant) and take the Nth element's `id`/`video_url`. Then:
 
 ```bash
-sqlite3 ~/.ugcspy/db.sqlite "SELECT video_url FROM videos WHERE id = $ARGUMENTS;"
+sqlite3 ~/.ugcspy/db.sqlite "SELECT video_url FROM videos WHERE id = <resolved-db-id>;"
 ```
 
 If `$ARGUMENTS` is already a URL (TikTok, YouTube, Instagram Reels), use it as-is.
@@ -31,22 +31,22 @@ Then follow the video-recipe skill (`.claude-plugin/skills/video-recipe/SKILL.md
 
 ### First-run setup for video-recipe
 
-If the user has never run video-recipe before, the python deps probably aren't installed. Run the doctor first:
+If the user has never run video-recipe before, the python deps probably aren't installed. video-recipe requires Python ≥ 3.11, so use the `python3.11` binary (matching ONBOARDING.md step 8). Run the doctor first:
 
 ```bash
-cd vendor/video-recipe && python -m scripts.doctor 2>&1
+cd vendor/video-recipe && python3.11 -m scripts.doctor 2>&1
 ```
 
 If doctor reports missing deps (whisper, torch, ffmpeg, tesseract), walk the user through the install:
 
-- **Python deps**: `cd vendor/video-recipe && pip install -e ".[dev]"` (~2-5 min, downloads whisper + torch).
+- **Python deps**: `cd vendor/video-recipe && python3.11 -m pip install --user -e ".[dev]"` (~2-5 min, downloads whisper + torch).
 - **ffmpeg**: macOS → `brew install ffmpeg`; Linux → `sudo apt install ffmpeg`.
 - **tesseract**: macOS → `brew install tesseract`; Linux → `sudo apt install tesseract-ocr`.
 
 Once the doctor passes, run the deterministic pipeline:
 
 ```bash
-cd vendor/video-recipe && python -m scripts.run_pipeline "<resolved-url>" --quick --recipes-root recipes
+cd vendor/video-recipe && python3.11 -m scripts.run_pipeline "<resolved-url>" --quick --recipes-root recipes
 ```
 
 Then follow video-recipe's SKILL.md stages 4 onward — read keyframes, write `inferred.json`, `hook.json`, `tts.json`, re-run `assemble_recipe`. The full SKILL.md is at `.claude-plugin/skills/video-recipe/SKILL.md`.

@@ -24,6 +24,19 @@ jobs:
       - run: bun run typecheck
       - run: bun test
       - run: bun run build
+      # Guard 1: the pushed tag must match package.json, or npm publishes a
+      # version that doesn't correspond to the release tag.
+      - name: Verify tag matches package.json version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "Tag v$TAG_VERSION does not match package.json version $PKG_VERSION" >&2
+            exit 1
+          fi
+      # Guard 2: the tarball must ship the Python bridge (scripts/) — without it
+      # the published tiktok-oss provider and install-deps are dead on arrival.
+      - run: npm pack --dry-run 2>&1 | grep -q tiktok_fetch.py
       - run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

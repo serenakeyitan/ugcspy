@@ -118,7 +118,7 @@ ugcspy install-deps --with-browser   # one-time, ~150MB
 UGCSPY_USE_CHROMIUM=1 ugcspy search befreed --platform tiktok --limit 10
 ```
 
-`MS_TOKEN` only matters for the `user` and `keyword` modes (which go through TikTokApi), not for hashtag search. If you do need it for those modes, set it from browser cookies:
+`MS_TOKEN` only matters for the Chromium/TikTokApi paths — the legacy `user`-mode fallback and the optional `UGCSPY_USE_CHROMIUM=1` discovery above. It does nothing for the default browser-free search, and `--mode keyword` is pure HTTP (tikwm) and ignores it entirely. If you do need it for the Chromium paths, set it from browser cookies:
 
 1. Open tiktok.com in Chrome → DevTools → Application → Cookies → tiktok.com
 2. Copy the `msToken` value

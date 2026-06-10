@@ -98,7 +98,7 @@ The default sort is **views descending** — same as BigSpy ranks ads by impress
 
 The BigSpy-for-UGC question is "who's posting about this brand?", not "what is the brand posting?". Hashtag mode answers the first; `@handle` answers the second. Both are useful, but the wedge — the thing you can't easily get from any existing SaaS — is finding the third-party creator cohort.
 
-A precision filter rejects videos that TikTok's hashtag endpoint over-matches (e.g. "be freed" / "freed" appearing in unrelated contexts collide with `#befreed`). Only videos with an explicit `#brand`, `#brand_NNNN` campaign code, or `@brand` mention are kept.
+A precision filter rejects videos that TikTok's hashtag endpoint over-matches (e.g. "be freed" / "freed" appearing in unrelated contexts collide with `#befreed`). Only videos whose caption carries the brand via `#brand`, a `#brand_NNNN` campaign code, the `#brandapp` variant, an `@brand` mention, or the plain-text brand token at word boundaries are kept.
 
 ### How hashtag search actually works (browser-free, two-stage)
 
@@ -232,7 +232,7 @@ bun run src/cli.ts watch remove 1
 
 **Recommended path:**
 - Try `mock` first to see how the CLI works.
-- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. The default path runs on the tikwm relay (discovery) + yt-dlp (coverage); [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, v7.3.3 shipped April 2026) is kept for the `user`/`keyword`-mode fallbacks — all via a Python subprocess.
+- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. The default path runs on the tikwm relay (discovery) + yt-dlp (coverage); [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, v7.3.3 shipped April 2026) is kept for the optional `UGCSPY_USE_CHROMIUM=1` fallbacks (user-mode rescue + extra discovery) — all via a Python subprocess.
 - Add `scrapecreators` if you need Instagram Reels coverage or hit rate limits on the OSS path.
 
 **Why no free Instagram option?** No production-grade free Instagram Reels scraper is currently maintained. Meta is more aggressive than TikTok about killing scrapers, and the leading repos either require login (ban risk for the user's account) or have been abandoned. ScrapeCreators is the honest answer for IG until that changes.
@@ -250,7 +250,7 @@ Hashtag mode is **browser-free** by default — discovery goes through the tikwm
 
 **Optional Chromium fallback.** Discovery is browser-free by default — the Chromium binary isn't even downloaded unless you ask for it. If you want the legacy Chromium-assisted discovery as an *extra* source (e.g. on a residential IP where it's stable), provision it once with `ugcspy install-deps --with-browser` (~150MB), then set `UGCSPY_USE_CHROMIUM=1`. It's off by default because it crashes/times out on most hosts and the tikwm sources cover the same ground.
 
-**"TikTokApi not installed."** The `user` and `keyword` modes still use TikTokApi. Run `ugcspy install-deps` to provision the managed venv (one-time). Hashtag mode's pure-HTTP discovery doesn't require it.
+**"TikTokApi not installed."** The bridge imports TikTokApi for `user` and `hashtag` modes (even though it only *uses* live TikTokApi sessions in the optional `UGCSPY_USE_CHROMIUM=1` fallbacks), so either mode can raise this on a bare interpreter. Run `ugcspy install-deps` to provision the managed venv (one-time). `--mode keyword` is pure HTTP (tikwm) and never needs TikTokApi.
 
 **The brand name is ambiguous (e.g. `#headway` matches a book-summary app AND a therapy platform AND a dance studio).** The hashtag itself doesn't disambiguate — the precision filter only confirms each result has `#headway`, not which Headway. Use a more specific hashtag if the brand has one (e.g. `headwayapp`, `liquiddeath` is unambiguous, `notion` collides with the unrelated word but is mostly safe), or pipe `--json` and filter on related hashtags (`booksummary`, `microlearning`) yourself.
 
@@ -267,7 +267,7 @@ bun install              # install deps
 bun run typecheck        # tsc --noEmit
 bun test                 # bun's native test runner
 bun run dev -- search @glossier   # run CLI from source
-bun run build            # produce dist/cli.js (single-file binary, ~670KB)
+bun run build            # produce dist/cli.js (single-file binary, ~450KB)
 ```
 
 ## License
