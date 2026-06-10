@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Config } from "../types.ts";
@@ -15,14 +15,31 @@ const DEFAULT_CONFIG: Config = {
 export function loadConfig(path: string = CONFIG_PATH): Config {
   if (!existsSync(path)) return { ...DEFAULT_CONFIG };
   const raw = readFileSync(path, "utf8");
-  const parsed = JSON.parse(raw) as Partial<Config>;
+  let parsed: Partial<Config>;
+  try {
+    parsed = JSON.parse(raw) as Partial<Config>;
+  } catch {
+    // Every command calls loadConfig first, so a truncated/corrupted file used
+    // to brick the whole CLI (including `ugcspy init`) with a raw SyntaxError.
+    // Fail with the recovery path instead.
+    throw new Error(
+      `${path} is corrupted (invalid JSON) — delete it and re-run \`ugcspy init\`.`,
+    );
+  }
   return { ...DEFAULT_CONFIG, ...parsed };
 }
 
 export function saveConfig(config: Config, path: string = CONFIG_PATH): void {
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(config, null, 2));
-  // Best-effort 0600 — readable only by owner. Skips silently on platforms that don't support it.
+  // 0700 dir: the config holds API keys / webhook URLs, keep the whole dir owner-only.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  // Atomic + private: write a 0600 temp file, then rename over the target.
+  // A direct writeFileSync could leave a truncated config.json on crash/^C,
+  // and creating with the umask default briefly exposed secrets at 0644.
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, JSON.stringify(config, null, 2), { mode: 0o600 });
+  renameSync(tmp, path);
+  // Best-effort repair for files created before the mode option existed.
+  // Skips silently on platforms that don't support it.
   try {
     chmodSync(path, 0o600);
   } catch {

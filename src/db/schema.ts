@@ -71,8 +71,11 @@ export function migrate(db: Database): void {
   ]) {
     try {
       db.exec(stmt);
-    } catch {
-      // already added
+    } catch (err) {
+      // Only "duplicate column name" means already-migrated. Anything else
+      // (disk I/O, malformed DB, locked file) must surface, not be swallowed
+      // into a silently half-migrated schema.
+      if (!/duplicate column name/i.test((err as Error).message)) throw err;
     }
   }
 

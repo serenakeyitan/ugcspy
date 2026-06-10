@@ -1,4 +1,5 @@
 import { fileURLToPath } from "node:url";
+import { platform } from "node:os";
 import { dirname, resolve } from "node:path";
 import type { Platform, RawVideo } from "../types.ts";
 import { type DataProvider, ProviderError } from "./types.ts";
@@ -68,23 +69,7 @@ export class TikTokOssProvider implements DataProvider {
   }
 
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
-    // Keyword/niche discovery is pure HTTP (tikwm + stdlib urllib) — it needs
-    // NO venv. So if the managed venv isn't set up, fall back to system
-    // python3 for keyword mode rather than forcing an install. user/hashtag
-    // modes still require the venv (yt-dlp walk; TikTokApi fallbacks).
-    const isKeyword = payload.mode === "keyword";
-    let pythonBin: string;
-    if (venvExists()) {
-      pythonBin = venvPython();
-    } else if (isKeyword) {
-      pythonBin = "python3"; // stdlib-only path; resolved on PATH
-    } else {
-      throw new ProviderError(
-        `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30-60s; browser-free). ` +
-          `(Tip: keyword/niche search — \`--mode keyword\` — works without the venv.)`,
-        this.name,
-      );
-    }
+    const pythonBin = resolveBridgePython(venvExists(), payload.mode);
     const scriptPath = resolveScript();
     const proc = Bun.spawn([pythonBin, scriptPath], {
       stdin: "pipe",
@@ -96,48 +81,106 @@ export class TikTokOssProvider implements DataProvider {
     proc.stdin.write(JSON.stringify(payload));
     await proc.stdin.end();
 
+    // Overall deadline so a hung bridge (stuck network read, throttle loop)
+    // can't wedge a search or a daemon tick forever. Tune via
+    // UGCSPY_BRIDGE_TIMEOUT_MS; the default 30min leaves room for a full
+    // Stage-2 creator walk on an active brand.
+    const timeoutMs = bridgeTimeoutMs();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, timeoutMs);
+
     const [stdout, stderr] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),
     ]);
     const exit = await proc.exited;
+    clearTimeout(timer);
 
-    if (exit !== 0) {
-      const errBody = parseErrorBody(stdout) ?? stderr.trim() ?? "unknown error";
-      throw new ProviderError(`tiktok-oss: ${errBody}`, this.name);
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(stdout);
-    } catch {
+    if (timedOut) {
       throw new ProviderError(
-        `tiktok-oss: bridge returned non-JSON output: ${stdout.slice(0, 300)}`,
+        `tiktok-oss: bridge timed out after ${timeoutMs}ms — raise UGCSPY_BRIDGE_TIMEOUT_MS if the walk legitimately needs longer.`,
         this.name,
       );
     }
-    if (!Array.isArray(parsed)) {
-      throw new ProviderError(
-        `tiktok-oss: bridge returned non-array: ${stdout.slice(0, 300)}`,
-        this.name,
-      );
-    }
-    // Map the Python bridge's `_author` field onto our typed `author_handle`.
-    // Fallback: when the bridge couldn't supply an author (e.g. the tikwm feed
-    // item had no author.unique_id), parse the handle out of the video_url —
-    // every TikTok URL is `https://www.tiktok.com/@<handle>/video/<id>`, so the
-    // author is ALREADY present in data we hold. This is free (no extra fetch /
-    // no /user/info lookup) and recovers the rows that previously rendered as
-    // "(unknown)". Prefer the explicit field; only derive from the URL when it's
-    // missing, so a real author is never overwritten by a URL parse.
-    return (parsed as Array<RawVideo & { _author?: string }>).map((v) => {
-      const out: RawVideo = { ...v };
-      delete (out as { _author?: string })._author;
-      const author = v._author?.trim() || authorFromUrl(out.video_url);
-      if (author) out.author_handle = author;
-      return out;
-    });
+    return parseBridgeOutput(exit, stdout, stderr);
   }
+}
+
+// Decide which python runs the bridge. Keyword/niche discovery is pure HTTP
+// (tikwm + stdlib urllib) — it needs NO venv, so it can fall back to a system
+// interpreter rather than forcing an install. user/hashtag modes still require
+// the venv (yt-dlp walk; TikTokApi fallbacks). On Windows the system binary is
+// `python` (python.org installs no `python3`, and the WindowsApps `python3.exe`
+// is a Store stub) — match venv.ts / install-deps' platform handling.
+// Exported for tests.
+export function resolveBridgePython(hasVenv: boolean, mode: unknown): string {
+  if (hasVenv) return venvPython();
+  if (mode === "keyword") {
+    return platform() === "win32" ? "python" : "python3"; // stdlib-only path; resolved on PATH
+  }
+  throw new ProviderError(
+    `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30-60s; browser-free). ` +
+      `(Tip: keyword/niche search — \`--mode keyword\` — works without the venv.)`,
+    "tiktok-oss",
+  );
+}
+
+// Bridge deadline in ms (default 30min). Invalid/absent env values fall back
+// to the default. Exported for tests.
+export function bridgeTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.UGCSPY_BRIDGE_TIMEOUT_MS;
+  const n = raw === undefined ? NaN : Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 1_800_000;
+}
+
+// Pure parse of the bridge's (exit, stdout, stderr) — exported for tests.
+//
+// Maps the Python bridge's `_author` field onto our typed `author_handle`.
+// Fallback: when the bridge couldn't supply an author (e.g. the tikwm feed
+// item had no author.unique_id), parse the handle out of the video_url —
+// every TikTok URL is `https://www.tiktok.com/@<handle>/video/<id>`, so the
+// author is ALREADY present in data we hold. This is free (no extra fetch /
+// no /user/info lookup) and recovers the rows that previously rendered as
+// "(unknown)". Prefer the explicit field; only derive from the URL when it's
+// missing, so a real author is never overwritten by a URL parse.
+export function parseBridgeOutput(exit: number, stdout: string, stderr: string): RawVideo[] {
+  const name = "tiktok-oss";
+  if (exit !== 0) {
+    // NOTE: `||` (not `??`) for the stderr fallback — trim() always returns a
+    // string, so a bridge that died with empty output (OOM-kill, SIGKILL)
+    // must still produce a non-blank error naming the exit code.
+    const errBody =
+      parseErrorBody(stdout) ?? (stderr.trim() || `bridge exited ${exit} with no output`);
+    throw new ProviderError(`tiktok-oss: ${errBody}`, name);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new ProviderError(
+      `tiktok-oss: bridge returned non-JSON output: ${stdout.slice(0, 300)}`,
+      name,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new ProviderError(
+      `tiktok-oss: bridge returned non-array: ${stdout.slice(0, 300)}`,
+      name,
+    );
+  }
+  return (parsed as Array<RawVideo & { _author?: string }>).map((v) => {
+    const out: RawVideo = { ...v };
+    delete (out as { _author?: string })._author;
+    const author = v._author?.trim() || authorFromUrl(out.video_url);
+    if (author) out.author_handle = author;
+    return out;
+  });
 }
 
 // Extract the @handle from a TikTok video URL. Returns "" when the URL has no

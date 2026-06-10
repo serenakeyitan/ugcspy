@@ -86,6 +86,31 @@ describe("evaluateWatchState (cold-start gate)", () => {
     const status = evaluateWatchState(created, 30, NOW);
     expect(status.state).toBe("active");
   });
+
+  // watches.created_at comes from SQLite datetime('now'): UTC in
+  // "YYYY-MM-DD HH:MM:SS" form with no zone marker. JS parses that form as
+  // LOCAL time, which skewed the gate by the host's TZ offset (and made a
+  // just-created watch report negative age east of UTC).
+  describe("SQLite bare-UTC created_at parsing", () => {
+    test("exactly 7 UTC days ago is active, regardless of host timezone", () => {
+      const status = evaluateWatchState("2026-05-08 12:00:00", 50, NOW);
+      expect(status.state).toBe("active");
+      expect(status.days_since_added).toBeCloseTo(7, 5);
+    });
+
+    test("6d23h ago (UTC) is still warming up with a sane remaining-days reason", () => {
+      const status = evaluateWatchState("2026-05-08 13:00:00", 50, NOW);
+      expect(status.state).toBe("warming_up");
+      expect(status.reason).toBe("1d remaining in warmup");
+      expect(status.days_since_added).toBeGreaterThan(0); // never negative
+    });
+
+    test("a watch created 'now' has ~0 days_since_added (no TZ-offset skew)", () => {
+      const status = evaluateWatchState("2026-05-15 12:00:00", 0, NOW);
+      expect(status.days_since_added).toBeCloseTo(0, 5);
+      expect(status.reason).toBe("7d remaining in warmup");
+    });
+  });
 });
 
 describe("trailingMedianViews", () => {

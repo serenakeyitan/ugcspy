@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { openDb } from "../src/db/index.ts";
 import { migrate } from "../src/db/schema.ts";
 
 // Regression tests for the videos uniqueness model. The original schema used a
@@ -155,11 +159,37 @@ describe("migration from the old global-unique schema", () => {
   });
 
   test("migrate() is idempotent on an already-current schema", () => {
+    // Also covers the ALTER loop's error filter: the second migrate() hits
+    // "duplicate column name" for author_handle, which must stay swallowed.
     const db = freshDb(); // already per-competitor
     expect(() => migrate(db)).not.toThrow();
     const ddl = db
       .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='videos'`)
       .get() as { sql: string };
     expect(/competitor_id\s*,\s*platform\s*,\s*external_id/i.test(ddl.sql)).toBe(true);
+  });
+});
+
+describe("openDb hardening (temp path — never ~/.ugcspy)", () => {
+  test("sets busy_timeout=5000 and locks the db dir/files down to owner-only", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ugcspy-db-test-"));
+    const dbDir = join(dir, "state");
+    const path = join(dbDir, "db.sqlite");
+    try {
+      const db = openDb(path);
+      const bt = db.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+      expect(bt.timeout).toBe(5000);
+      // The DB stores Slack webhook URLs — same protection as config.json.
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      expect(statSync(dbDir).mode & 0o777).toBe(0o700);
+      for (const sidecar of [`${path}-wal`, `${path}-shm`]) {
+        if (existsSync(sidecar)) {
+          expect(statSync(sidecar).mode & 0o777).toBe(0o600);
+        }
+      }
+      db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

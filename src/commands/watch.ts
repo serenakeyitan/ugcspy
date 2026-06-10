@@ -10,18 +10,33 @@ export interface WatchOptions {
   platform: Platform;
 }
 
-export async function runWatchAdd(handleRaw: string, opts: WatchOptions): Promise<void> {
+export async function runWatchAdd(
+  handleRaw: string,
+  opts: WatchOptions,
+  db: ReturnType<typeof openDb> = openDb(),
+): Promise<void> {
   const handle = handleRaw.startsWith("@") ? handleRaw : `@${handleRaw}`;
-  const config = loadConfig();
-  const webhook = opts.slackWebhook ?? config.default_slack_webhook;
+  // The CLI layer validates --threshold, but guard here too for programmatic
+  // callers: SQLite binds NaN as NULL, and a NULL multiplier turns EVERY video
+  // into a "breakout" (median * null = 0).
+  if (!Number.isFinite(opts.threshold) || opts.threshold <= 0) {
+    console.error(chalk.red(`--threshold must be a positive number (got ${opts.threshold}).`));
+    process.exit(1);
+  }
+  const webhook = opts.slackWebhook ?? loadConfig().default_slack_webhook;
   if (!webhook) {
     console.error(
       chalk.red("No Slack webhook URL provided. Pass --slack-webhook or run `ugcspy init`."),
     );
     process.exit(1);
   }
+  try {
+    new URL(webhook);
+  } catch {
+    console.error(chalk.red(`Slack webhook is not a valid URL: ${webhook}`));
+    process.exit(1);
+  }
 
-  const db = openDb();
   db.prepare(`INSERT OR IGNORE INTO competitors (handle, platform) VALUES (?, ?)`).run(
     handle,
     opts.platform,
@@ -30,6 +45,26 @@ export async function runWatchAdd(handleRaw: string, opts: WatchOptions): Promis
     .prepare(`SELECT id FROM competitors WHERE handle = ? AND platform = ?`)
     .get(handle, opts.platform) as { id: number } | undefined;
   if (!competitor) throw new Error("Failed to register competitor");
+
+  // Re-running `watch add` for the same handle+webhook is the natural way to
+  // change a threshold — update in place instead of silently creating a
+  // duplicate watch (which would double every Slack alert forever). A
+  // DIFFERENT webhook for the same handle is a legit second channel.
+  const existing = db
+    .prepare(`SELECT id FROM watches WHERE competitor_id = ? AND slack_webhook_url = ?`)
+    .get(competitor.id, webhook) as { id: number } | undefined;
+  if (existing) {
+    db.prepare(`UPDATE watches SET threshold_multiplier = ? WHERE id = ?`).run(
+      opts.threshold,
+      existing.id,
+    );
+    console.log(
+      chalk.green(
+        `✓ Updated existing watch for ${handle} on ${opts.platform} → ${opts.threshold}x baseline.`,
+      ),
+    );
+    return;
+  }
 
   db.prepare(
     `INSERT INTO watches (competitor_id, slack_webhook_url, threshold_multiplier, state) VALUES (?, ?, ?, 'warming_up')`,

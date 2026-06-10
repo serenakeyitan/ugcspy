@@ -1,25 +1,17 @@
 import chalk from "chalk";
 import ora from "ora";
 import { openDb } from "../db/index.ts";
+import { upsertVideos } from "../db/videos.ts";
 import { loadConfig } from "../lib/config.ts";
 import { detectBreakouts, evaluateWatchState, filterRecent24h } from "../lib/breakout.ts";
 import { postBreakoutAlert } from "../lib/slack.ts";
 import { getProvider } from "../providers/index.ts";
-import type { Competitor, Platform, RawVideo, VideoRecord, Watch } from "../types.ts";
+import type { Competitor, Platform, VideoRecord, Watch } from "../types.ts";
 
 export interface DaemonOptions {
   once: boolean;
   intervalMs: number;
   windowDays: number;
-}
-
-// Caption-only hook (same logic as search.ts). Free, deterministic, no API key.
-function captionHook(caption: string): { text: string; source: string } {
-  const trimmed = caption.trim();
-  if (!trimmed) return { text: "", source: "none" };
-  const match = trimmed.match(/^[^.!?\n]{1,120}/);
-  const text = match ? match[0]!.trim() : trimmed.slice(0, 120);
-  return { text, source: "caption" };
 }
 
 export async function runDaemon(opts: DaemonOptions): Promise<void> {
@@ -67,14 +59,18 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
         }
 
         for (const c of fresh_candidates) {
+          // Claim the alert in the DB BEFORE posting (INSERT OR IGNORE +
+          // changes check) so a concurrent tick can never double-send the
+          // same breakout. At-most-once by design: if the Slack post fails
+          // after the claim we log and move on — a missed alert beats
+          // re-spamming the channel on every subsequent tick.
+          if (!claimAlert(db, c.video.id, w.id)) continue;
           const result = await postBreakoutAlert(
             w.slack_webhook_url,
             { id: w.competitor_id, handle: w.handle, platform: w.platform as Platform, added_at: "" },
             c,
           );
-          if (result.ok) {
-            recordFired(db, c.video.id, w.id);
-          } else {
+          if (!result.ok) {
             console.error(chalk.red(`Slack post failed (${result.status}): ${result.body}`));
           }
         }
@@ -101,59 +97,17 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function upsertVideos(
-  db: ReturnType<typeof openDb>,
-  competitorId: number,
-  videos: RawVideo[],
-): void {
-  const stmt = db.prepare(`
-    INSERT INTO videos (
-      competitor_id, platform, external_id, posted_at, caption, thumbnail_url, video_url,
-      view_count, like_count, comment_count, share_count,
-      hook_source, hook_text, hook_confidence, format_tag, raw_metrics_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(competitor_id, platform, external_id) DO UPDATE SET
-      view_count = excluded.view_count,
-      like_count = excluded.like_count,
-      comment_count = excluded.comment_count,
-      share_count = excluded.share_count,
-      fetched_at = datetime('now')
-  `);
-  const tx = db.transaction((rows: RawVideo[]) => {
-    for (const v of rows) {
-      const hook = captionHook(v.caption);
-      stmt.run(
-        competitorId,
-        v.platform,
-        v.external_id,
-        v.posted_at,
-        v.caption,
-        v.thumbnail_url,
-        v.video_url,
-        v.view_count,
-        v.like_count,
-        v.comment_count,
-        v.share_count,
-        hook.source,
-        hook.text,
-        hook.text ? 1.0 : 0,
-        null,
-        JSON.stringify({}),
-      );
-    }
-  });
-  tx(videos);
-}
-
 function readTrailingWindow(
   db: ReturnType<typeof openDb>,
   competitorId: number,
   windowDays: number,
 ): VideoRecord[] {
   const cutoff = new Date(Date.now() - windowDays * 86_400_000).toISOString();
+  // datetime() compare so legacy offset-format posted_at rows still land in
+  // the right side of the cutoff (new rows are normalized to UTC Z at upsert).
   return db
     .prepare(
-      `SELECT * FROM videos WHERE competitor_id = ? AND posted_at >= ? ORDER BY posted_at DESC`,
+      `SELECT * FROM videos WHERE competitor_id = ? AND datetime(posted_at) >= datetime(?) ORDER BY datetime(posted_at) DESC`,
     )
     .all(competitorId, cutoff) as VideoRecord[];
 }
@@ -165,11 +119,18 @@ function alreadyFired(db: ReturnType<typeof openDb>, videoId: number, watchId: n
   return Boolean(row);
 }
 
-function recordFired(db: ReturnType<typeof openDb>, videoId: number, watchId: number): void {
-  db.prepare(`INSERT OR IGNORE INTO alerts_fired (video_id, watch_id) VALUES (?, ?)`).run(
-    videoId,
-    watchId,
-  );
+// Atomically claim a (video, watch) alert. Returns true only for the writer
+// that actually inserted the row — every concurrent/repeat caller gets false.
+// Exported for tests (the claim-before-send dedupe depends on this contract).
+export function claimAlert(
+  db: ReturnType<typeof openDb>,
+  videoId: number,
+  watchId: number,
+): boolean {
+  const result = db
+    .prepare(`INSERT OR IGNORE INTO alerts_fired (video_id, watch_id) VALUES (?, ?)`)
+    .run(videoId, watchId);
+  return result.changes > 0;
 }
 
 function setWatchState(db: ReturnType<typeof openDb>, id: number, state: "warming_up" | "active"): void {

@@ -181,11 +181,13 @@ async function run(cmd: string, args: string[]): Promise<RunResult> {
   }
 }
 
-function resolveRequirements(): string {
+// Exported for tests: a scripts/ rename or move must fail in CI, not on a
+// user's machine mid-onboarding.
+export function resolveRequirements(): string {
   return resolveScriptsFile("requirements.txt");
 }
 
-function resolveAudioRequirements(): string {
+export function resolveAudioRequirements(): string {
   return resolveScriptsFile("requirements-audio.txt");
 }
 

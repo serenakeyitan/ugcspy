@@ -2,6 +2,7 @@ import chalk from "chalk";
 import Table from "cli-table3";
 import ora from "ora";
 import { openDb } from "../db/index.ts";
+import { reconcileVideosWindow, upsertVideos } from "../db/videos.ts";
 import { loadConfig } from "../lib/config.ts";
 import { getProvider } from "../providers/index.ts";
 import type { DataProvider } from "../providers/index.ts";
@@ -27,15 +28,33 @@ export interface SearchOptions {
   mode?: SearchMode; // explicit override; otherwise auto-detected from query
 }
 
-// Hook = first sentence-ish chunk of the caption, capped at 120 chars.
-// Free, deterministic, no API key. The Claude Code plugin handles richer
-// extraction (overlay text via vision, format classification) on demand.
-function captionHook(caption: string): { text: string; source: string } {
-  const trimmed = caption.trim();
-  if (!trimmed) return { text: "", source: "none" };
-  const match = trimmed.match(/^[^.!?\n]{1,120}/);
-  const text = match ? match[0]!.trim() : trimmed.slice(0, 120);
-  return { text, source: "caption" };
+// Raw commander option object → typed SearchOptions. Exported (and pure) so
+// the two back-compat contracts here stay under test: the legacy "engagement"
+// sort alias (existing scripts pass it; it must keep mapping to "views") and
+// the --mode whitelist (anything else falls back to auto-detection).
+export function normalizeSearchOptions(raw: {
+  limit: number;
+  sort: string;
+  platform?: string;
+  json?: unknown;
+  refresh?: unknown;
+  days: number;
+  mode?: string;
+}): SearchOptions {
+  const sort: SearchSort = raw.sort === "engagement" ? "views" : (raw.sort as SearchSort);
+  const mode: SearchMode | undefined =
+    raw.mode === "user" || raw.mode === "hashtag" || raw.mode === "keyword"
+      ? raw.mode
+      : undefined;
+  return {
+    limit: raw.limit,
+    sort,
+    platform: raw.platform as Platform | "all" | undefined,
+    json: Boolean(raw.json),
+    refresh: Boolean(raw.refresh),
+    days: raw.days,
+    mode,
+  };
 }
 
 // Precision filter for hashtag results.
@@ -101,6 +120,28 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+// Mode-aware precision filtering. The brand filter applies ONLY in hashtag
+// mode: keyword captions by design carry no brand tag, and user mode is the
+// brand's own catalog — re-applying isHashtagMatch in either would silently
+// zero their results (the original capped-results bug class). Exported so the
+// WIRING (not just isHashtagMatch itself) stays under test.
+export function applyHashtagPrecision(
+  videos: RawVideo[],
+  mode: SearchMode,
+  brand: string,
+): RawVideo[] {
+  if (mode !== "hashtag") return videos;
+  // 1. Drop videos whose caption doesn't actually carry the brand
+  //    hashtag/mention — TikTok's hashtag endpoint over-matches.
+  // 2. Drop the brand's own account from third-party UGC results. If a user
+  //    wants `@brand`'s posts, they pass `@brand`. The third-party-UGC view
+  //    should show CREATORS, not the brand.
+  const brandHandle = brand.replace(/^[#@]/, "").toLowerCase();
+  return videos
+    .filter((v) => isHashtagMatch(v.caption, brand))
+    .filter((v) => (v.author_handle ?? "").toLowerCase() !== brandHandle);
+}
+
 interface ParsedQuery {
   mode: SearchMode;
   // Canonical key used for the competitors table:
@@ -155,6 +196,7 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
   const provider = getProvider(config);
 
   const allVideos: VideoRecord[] = [];
+  const failedPlatforms: Platform[] = [];
 
   for (const platform of platforms) {
     const competitorId = upsertCompetitor(db, query.key, platform);
@@ -169,21 +211,21 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
           ).start();
       try {
         const raw = await fetchByMode(provider, query, platform, opts.days);
-        let filtered = raw;
-        if (query.mode === "hashtag") {
-          // 1. Drop videos whose caption doesn't actually carry the brand
-          //    hashtag/mention — TikTok's hashtag endpoint over-matches.
-          filtered = filtered.filter((v) => isHashtagMatch(v.caption, query.value));
-          // 2. Drop the brand's own account from third-party UGC results.
-          //    If a user wants `@brand`'s posts, they pass `@brand`. The
-          //    third-party-UGC view should show CREATORS, not the brand.
-          const brandHandle = query.value.toLowerCase();
-          filtered = filtered.filter(
-            (v) => (v.author_handle ?? "").toLowerCase() !== brandHandle,
-          );
-        }
+        const filtered = applyHashtagPrecision(raw, query.mode, query.value);
         const droppedCount = raw.length - filtered.length;
         upsertVideos(db, competitorId, filtered);
+        if (opts.refresh && filtered.length > 0) {
+          // A successful refresh is the source of truth for the window: drop
+          // in-window rows the provider no longer returns (deleted/private
+          // videos) so stale entries can't linger in cached views forever.
+          reconcileVideosWindow(
+            db,
+            competitorId,
+            platform,
+            opts.days,
+            filtered.map((v) => v.external_id),
+          );
+        }
         videos = readCachedVideos(db, competitorId, platform, opts.days);
         const suffix =
           droppedCount > 0
@@ -191,11 +233,31 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
             : "";
         spinner?.succeed(`${platform}: ${chalk.cyan(videos.length)} videos${suffix}`);
       } catch (err) {
+        failedPlatforms.push(platform);
         spinner?.fail(`${platform}: ${(err as Error).message}`);
+        if (opts.json) {
+          // --json consumers parse stdout; surface provider failures as a
+          // structured line on STDERR so a partial result isn't silently
+          // mistaken for "no videos exist".
+          console.error(
+            JSON.stringify({
+              warning: "provider_failure",
+              platform,
+              provider: provider.name,
+              message: (err as Error).message,
+            }),
+          );
+        }
         continue;
       }
     }
     allVideos.push(...videos);
+  }
+
+  // Partial success (one platform from cache or fetch) stays exit 0; only a
+  // total wipeout — every requested platform failed to fetch — is an error.
+  if (failedPlatforms.length === platforms.length) {
+    process.exitCode = 1;
   }
 
   let rows = allVideos;
@@ -214,9 +276,11 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
   printTable(query, rows);
 }
 
-async function fetchByMode(
+// Exported for tests: keyword mode must fail with an actionable error on
+// providers that don't implement fetchKeywordVideos (back-compat contract).
+export async function fetchByMode(
   provider: DataProvider,
-  query: ParsedQuery,
+  query: Pick<ParsedQuery, "mode" | "value">,
   platform: Platform,
   days: number,
 ): Promise<RawVideo[]> {
@@ -255,54 +319,6 @@ function upsertCompetitor(
   return row.id;
 }
 
-function upsertVideos(
-  db: ReturnType<typeof openDb>,
-  competitorId: number,
-  videos: RawVideo[],
-): void {
-  const stmt = db.prepare(`
-    INSERT INTO videos (
-      competitor_id, platform, external_id, posted_at, caption, thumbnail_url, video_url,
-      view_count, like_count, comment_count, share_count,
-      hook_source, hook_text, hook_confidence, format_tag, author_handle, raw_metrics_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(competitor_id, platform, external_id) DO UPDATE SET
-      view_count = excluded.view_count,
-      like_count = excluded.like_count,
-      comment_count = excluded.comment_count,
-      share_count = excluded.share_count,
-      fetched_at = datetime('now'),
-      hook_text = excluded.hook_text,
-      hook_source = excluded.hook_source,
-      author_handle = excluded.author_handle
-  `);
-  const tx = db.transaction((rows: RawVideo[]) => {
-    for (const v of rows) {
-      const hook = captionHook(v.caption);
-      stmt.run(
-        competitorId,
-        v.platform,
-        v.external_id,
-        v.posted_at,
-        v.caption,
-        v.thumbnail_url,
-        v.video_url,
-        v.view_count,
-        v.like_count,
-        v.comment_count,
-        v.share_count,
-        hook.source,
-        hook.text,
-        hook.text ? 1.0 : 0,
-        null,
-        v.author_handle ?? null,
-        JSON.stringify({}),
-      );
-    }
-  });
-  tx(videos);
-}
-
 export function readCachedVideos(
   db: ReturnType<typeof openDb>,
   competitorId: number,
@@ -317,10 +333,13 @@ export function readCachedVideos(
   // this keeps the cached path consistent with it.
   if (windowDays && windowDays > 0) {
     const cutoff = new Date(Date.now() - windowDays * 86_400_000).toISOString();
+    // datetime() on both sides: new rows are normalized to UTC Z at upsert,
+    // but legacy rows may carry "+00:00" offsets — a raw TEXT >= compare
+    // misorders those against a Z-suffixed cutoff.
     return db
       .prepare(
-        `SELECT * FROM videos WHERE competitor_id = ? AND platform = ? AND posted_at >= ?
-         ORDER BY posted_at DESC`,
+        `SELECT * FROM videos WHERE competitor_id = ? AND platform = ? AND datetime(posted_at) >= datetime(?)
+         ORDER BY datetime(posted_at) DESC`,
       )
       .all(competitorId, platform, cutoff) as VideoRecord[];
   }

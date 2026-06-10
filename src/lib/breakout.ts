@@ -19,7 +19,15 @@ export function evaluateWatchState(
   videosInTrailingWindow: number,
   now: Date = new Date(),
 ): WatchStatus {
-  const created = new Date(watchCreatedAt).getTime();
+  // watches.created_at comes from SQLite datetime('now') — UTC in
+  // "YYYY-MM-DD HH:MM:SS" form with NO zone marker, which JS parses as LOCAL
+  // time. That skewed this gate by the host's TZ offset (west-of-UTC waited
+  // extra warmup; east-of-UTC exited early and could even report negative
+  // ages). Pin bare timestamps to UTC before parsing.
+  const createdRaw = watchCreatedAt.includes("T")
+    ? watchCreatedAt
+    : `${watchCreatedAt.replace(" ", "T")}Z`;
+  const created = new Date(createdRaw).getTime();
   const ageMs = now.getTime() - created;
   const days_since_added = ageMs / 86_400_000;
 

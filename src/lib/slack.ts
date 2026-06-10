@@ -29,12 +29,20 @@ export async function postBreakoutAlert(
       ],
     },
   ];
-  const res = await fetch(webhookUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, blocks }),
-  });
-  return { ok: res.ok, status: res.status, body: await res.text() };
+  // 10s cap: a stalled webhook must not wedge a daemon tick. Network errors
+  // and timeouts come back as a failed result (status 0) instead of a throw,
+  // so one watch's bad webhook can't abort the alerts/watches after it.
+  try {
+    const res = await fetch(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, blocks }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    return { ok: res.ok, status: res.status, body: await res.text() };
+  } catch (err) {
+    return { ok: false, status: 0, body: (err as Error).message };
+  }
 }
 
 export function formatAlert(competitor: Competitor, candidate: BreakoutCandidate): string {

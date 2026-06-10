@@ -5,6 +5,8 @@ import type { Config } from "../types.ts";
 
 export type Provider = "tiktok-oss" | "scrapecreators" | "mock";
 
+const VALID_PROVIDERS: readonly Provider[] = ["tiktok-oss", "scrapecreators", "mock"];
+
 export interface InitOptions {
   // Non-interactive auto-accept mode for plugin/onboarding use.
   // When yes=true, runs without prompts using the values below + defaults
@@ -16,6 +18,17 @@ export interface InitOptions {
 }
 
 export async function runInit(opts: InitOptions = {}): Promise<void> {
+  // --provider comes in as a raw string from commander; reject typos up front
+  // instead of saving a config every later command chokes on.
+  if (opts.provider && !VALID_PROVIDERS.includes(opts.provider)) {
+    console.error(
+      chalk.red(
+        `Unknown provider '${opts.provider}'. Valid providers: ${VALID_PROVIDERS.join(", ")}.`,
+      ),
+    );
+    process.exit(1);
+  }
+
   console.log(chalk.bold("\nugcspy setup\n"));
   console.log(`Config will be written to ${chalk.dim(CONFIG_PATH)} (chmod 0600).\n`);
 
