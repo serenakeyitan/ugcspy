@@ -20,9 +20,14 @@ export function openDb(path: string = DEFAULT_DB_PATH): Database {
     // The DB stores Slack webhook URLs (write credentials) — keep it owner-only
     // like config.json. Best-effort, same pattern as saveConfig: repairs the
     // 0755 dir / 0644 files of existing installs, covers the WAL sidecars, and
-    // skips silently on platforms without POSIX modes (win32).
+    // skips silently on platforms without POSIX modes (win32). The DIRECTORY
+    // chmod is restricted to the managed ~/.ugcspy dir — a custom db path may
+    // live inside a directory we don't own (e.g. a project folder), and
+    // tightening that to 0700 could break unrelated sibling files.
     try {
-      chmodSync(dirname(path), 0o700);
+      if (dirname(path) === dirname(DEFAULT_DB_PATH)) {
+        chmodSync(dirname(path), 0o700);
+      }
       for (const p of [path, `${path}-wal`, `${path}-shm`]) {
         if (existsSync(p)) chmodSync(p, 0o600);
       }

@@ -256,6 +256,12 @@ describe("normalizeSearchOptions (CLI raw options → SearchOptions)", () => {
     expect(o.limit).toBe(20);
     expect(o.days).toBe(30);
   });
+
+  test("prune defaults to false — destructive reconciliation is strictly opt-in", () => {
+    expect(normalizeSearchOptions({ ...base }).prune).toBe(false);
+    expect(normalizeSearchOptions({ ...base, refresh: true }).prune).toBe(false);
+    expect(normalizeSearchOptions({ ...base, refresh: true, prune: true }).prune).toBe(true);
+  });
 });
 
 function raw(over: Partial<RawVideo> = {}): RawVideo {
@@ -406,7 +412,7 @@ describe("normalizePostedAt (UTC normalization at the persistence boundary)", ()
   });
 });
 
-describe("reconcileVideosWindow (--refresh drops in-window rows the provider no longer returns)", () => {
+describe("reconcileVideosWindow (--refresh --prune drops in-window rows the provider no longer returns; opt-in because providers can return partial results)", () => {
   function seedReconcile(): { db: Database; competitorId: number } {
     const db = new Database(":memory:");
     migrate(db);

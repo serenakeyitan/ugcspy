@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db/index.ts";
@@ -188,6 +188,21 @@ describe("openDb hardening (temp path — never ~/.ugcspy)", () => {
         }
       }
       db.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("does NOT chmod a pre-existing custom parent dir (only the managed ~/.ugcspy dir is repaired)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ugcspy-db-test-"));
+    try {
+      // A user-owned project folder at 0755 — openDb must not tighten it to
+      // 0700 and break unrelated sibling files (codex review P2).
+      chmodSync(dir, 0o755);
+      const db = openDb(join(dir, "db.sqlite"));
+      db.close();
+      expect(statSync(dir).mode & 0o777).toBe(0o755);
+      expect(statSync(join(dir, "db.sqlite")).mode & 0o777).toBe(0o600);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

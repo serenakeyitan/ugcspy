@@ -63,6 +63,10 @@ program
     "user | hashtag | keyword — override auto-detection (keyword = niche/topic discovery)",
   )
   .option("--refresh", "force refetch even if cached")
+  .option(
+    "--prune",
+    "with --refresh: treat the fetch as complete — delete in-window cached videos it didn't return (providers can return partial results, so this is opt-in)",
+  )
   .option("--json", "emit JSON instead of a table")
   .action(async (query: string, raw) => {
     // normalizeSearchOptions handles the legacy "engagement" sort alias and

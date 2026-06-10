@@ -24,6 +24,7 @@ export interface SearchOptions {
   platform?: Platform | "all";
   json: boolean;
   refresh: boolean;
+  prune: boolean; // with --refresh: treat the fetch as complete and drop in-window rows it didn't return
   days: number;
   mode?: SearchMode; // explicit override; otherwise auto-detected from query
 }
@@ -38,6 +39,7 @@ export function normalizeSearchOptions(raw: {
   platform?: string;
   json?: unknown;
   refresh?: unknown;
+  prune?: unknown;
   days: number;
   mode?: string;
 }): SearchOptions {
@@ -52,6 +54,7 @@ export function normalizeSearchOptions(raw: {
     platform: raw.platform as Platform | "all" | undefined,
     json: Boolean(raw.json),
     refresh: Boolean(raw.refresh),
+    prune: Boolean(raw.prune),
     days: raw.days,
     mode,
   };
@@ -214,10 +217,14 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
         const filtered = applyHashtagPrecision(raw, query.mode, query.value);
         const droppedCount = raw.length - filtered.length;
         upsertVideos(db, competitorId, filtered);
-        if (opts.refresh && filtered.length > 0) {
-          // A successful refresh is the source of truth for the window: drop
-          // in-window rows the provider no longer returns (deleted/private
-          // videos) so stale entries can't linger in cached views forever.
+        if (opts.refresh && opts.prune && filtered.length > 0) {
+          // Pruning is OPT-IN (--prune): providers return best-effort partial
+          // results (keyword mode succeeds on partial pages; the hashtag walk
+          // skips failed creators), so treating every refresh as the complete
+          // source of truth would delete valid cached rows on a flaky run —
+          // and alerts cascade with their videos. Only the user can declare
+          // "this fetch is the truth"; with --prune we drop in-window rows
+          // the provider didn't return (deleted/private/stale videos).
           reconcileVideosWindow(
             db,
             competitorId,
