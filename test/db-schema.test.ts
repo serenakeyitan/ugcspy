@@ -156,6 +156,18 @@ describe("migration from the old global-unique schema", () => {
        VALUES (?, 'tiktok', 'keep-me', '2026-01-01T00:00:00+00:00')`,
     ).run(creator);
     expect((db.prepare(`SELECT COUNT(*) n FROM videos`).get() as { n: number }).n).toBe(2);
+
+    // The rebuild must carry the transcript columns (step 2 ALTERs them in
+    // BEFORE the rebuild). Regression: the first transcript command after a
+    // legacy upgrade used to die with "no such column: transcript".
+    db.prepare(
+      `UPDATE videos SET transcript = 'spoken words', transcript_kind = 'speech',
+       transcript_words = 2, transcribed_at = datetime('now') WHERE external_id = 'keep-me'`,
+    ).run();
+    const t = db
+      .prepare(`SELECT transcript_kind FROM videos WHERE transcript = 'spoken words' LIMIT 1`)
+      .get() as { transcript_kind: string };
+    expect(t.transcript_kind).toBe("speech");
   });
 
   test("migrate() is idempotent on an already-current schema", () => {

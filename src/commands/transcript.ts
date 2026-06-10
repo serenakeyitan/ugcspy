@@ -73,7 +73,7 @@ export function docFromCache(video: VideoRecord): TranscriptDoc | null {
 
 export interface CollectDeps {
   transcribe: (videoUrl: string) => Promise<TranscriptDoc>;
-  save: (videoId: number, doc: TranscriptDoc) => void;
+  save: (video: VideoRecord, doc: TranscriptDoc) => void;
   // Called once per candidate as work starts/ends; null text clears.
   progress?: (text: string | null) => void;
 }
@@ -108,7 +108,7 @@ export async function collectTranscripts(
       );
       try {
         doc = await deps.transcribe(video.video_url);
-        deps.save(video.id, doc);
+        deps.save(video, doc);
       } catch (err) {
         failures.push(`@${video.author_handle ?? "?"} ${video.external_id}: ${(err as Error).message}`);
         continue;
@@ -222,8 +222,11 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
     { top: target.kind === "query" ? opts.top : candidates.length, ...filterOf(opts) },
     {
       transcribe: (url) => provider.fetchTranscript!(url),
-      save: (videoId, doc) => {
-        if (videoId > 0) saveTranscript(db, videoId, doc);
+      save: (video, doc) => {
+        // Ad-hoc URLs (id <= 0) have no row to cache into. Persisting is keyed
+        // by (platform, external_id) so every competitor's copy of the video
+        // shares the one-shot transcript.
+        if (video.id > 0) saveTranscript(db, video, doc);
       },
       progress: spinner
         ? (text) => {
@@ -300,10 +303,19 @@ function filterOf(opts: TranscriptOptions): { talking?: boolean; nonTalking?: bo
 
 // Hook preference: the spoken first line when the video talks, else the
 // caption-derived hook already on the row.
+//
+// The PERSISTED whisper hook wins over re-deriving from the doc: cache hits
+// rebuild the doc as ONE flattened segment (segment boundaries aren't
+// persisted), so spokenHook() on a cached doc would return the first 160
+// chars of the whole transcript — a different "hook" on every cached run.
+// The stored value is the original first spoken segment; it's stable.
 export function hookFor(
   video: Pick<VideoRecord, "hook_text" | "hook_source" | "caption">,
   doc: Pick<TranscriptDoc, "segments">,
 ): { text: string; source: string } {
+  if (video.hook_source === "whisper" && video.hook_text) {
+    return { text: video.hook_text, source: "spoken" };
+  }
   const spoken = spokenHook(doc);
   if (spoken) return { text: spoken, source: "spoken" };
   const caption = (video.caption ?? "").trim();

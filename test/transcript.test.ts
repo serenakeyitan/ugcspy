@@ -328,28 +328,28 @@ describe("saveTranscript (real schema, in-memory db)", () => {
     db.prepare(`INSERT INTO competitors (handle, platform) VALUES ('#brand', 'tiktok')`).run();
     return db;
   }
+  const RAW: RawVideo = {
+    platform: "tiktok",
+    external_id: "7000000000000000001",
+    posted_at: "2026-06-01T00:00:00.000Z",
+    caption: "the caption #brand",
+    thumbnail_url: "",
+    video_url: "https://www.tiktok.com/@c/video/1",
+    view_count: 10,
+    like_count: 0,
+    comment_count: 0,
+    share_count: 0,
+    author_handle: "c",
+  };
   function insertOne(db: Database): number {
-    const raw: RawVideo = {
-      platform: "tiktok",
-      external_id: "7000000000000000001",
-      posted_at: "2026-06-01T00:00:00.000Z",
-      caption: "the caption #brand",
-      thumbnail_url: "",
-      video_url: "https://www.tiktok.com/@c/video/1",
-      view_count: 10,
-      like_count: 0,
-      comment_count: 0,
-      share_count: 0,
-      author_handle: "c",
-    };
-    upsertVideos(db, 1, [raw]);
+    upsertVideos(db, 1, [RAW]);
     return (db.prepare(`SELECT id FROM videos LIMIT 1`).get() as { id: number }).id;
   }
 
   test("persists transcript columns and upgrades the hook to whisper", () => {
     const db = freshDb();
     const id = insertOne(db);
-    saveTranscript(db, id, speechDoc());
+    saveTranscript(db, RAW, speechDoc());
     const row = db.prepare(`SELECT * FROM videos WHERE id = ?`).get(id) as VideoRecord;
     expect(row.transcript).toContain("spoken hook line");
     expect(row.transcript_kind).toBe("speech");
@@ -363,10 +363,67 @@ describe("saveTranscript (real schema, in-memory db)", () => {
   test("music doc caches the classification but leaves the caption hook alone", () => {
     const db = freshDb();
     const id = insertOne(db);
-    saveTranscript(db, id, musicDoc());
+    saveTranscript(db, RAW, musicDoc());
     const row = db.prepare(`SELECT * FROM videos WHERE id = ?`).get(id) as VideoRecord;
     expect(row.transcript_kind).toBe("music");
     expect(row.transcript).toBe("");
     expect(row.hook_source).toBe("caption"); // untouched
+  });
+
+  test("propagates the cache to EVERY competitor's copy of the same video", () => {
+    // The same TikTok video legitimately exists under multiple competitors
+    // (#brand search + @creator pull). One transcription must fill all copies
+    // or the one-shot cache promise breaks across queries.
+    const db = freshDb();
+    db.prepare(`INSERT INTO competitors (handle, platform) VALUES ('@c', 'tiktok')`).run();
+    upsertVideos(db, 1, [RAW]);
+    upsertVideos(db, 2, [RAW]);
+    saveTranscript(db, RAW, speechDoc());
+    const rows = db
+      .prepare(`SELECT transcript_kind, hook_source FROM videos WHERE external_id = ?`)
+      .all(RAW.external_id) as Array<{ transcript_kind: string; hook_source: string }>;
+    expect(rows.length).toBe(2);
+    for (const r of rows) {
+      expect(r.transcript_kind).toBe("speech");
+      expect(r.hook_source).toBe("whisper");
+    }
+  });
+
+  test("a later search refresh does NOT clobber the whisper hook", () => {
+    const db = freshDb();
+    const id = insertOne(db);
+    saveTranscript(db, RAW, speechDoc());
+    // Simulate a refresh: same video comes back with a (new) non-empty caption.
+    upsertVideos(db, 1, [{ ...RAW, caption: "refreshed caption #brand", view_count: 99 }]);
+    const row = db.prepare(`SELECT * FROM videos WHERE id = ?`).get(id) as VideoRecord;
+    expect(row.view_count).toBe(99); // metrics refreshed
+    expect(row.caption).toBe("refreshed caption #brand"); // caption refreshed
+    expect(row.hook_source).toBe("whisper"); // spoken hook survived
+    expect(row.hook_text).toBe("Here is the spoken hook line.");
+  });
+});
+
+describe("hookFor stability on cache hits", () => {
+  test("a persisted whisper hook beats re-deriving from the flattened cached doc", () => {
+    // Cache hits rebuild the doc as ONE segment containing the whole
+    // transcript; without the stored-hook preference the 'hook' would be the
+    // first 160 chars of everything — different from the original first line.
+    const video = makeVideo(1, {
+      hook_source: "whisper",
+      hook_text: "The original first spoken line.",
+    });
+    const flattened = speechDoc({
+      segments: [
+        {
+          start: 0,
+          end: 30,
+          text: "The original first spoken line. Plus every later sentence flattened together into one block.",
+          kind: "speech",
+        },
+      ],
+    });
+    const hook = hookFor(video, flattened);
+    expect(hook.text).toBe("The original first spoken line.");
+    expect(hook.source).toBe("spoken");
   });
 });

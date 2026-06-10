@@ -125,13 +125,21 @@ export function migrate(db: Database): void {
           format_tag TEXT,
           author_handle TEXT,
           raw_metrics_json TEXT NOT NULL DEFAULT '{}',
+          transcript TEXT,
+          transcript_kind TEXT,
+          transcript_lang TEXT,
+          transcript_words INTEGER,
+          transcript_duration_sec REAL,
+          transcribed_at TEXT,
           UNIQUE(competitor_id, platform, external_id)
         );
         INSERT OR IGNORE INTO videos_new
           SELECT id, competitor_id, platform, external_id, posted_at, fetched_at,
                  caption, thumbnail_url, video_url, view_count, like_count,
                  comment_count, share_count, hook_source, hook_text, hook_confidence,
-                 format_tag, author_handle, raw_metrics_json
+                 format_tag, author_handle, raw_metrics_json,
+                 transcript, transcript_kind, transcript_lang,
+                 transcript_words, transcript_duration_sec, transcribed_at
           FROM videos;
         DROP TABLE videos;
         ALTER TABLE videos_new RENAME TO videos;

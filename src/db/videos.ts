@@ -34,6 +34,9 @@ export function normalizePostedAt(s: string): string {
 //     captions expecting "a later refresh re-fetches"; before this, the
 //     ON CONFLICT clause silently dropped the rescued caption forever (and
 //     hook_text was recomputed from the NEW caption, so the two disagreed).
+//     A whisper hook (transcript-derived spoken first line) outranks any
+//     caption-derived hook and survives refreshes — only a re-transcription
+//     may replace it.
 //   - metrics follow the bridge's prefer_metrics semantics: a fresh 0 never
 //     overwrites a known nonzero count (throttled fetches report zeros).
 //   - author_handle: a NULL never overwrites a known author.
@@ -54,9 +57,12 @@ export function upsertVideos(db: Database, competitorId: number, videos: RawVide
       comment_count = CASE WHEN excluded.comment_count = 0 AND comment_count > 0 THEN comment_count ELSE excluded.comment_count END,
       share_count = CASE WHEN excluded.share_count = 0 AND share_count > 0 THEN share_count ELSE excluded.share_count END,
       fetched_at = datetime('now'),
-      hook_text = CASE WHEN excluded.caption <> '' THEN excluded.hook_text ELSE hook_text END,
-      hook_source = CASE WHEN excluded.caption <> '' THEN excluded.hook_source ELSE hook_source END,
-      hook_confidence = CASE WHEN excluded.caption <> '' THEN excluded.hook_confidence ELSE hook_confidence END,
+      hook_text = CASE WHEN hook_source = 'whisper' THEN hook_text
+                       WHEN excluded.caption <> '' THEN excluded.hook_text ELSE hook_text END,
+      hook_source = CASE WHEN hook_source = 'whisper' THEN hook_source
+                         WHEN excluded.caption <> '' THEN excluded.hook_source ELSE hook_source END,
+      hook_confidence = CASE WHEN hook_source = 'whisper' THEN hook_confidence
+                             WHEN excluded.caption <> '' THEN excluded.hook_confidence ELSE hook_confidence END,
       author_handle = COALESCE(excluded.author_handle, author_handle)
   `);
   const tx = db.transaction((rows: RawVideo[]) => {
@@ -119,28 +125,38 @@ export function transcriptText(doc: Pick<TranscriptDoc, "segments">): string {
     .trim();
 }
 
-// Persist one video's transcript into its row. The spoken hook upgrades the
-// caption-derived hook (a real first-line beats a caption guess) but a
+// Persist one video's transcript. Keyed by (platform, external_id), NOT row
+// id: the schema intentionally allows the same TikTok video under multiple
+// competitors (a #brand search and a @creator pull each own a copy), and the
+// transcript is a property of the VIDEO — writing all copies keeps the
+// one-shot-per-video cache promise across queries. The spoken hook upgrades
+// the caption-derived hook (a real first-line beats a caption guess); a
 // music-only doc leaves the existing hook columns untouched.
-export function saveTranscript(db: Database, videoId: number, doc: TranscriptDoc): void {
+export function saveTranscript(
+  db: Database,
+  video: Pick<RawVideo, "platform" | "external_id">,
+  doc: TranscriptDoc,
+): void {
   db.prepare(
     `UPDATE videos SET
        transcript = ?, transcript_kind = ?, transcript_lang = ?,
        transcript_words = ?, transcript_duration_sec = ?, transcribed_at = datetime('now')
-     WHERE id = ?`,
+     WHERE platform = ? AND external_id = ?`,
   ).run(
     transcriptText(doc),
     doc.audio_kind,
     doc.language,
     doc.lexical_word_count,
     doc.duration_sec,
-    videoId,
+    video.platform,
+    video.external_id,
   );
   const hook = spokenHook(doc);
   if (hook) {
     db.prepare(
-      `UPDATE videos SET hook_text = ?, hook_source = 'whisper', hook_confidence = 0.9 WHERE id = ?`,
-    ).run(hook, videoId);
+      `UPDATE videos SET hook_text = ?, hook_source = 'whisper', hook_confidence = 0.9
+       WHERE platform = ? AND external_id = ?`,
+    ).run(hook, video.platform, video.external_id);
   }
 }
 
