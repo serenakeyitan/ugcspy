@@ -1589,11 +1589,15 @@ def _ytdlp_rescue_budget() -> int:
 
 def _ytdlp_bin() -> str:
     """Resolve the yt-dlp binary. This script runs under the managed venv's
-    python (the TS layer spawns ~/.ugcspy/venv/bin/python), so yt-dlp installed
-    in that venv sits next to sys.executable. Prefer it; else fall back to PATH."""
-    candidate = os.path.join(os.path.dirname(sys.executable), "yt-dlp")
-    if os.path.exists(candidate):
-        return candidate
+    python (the TS layer spawns the venv interpreter WITHOUT activating it, so
+    the venv's bin/Scripts dir is NOT on PATH), and yt-dlp installed in that
+    venv sits next to sys.executable — `yt-dlp` on POSIX, `yt-dlp.exe` in a
+    Windows venv's Scripts dir. Prefer those; else fall back to PATH."""
+    base = os.path.dirname(sys.executable)
+    for name in ("yt-dlp", "yt-dlp.exe"):
+        candidate = os.path.join(base, name)
+        if os.path.exists(candidate):
+            return candidate
     return "yt-dlp"  # rely on PATH (system install)
 
 

@@ -248,6 +248,26 @@ def test_full_transcript_happy_path_with_stubbed_whisper(capsys, monkeypatch, tm
     assert doc["whisper_model"] == "base"
 
 
+def test_ytdlp_bin_resolves_windows_exe_next_to_interpreter(monkeypatch, tmp_path):
+    """The bridge runs under the venv python WITHOUT venv activation, so the
+    venv's Scripts dir is not on PATH — a Windows venv's yt-dlp.exe must be
+    found beside sys.executable, not just the extensionless POSIX name."""
+    exe = tmp_path / "Scripts" / "python.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"")
+    (tmp_path / "Scripts" / "yt-dlp.exe").write_bytes(b"")
+    monkeypatch.setattr(tf.sys, "executable", str(exe))
+    assert tf._ytdlp_bin().endswith("yt-dlp.exe")
+
+
+def test_ytdlp_bin_falls_back_to_path_when_venv_has_none(monkeypatch, tmp_path):
+    exe = tmp_path / "bin" / "python"
+    exe.parent.mkdir()
+    exe.write_bytes(b"")
+    monkeypatch.setattr(tf.sys, "executable", str(exe))
+    assert tf._ytdlp_bin() == "yt-dlp"
+
+
 def test_dispatch_requires_url(capsys, monkeypatch):
     import io
 
