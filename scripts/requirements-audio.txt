@@ -7,3 +7,4 @@
 # Without these: /ugcspy-decode + /ugcspy-remix work but only see
 # on-screen overlay text, missing the spoken narrative.
 openai-whisper>=20231117
+imageio-ffmpeg>=0.4.9  # static ffmpeg binary - transcript mode works with ZERO system deps (no brew/apt ffmpeg)

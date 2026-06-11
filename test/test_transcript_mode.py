@@ -141,15 +141,56 @@ def test_empty_result_is_speech_kind_with_no_segments():
 
 # ── run_transcript error contract ─────────────────────────────────────────────
 
+class _FakeArr:
+    """Minimal stand-in for the np array _load_audio_pcm builds — the test
+    suite stays stdlib-only (CI runners have no numpy; the venv does)."""
+
+    def flatten(self):
+        return self
+
+    def astype(self, _t):
+        return self
+
+    def __truediv__(self, _o):
+        return self
+
+
+def _install_fake_numpy(monkeypatch):
+    import types
+
+    fake_np = types.ModuleType("numpy")
+    fake_np.frombuffer = lambda _b, _t: _FakeArr()
+    fake_np.int16 = "int16"
+    fake_np.float32 = "float32"
+    monkeypatch.setitem(sys.modules, "numpy", fake_np)
+
+
+def _install_fake_whisper(monkeypatch, result=None):
+    import types
+
+    fake_whisper = types.ModuleType("whisper")
+
+    class FakeModel:
+        def transcribe(self, _audio):
+            return result if result is not None else SPEECH_RESULT
+
+    fake_whisper.load_model = lambda name: FakeModel()
+    monkeypatch.setitem(sys.modules, "whisper", fake_whisper)
+
+
 def _run_transcript_expect_error(capsys, url, match):
     with pytest.raises(SystemExit) as exc:
-        tf.run_transcript(url)
+        tf.run_transcript([url], batch=False)
     assert exc.value.code == 1
     err = json.loads(capsys.readouterr().out)
     assert match in err["error"]
 
 
-def test_non_http_url_is_rejected(capsys):
+def test_non_http_url_is_rejected(capsys, monkeypatch):
+    import shutil
+
+    _install_fake_whisper(monkeypatch)
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/ffmpeg")
     _run_transcript_expect_error(capsys, "file:///etc/passwd", "must be http(s)")
 
 
@@ -159,12 +200,32 @@ def test_missing_whisper_yields_actionable_install_hint(capsys, monkeypatch):
 
 
 def test_missing_ffmpeg_yields_actionable_hint(capsys, monkeypatch):
+    """No system ffmpeg AND no imageio_ffmpeg (the bare-CI case for an old
+    --with-audio install) → the error points at the self-contained re-install."""
+    import shutil
+
+    _install_fake_whisper(monkeypatch)
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", None)  # import → ImportError
+    _run_transcript_expect_error(capsys, "https://www.tiktok.com/@x/video/1", "ffmpeg")
+
+
+def test_ffmpeg_falls_back_to_bundled_imageio_binary(monkeypatch):
     import shutil
     import types
 
-    monkeypatch.setitem(sys.modules, "whisper", types.ModuleType("whisper"))
     monkeypatch.setattr(shutil, "which", lambda _: None)
-    _run_transcript_expect_error(capsys, "https://www.tiktok.com/@x/video/1", "ffmpeg")
+    fake_imageio = types.ModuleType("imageio_ffmpeg")
+    fake_imageio.get_ffmpeg_exe = lambda: "/venv/binaries/ffmpeg-macos-aarch64-v7.1"
+    monkeypatch.setitem(sys.modules, "imageio_ffmpeg", fake_imageio)
+    assert tf._resolve_ffmpeg() == "/venv/binaries/ffmpeg-macos-aarch64-v7.1"
+
+
+def test_ffmpeg_prefers_system_binary(monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/opt/homebrew/bin/ffmpeg")
+    assert tf._resolve_ffmpeg() == "/opt/homebrew/bin/ffmpeg"
 
 
 def test_ytdlp_failure_surfaces_stderr_tail(capsys, monkeypatch):
@@ -172,7 +233,7 @@ def test_ytdlp_failure_surfaces_stderr_tail(capsys, monkeypatch):
     import subprocess
     import types
 
-    monkeypatch.setitem(sys.modules, "whisper", types.ModuleType("whisper"))
+    _install_fake_whisper(monkeypatch)
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/ffmpeg")
 
     def fake_run(cmd, **kwargs):
@@ -216,36 +277,83 @@ def test_oversized_audio_is_rejected(monkeypatch, tmp_path):
         tf._transcript_download_audio("https://t/v", str(tmp_path))
 
 
-def test_full_transcript_happy_path_with_stubbed_whisper(capsys, monkeypatch, tmp_path):
-    """End-to-end run_transcript with whisper + yt-dlp stubbed: emits ONE JSON
-    doc with audio_kind + lexical_word_count + the url echoed back."""
+def _install_fake_pipeline(monkeypatch, tmp_path=None):
+    """Stub the whole external surface (whisper, ffmpeg, numpy, subprocess) so
+    run_transcript exercises the real control flow with no system deps."""
     import shutil
     import subprocess
     import types
 
-    fake_whisper = types.ModuleType("whisper")
-
-    class FakeModel:
-        def transcribe(self, path):
-            return SPEECH_RESULT
-
-    fake_whisper.load_model = lambda name: FakeModel()
-    monkeypatch.setitem(sys.modules, "whisper", fake_whisper)
+    _install_fake_whisper(monkeypatch)
+    _install_fake_numpy(monkeypatch)
     monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/ffmpeg")
 
     def fake_run(cmd, **kwargs):
-        out = cmd[cmd.index("-o") + 1].replace("%(ext)s", "m4a")
-        Path(out).write_bytes(b"x")
-        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "-o" in cmd:  # yt-dlp download call — create the audio file
+            out = cmd[cmd.index("-o") + 1].replace("%(ext)s", "m4a")
+            Path(out).write_bytes(b"x")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        # ffmpeg PCM decode call — bytes out (capture_output, no encoding)
+        return types.SimpleNamespace(returncode=0, stdout=b"\x00\x00", stderr=b"")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    tf.run_transcript("https://www.tiktok.com/@x/video/1")
+
+def test_full_transcript_happy_path_with_stubbed_whisper(capsys, monkeypatch):
+    """End-to-end single-url run_transcript with the pipeline stubbed: emits
+    ONE JSON doc with audio_kind + lexical_word_count + the url echoed back."""
+    _install_fake_pipeline(monkeypatch)
+    tf.run_transcript(["https://www.tiktok.com/@x/video/1"], batch=False)
     doc = json.loads(capsys.readouterr().out)
     assert doc["audio_kind"] == "speech"
     assert doc["lexical_word_count"] == 8
     assert doc["video_url"] == "https://www.tiktok.com/@x/video/1"
     assert doc["whisper_model"] == "base"
+
+
+def test_batch_returns_aligned_array_with_per_item_error_isolation(capsys, monkeypatch):
+    """Batch form: ONE model load, array output aligned with input order, and a
+    bad url yields an {error} element without sinking the good ones."""
+    _install_fake_pipeline(monkeypatch)
+    tf.run_transcript(
+        [
+            "https://www.tiktok.com/@a/video/1",
+            "ftp://bad-scheme",
+            "https://www.tiktok.com/@b/video/2",
+        ],
+        batch=True,
+    )
+    out = capsys.readouterr()
+    docs = json.loads(out.out)
+    assert len(docs) == 3
+    assert docs[0]["video_url"] == "https://www.tiktok.com/@a/video/1"
+    assert "error" in docs[1] and "http(s)" in docs[1]["error"]
+    assert docs[2]["video_url"] == "https://www.tiktok.com/@b/video/2"
+    # stderr progress lines, one per item
+    assert "transcript 3/3 done" in out.err
+
+
+def test_batch_with_all_failures_exits_nonzero_but_still_emits_the_array(capsys, monkeypatch):
+    _install_fake_pipeline(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        tf.run_transcript(["ftp://a", "ftp://b"], batch=True)
+    assert exc.value.code == 1
+    docs = json.loads(capsys.readouterr().out)
+    assert len(docs) == 2 and all("error" in d for d in docs)
+
+
+def test_dispatch_batch_urls(capsys, monkeypatch):
+    import io
+
+    _install_fake_pipeline(monkeypatch)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"mode": "transcript", "urls": ["https://www.tiktok.com/@a/video/1"]})),
+    )
+    tf.main()
+    docs = json.loads(capsys.readouterr().out)
+    assert isinstance(docs, list) and docs[0]["audio_kind"] == "speech"
 
 
 def test_ytdlp_bin_resolves_windows_exe_next_to_interpreter(monkeypatch, tmp_path):

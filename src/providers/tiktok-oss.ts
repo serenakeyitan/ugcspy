@@ -75,6 +75,17 @@ export class TikTokOssProvider implements DataProvider {
     return parseTranscriptOutput(raw.exit, raw.stdout, raw.stderr);
   }
 
+  // Batch transcription: ONE bridge spawn + ONE whisper model load for the
+  // whole wave (the load costs ~3-5s; per-video spawns dominated wall time on
+  // multi-video runs). Results align with the input order; a bad video yields
+  // an {error} element instead of sinking the batch.
+  async fetchTranscriptBatch(
+    videoUrls: string[],
+  ): Promise<Array<TranscriptDoc | { error: string }>> {
+    const raw = await this.spawnBridge({ mode: "transcript", urls: videoUrls });
+    return parseTranscriptBatchOutput(raw.exit, raw.stdout, raw.stderr, videoUrls.length);
+  }
+
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
     const raw = await this.spawnBridge(payload);
     return parseBridgeOutput(raw.exit, raw.stdout, raw.stderr);
@@ -247,33 +258,13 @@ function resolveScript(): string {
   return candidates[0]!;
 }
 
-// Pure parse of the bridge's transcript-mode (exit, stdout, stderr) — exported
-// for tests. The transcript payload is an OBJECT (one doc), unlike the search
-// modes' array, and an untrusted-shape doc must fail loudly here rather than
-// crash the renderer downstream.
-export function parseTranscriptOutput(
-  exit: number,
-  stdout: string,
-  stderr: string,
-): TranscriptDoc {
+// Validate one untrusted transcript-doc shape from the bridge. Throws on a
+// shape that would crash the renderer downstream.
+function validateTranscriptDoc(parsed: unknown, raw: string): TranscriptDoc {
   const name = "tiktok-oss";
-  if (exit !== 0) {
-    const errBody =
-      parseErrorBody(stdout) ?? (stderr.trim() || `bridge exited ${exit} with no output`);
-    throw new ProviderError(`tiktok-oss: ${errBody}`, name);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    throw new ProviderError(
-      `tiktok-oss: transcript bridge returned non-JSON output: ${stdout.slice(0, 300)}`,
-      name,
-    );
-  }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new ProviderError(
-      `tiktok-oss: transcript bridge returned a non-object: ${stdout.slice(0, 300)}`,
+      `tiktok-oss: transcript bridge returned a non-object: ${raw.slice(0, 300)}`,
       name,
     );
   }
@@ -302,4 +293,73 @@ export function parseTranscriptOutput(
     video_url: typeof doc.video_url === "string" ? doc.video_url : undefined,
     whisper_model: typeof doc.whisper_model === "string" ? doc.whisper_model : undefined,
   };
+}
+
+// Pure parse of the bridge's transcript-mode (exit, stdout, stderr) — exported
+// for tests. The transcript payload is an OBJECT (one doc), unlike the search
+// modes' array, and an untrusted-shape doc must fail loudly here rather than
+// crash the renderer downstream.
+export function parseTranscriptOutput(
+  exit: number,
+  stdout: string,
+  stderr: string,
+): TranscriptDoc {
+  const name = "tiktok-oss";
+  if (exit !== 0) {
+    const errBody =
+      parseErrorBody(stdout) ?? (stderr.trim() || `bridge exited ${exit} with no output`);
+    throw new ProviderError(`tiktok-oss: ${errBody}`, name);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new ProviderError(
+      `tiktok-oss: transcript bridge returned non-JSON output: ${stdout.slice(0, 300)}`,
+      name,
+    );
+  }
+  return validateTranscriptDoc(parsed, stdout);
+}
+
+// Pure parse of the BATCH transcript output — a JSON array aligned with the
+// input urls, each element either a doc or an {"error": ...} envelope. The
+// bridge exits 1 only when EVERY item failed or a top-level failure (missing
+// whisper) prevented the run; in the all-failed case stdout still carries the
+// aligned array, so prefer parsing it over throwing. Exported for tests.
+export function parseTranscriptBatchOutput(
+  exit: number,
+  stdout: string,
+  stderr: string,
+  expectedCount: number,
+): Array<TranscriptDoc | { error: string }> {
+  const name = "tiktok-oss";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    parsed = undefined;
+  }
+  if (!Array.isArray(parsed)) {
+    // Top-level failure (no whisper, bad payload) — same envelope as single.
+    const errBody =
+      parseErrorBody(stdout) ?? (stderr.trim() || `bridge exited ${exit} with no output`);
+    throw new ProviderError(`tiktok-oss: ${errBody}`, name);
+  }
+  if (parsed.length !== expectedCount) {
+    throw new ProviderError(
+      `tiktok-oss: transcript batch returned ${parsed.length} results for ${expectedCount} urls`,
+      name,
+    );
+  }
+  return parsed.map((item) => {
+    if (item !== null && typeof item === "object" && "error" in (item as object)) {
+      return { error: String((item as { error: unknown }).error) };
+    }
+    try {
+      return validateTranscriptDoc(item, JSON.stringify(item) ?? "");
+    } catch (err) {
+      return { error: (err as Error).message };
+    }
+  });
 }

@@ -17,7 +17,7 @@ import {
   hookFor,
   transcribeScanCap,
 } from "../src/commands/transcript.ts";
-import { parseTranscriptOutput } from "../src/providers/tiktok-oss.ts";
+import { parseTranscriptBatchOutput, parseTranscriptOutput } from "../src/providers/tiktok-oss.ts";
 import type { RawVideo, TranscriptDoc, VideoRecord } from "../src/types.ts";
 
 function speechDoc(overrides: Partial<TranscriptDoc> = {}): TranscriptDoc {
@@ -154,26 +154,30 @@ function makeVideo(id: number, overrides: Partial<VideoRecord> = {}): VideoRecor
   };
 }
 
-describe("collectTranscripts", () => {
-  test("unfiltered: transcribes exactly top videos in rank order", async () => {
-    const calls: string[] = [];
+describe("collectTranscripts (wave batching — one model load per wave)", () => {
+  // Batch dep helper: serves docs by url, records every batch call.
+  function batcher(docs: Record<string, TranscriptDoc | { error: string }>) {
+    const calls: string[][] = [];
+    const transcribeBatch = async (urls: string[]) => {
+      calls.push(urls);
+      return urls.map((u) => docs[u] ?? speechDoc());
+    };
+    return { calls, transcribeBatch };
+  }
+
+  test("unfiltered: ONE batch call covering exactly the top videos in rank order", async () => {
+    const b = batcher({});
     const { entries, scanned } = await collectTranscripts(
       [makeVideo(1), makeVideo(2), makeVideo(3)],
       { top: 2 },
-      {
-        transcribe: async (url) => {
-          calls.push(url);
-          return speechDoc();
-        },
-        save: () => {},
-      },
+      { transcribeBatch: b.transcribeBatch, save: () => {} },
     );
     expect(entries.length).toBe(2);
     expect(scanned).toBe(2);
-    expect(calls).toEqual([makeVideo(1).video_url, makeVideo(2).video_url]);
+    expect(b.calls).toEqual([[makeVideo(1).video_url, makeVideo(2).video_url]]);
   });
 
-  test("cache hit skips the transcriber and is marked fromCache", async () => {
+  test("cache hit never reaches the batch and is marked fromCache", async () => {
     const cached = makeVideo(1, {
       transcript: "cached words here",
       transcript_kind: "speech",
@@ -181,66 +185,145 @@ describe("collectTranscripts", () => {
       transcript_duration_sec: 30,
       transcribed_at: "2026-06-10 00:00:00",
     });
-    let transcribed = 0;
+    const b = batcher({});
     const { entries } = await collectTranscripts([cached], { top: 1 }, {
-      transcribe: async () => {
-        transcribed += 1;
-        return speechDoc();
-      },
+      transcribeBatch: b.transcribeBatch,
       save: () => {},
     });
-    expect(transcribed).toBe(0);
+    expect(b.calls.length).toBe(0);
     expect(entries[0]!.fromCache).toBe(true);
     expect(entries[0]!.talking).toBe(true);
   });
 
-  test("--talking filter scans past non-talking videos until top found", async () => {
-    const docs: Record<string, TranscriptDoc> = {
-      [makeVideo(1).video_url]: musicDoc(),
-      [makeVideo(2).video_url]: speechDoc(),
-      [makeVideo(3).video_url]: speechDoc(),
-    };
+  test("mixed cached/uncached: waves stop at cached rows, order is preserved", async () => {
+    const cached2 = makeVideo(2, {
+      transcript: "cached",
+      transcript_kind: "speech",
+      transcript_words: 20,
+      transcript_duration_sec: 10,
+      transcribed_at: "2026-06-10 00:00:00",
+    });
+    const b = batcher({});
+    const { entries } = await collectTranscripts(
+      [makeVideo(1), cached2, makeVideo(3)],
+      { top: 3 },
+      { transcribeBatch: b.transcribeBatch, save: () => {} },
+    );
+    expect(entries.map((e) => e.video.id)).toEqual([1, 2, 3]);
+    // Two waves: [1] (stopped at cached row 2), then [3].
+    expect(b.calls).toEqual([[makeVideo(1).video_url], [makeVideo(3).video_url]]);
+  });
+
+  test("--talking filter: a wave transcribes ahead, extras are saved as cache", async () => {
+    const saved: number[] = [];
+    const b = batcher({ [makeVideo(1).video_url]: musicDoc() });
     const { entries, scanned } = await collectTranscripts(
       [makeVideo(1), makeVideo(2), makeVideo(3)],
       { top: 1, talking: true },
-      { transcribe: async (url) => docs[url]!, save: () => {} },
+      {
+        transcribeBatch: b.transcribeBatch,
+        save: (v) => saved.push(v.id),
+      },
     );
     expect(entries.length).toBe(1);
     expect(entries[0]!.video.id).toBe(2);
-    expect(scanned).toBe(2);
+    // One wave of all 3 (≤ FILTER_WAVE_SIZE): overshoot past the match is
+    // SAVED (cache for next time), and every transcription counts as scanned.
+    expect(b.calls.length).toBe(1);
+    expect(scanned).toBe(3);
+    expect(saved).toEqual([1, 2, 3]);
   });
 
-  test("scan cap bounds the work even when nothing matches", async () => {
+  test("scan cap bounds the waves even when nothing matches", async () => {
     const videos = Array.from({ length: 40 }, (_, i) => makeVideo(i + 1));
-    let transcribed = 0;
+    const b = batcher({}); // everything talks → non-talking never matches
     const { entries, scanned } = await collectTranscripts(videos, { top: 1, nonTalking: true }, {
-      transcribe: async () => {
-        transcribed += 1;
-        return speechDoc(); // everything talks → filter never matches
-      },
+      transcribeBatch: b.transcribeBatch,
       save: () => {},
     });
     expect(entries.length).toBe(0);
     expect(scanned).toBe(transcribeScanCap(1, true));
-    expect(transcribed).toBe(scanned);
+    // cap 12 / wave size 6 = exactly 2 waves
+    expect(b.calls.length).toBe(2);
+    expect(b.calls.flat().length).toBe(12);
   });
 
-  test("one video's failure is recorded and the scan continues", async () => {
+  test("a per-item {error} is recorded and the rest of the wave survives", async () => {
+    const b = batcher({ [makeVideo(1).video_url]: { error: "yt-dlp died" } });
     const { entries, failures } = await collectTranscripts(
       [makeVideo(1), makeVideo(2)],
       { top: 2 },
-      {
-        transcribe: async (url) => {
-          if (url === makeVideo(1).video_url) throw new Error("yt-dlp died");
-          return speechDoc();
-        },
-        save: () => {},
-      },
+      { transcribeBatch: b.transcribeBatch, save: () => {} },
     );
     expect(entries.length).toBe(1);
     expect(entries[0]!.video.id).toBe(2);
     expect(failures.length).toBe(1);
     expect(failures[0]).toContain("yt-dlp died");
+  });
+
+  test("a batch-LEVEL throw (no whisper) fails the wave and stops scanning", async () => {
+    const { entries, failures } = await collectTranscripts(
+      [makeVideo(1), makeVideo(2), makeVideo(3)],
+      { top: 3 },
+      {
+        transcribeBatch: async () => {
+          throw new Error("no transcript support");
+        },
+        save: () => {},
+      },
+    );
+    expect(entries.length).toBe(0);
+    expect(failures.length).toBe(3); // whole wave marked, then stop — no retry loop
+    expect(failures[0]).toContain("no transcript support");
+  });
+});
+
+describe("parseTranscriptBatchOutput", () => {
+  const okDoc = JSON.parse(JSON.stringify(speechDoc({ video_url: "https://t/v/1" })));
+
+  test("aligned array of docs and error envelopes", () => {
+    const out = parseTranscriptBatchOutput(
+      0,
+      JSON.stringify([okDoc, { error: "Video unavailable" }]),
+      "",
+      2,
+    );
+    expect(out.length).toBe(2);
+    expect((out[0] as TranscriptDoc).audio_kind).toBe("speech");
+    expect((out[1] as { error: string }).error).toBe("Video unavailable");
+  });
+
+  test("all-failed batch (exit 1) still parses the aligned array", () => {
+    const out = parseTranscriptBatchOutput(
+      1,
+      JSON.stringify([{ error: "a" }, { error: "b" }]),
+      "",
+      2,
+    );
+    expect(out.every((r) => "error" in r)).toBe(true);
+  });
+
+  test("count mismatch is rejected (alignment is the contract)", () => {
+    expect(() => parseTranscriptBatchOutput(0, JSON.stringify([okDoc]), "", 2)).toThrow(
+      /1 results for 2 urls/,
+    );
+  });
+
+  test("top-level failure (no whisper) surfaces the error envelope", () => {
+    expect(() =>
+      parseTranscriptBatchOutput(1, JSON.stringify({ error: "whisper not installed" }), "", 2),
+    ).toThrow(/whisper not installed/);
+  });
+
+  test("a malformed doc inside the array degrades to a per-item error, not a crash", () => {
+    const out = parseTranscriptBatchOutput(
+      0,
+      JSON.stringify([{ audio_kind: "podcast" }, okDoc]),
+      "",
+      2,
+    );
+    expect("error" in out[0]!).toBe(true);
+    expect((out[1] as TranscriptDoc).audio_kind).toBe("speech");
   });
 });
 

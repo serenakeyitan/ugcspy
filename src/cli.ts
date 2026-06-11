@@ -78,7 +78,7 @@ program
 program
   .command("transcript <query>")
   .description(
-    "Hook + spoken transcript for videos. <query> = a cached brand/#tag/@handle (top N by views), a video id from `search --json`, or a TikTok URL. Classifies talking vs non-talking from the audio (music-bed lyrics don't count). Needs `install-deps --with-audio` + ffmpeg; ~10-40s per uncached video.",
+    "Hook + spoken transcript for videos. <query> = a cached brand/#tag/@handle (top N by views), a video id from `search --json`, or a TikTok URL. Classifies talking vs non-talking from the audio (music-bed lyrics don't count). Needs `install-deps --with-audio` (self-contained — bundles ffmpeg); ~10-40s per uncached video, batched into one model load.",
   )
   .option("-t, --top <n>", "how many videos (brand/handle queries)", positiveInt, 3)
   .option("--talking", "only videos with real speech (scans down the ranked list)")

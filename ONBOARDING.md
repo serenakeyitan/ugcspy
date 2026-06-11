@@ -172,7 +172,7 @@ Inside Claude Code:
   /ugcspy-fork <id>                    quick creator brief (hook + beat sheet)
   /ugcspy-transcript <brand|id>        spoken hook + Whisper transcript for top
                                        videos; --talking / --non-talking filter
-                                       (needs install-deps --with-audio + ffmpeg)
+                                       (needs install-deps --with-audio only)
   /ugcspy-decode <id>                  deep production decode — format, overlay
                                        narrative, brand-pitch placement, shot
                                        list. Writes decode.json + decode.html.

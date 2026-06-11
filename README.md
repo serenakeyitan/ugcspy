@@ -197,7 +197,7 @@ The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcsp
 | `init` | Interactive setup — writes `~/.ugcspy/config.json` (chmod 0600) |
 | `install-deps` | Install Python deps for the `tiktok-oss` provider (one-time) |
 | `search <handle>` | Top videos by reach (default) or recency. The thing you came for. |
-| `transcript <brand\|id\|url>` | Spoken hook + transcript per video, talking/non-talking classification from the audio. Needs `install-deps --with-audio` + ffmpeg; transcribed once, cached in SQLite. |
+| `transcript <brand\|id\|url>` | Spoken hook + transcript per video, talking/non-talking classification from the audio. Needs `install-deps --with-audio` (self-contained — bundles ffmpeg); transcribed once, cached in SQLite. |
 | `watch add <handle>` | (Optional) Register a competitor for breakout alerts — see below |
 | `watch list` / `watch remove <id>` | Manage watches |
 | `daemon` | (Optional) Poll watches, post Slack alerts on threshold breach |

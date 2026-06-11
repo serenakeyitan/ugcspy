@@ -97,16 +97,25 @@ export function docFromCache(video: VideoRecord): TranscriptDoc | null {
 }
 
 export interface CollectDeps {
-  transcribe: (videoUrl: string) => Promise<TranscriptDoc>;
+  // Batch transcription: one bridge spawn + one whisper model load per call.
+  transcribeBatch: (videoUrls: string[]) => Promise<Array<TranscriptDoc | { error: string }>>;
   save: (video: VideoRecord, doc: TranscriptDoc) => void;
-  // Called once per candidate as work starts/ends; null text clears.
+  // Progress line for the user; null clears.
   progress?: (text: string | null) => void;
 }
 
+// When filtering, we don't know how many transcriptions yield a match, so
+// uncached candidates go to the bridge in waves of this size: big enough to
+// amortize the ~3-5s model load, small enough that an early match doesn't
+// over-transcribe far past it (overshoot is cached, not wasted).
+export const FILTER_WAVE_SIZE = 6;
+
 // Walk the ranked candidates, transcribing (or reading cache) until `top`
-// entries match the filter or the scan cap is hit. Returns the matched entries
-// plus how many candidates were scanned — callers surface the scan count so a
-// capped run never silently reads as "covered everything".
+// entries match the filter or the scan cap is hit. Uncached candidates are
+// batched into single bridge calls — the whisper model loads ONCE per wave
+// instead of once per video. Returns the matched entries plus how many
+// candidates were scanned — callers surface the scan count so a capped run
+// never silently reads as "covered everything".
 export async function collectTranscripts(
   candidates: VideoRecord[],
   opts: Pick<TranscriptOptions, "top" | "talking" | "nonTalking">,
@@ -117,34 +126,74 @@ export async function collectTranscripts(
   const entries: TranscriptEntry[] = [];
   const failures: string[] = [];
   let scanned = 0;
+  let i = 0;
 
-  for (const video of candidates) {
-    if (entries.length >= opts.top || scanned >= cap) break;
-    scanned += 1;
-    let doc = docFromCache(video);
-    const fromCache = doc !== null;
-    if (!doc) {
-      if (!video.video_url) {
-        failures.push(`@${displayHandle(video)} ${video.external_id}: no video_url`);
-        continue;
-      }
-      deps.progress?.(
-        `Transcribing @${displayHandle(video)} (${video.view_count.toLocaleString()} views)...`,
-      );
-      try {
-        doc = await deps.transcribe(video.video_url);
-        deps.save(video, doc);
-      } catch (err) {
-        failures.push(`@${displayHandle(video)} ${video.external_id}: ${(err as Error).message}`);
-        continue;
-      } finally {
-        deps.progress?.(null);
-      }
-    }
+  const classify = (video: VideoRecord, doc: TranscriptDoc, fromCache: boolean) => {
     const talking = isTalking(doc);
-    if (opts.talking && !talking) continue;
-    if (opts.nonTalking && talking) continue;
-    entries.push({ video, doc, talking, fromCache });
+    if (opts.talking && !talking) return;
+    if (opts.nonTalking && talking) return;
+    if (entries.length < opts.top) entries.push({ video, doc, talking, fromCache });
+  };
+
+  while (entries.length < opts.top && scanned < cap && i < candidates.length) {
+    const video = candidates[i]!;
+    const cachedDoc = docFromCache(video);
+    if (cachedDoc) {
+      i += 1;
+      scanned += 1;
+      classify(video, cachedDoc, true);
+      continue;
+    }
+
+    // Collect the next contiguous run of uncached candidates into one wave.
+    const budget = Math.min(
+      cap - scanned,
+      filtering ? FILTER_WAVE_SIZE : opts.top - entries.length,
+    );
+    const wave: VideoRecord[] = [];
+    while (i < candidates.length && wave.length < budget) {
+      const v = candidates[i]!;
+      if (docFromCache(v)) break; // cached row — handle on the next loop pass
+      i += 1;
+      if (!v.video_url) {
+        scanned += 1;
+        failures.push(`@${displayHandle(v)} ${v.external_id}: no video_url`);
+        continue;
+      }
+      wave.push(v);
+    }
+    if (wave.length === 0) continue;
+
+    deps.progress?.(
+      wave.length === 1
+        ? `Transcribing @${displayHandle(wave[0]!)} (${wave[0]!.view_count.toLocaleString()} views)...`
+        : `Transcribing ${wave.length} videos (one model load)...`,
+    );
+    let results: Array<TranscriptDoc | { error: string }>;
+    try {
+      results = await deps.transcribeBatch(wave.map((v) => v.video_url));
+    } catch (err) {
+      // Batch-level failure (no whisper, bridge timeout) — it would repeat on
+      // every subsequent wave, so record it for the whole wave and stop.
+      deps.progress?.(null);
+      for (const v of wave) {
+        scanned += 1;
+        failures.push(`@${displayHandle(v)} ${v.external_id}: ${(err as Error).message}`);
+      }
+      break;
+    }
+    deps.progress?.(null);
+    for (let k = 0; k < wave.length; k += 1) {
+      const v = wave[k]!;
+      const r = results[k];
+      scanned += 1;
+      if (!r || "error" in r) {
+        failures.push(`@${displayHandle(v)} ${v.external_id}: ${r ? r.error : "no result"}`);
+        continue;
+      }
+      deps.save(v, r); // save even past `top` — overshoot becomes cache, not waste
+      classify(v, r, false);
+    }
   }
   return { entries, scanned, failures };
 }
@@ -161,13 +210,26 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
   // the configured search provider can't transcribe (e.g. the user switched to
   // scrapecreators after building the cache with tiktok-oss). The check fires
   // lazily, only when a cache miss actually needs a transcription.
-  const transcribe = (url: string): Promise<TranscriptDoc> => {
-    if (!provider.fetchTranscript) {
-      throw new Error(
-        `provider '${provider.name}' has no transcript support — switch to the tiktok-oss provider (free) to transcribe new videos`,
-      );
+  const transcribeBatch = async (
+    urls: string[],
+  ): Promise<Array<TranscriptDoc | { error: string }>> => {
+    if (provider.fetchTranscriptBatch) return provider.fetchTranscriptBatch(urls);
+    if (provider.fetchTranscript) {
+      // Per-url fallback for providers without a batch path — slower (one
+      // model load each) but correct.
+      const out: Array<TranscriptDoc | { error: string }> = [];
+      for (const url of urls) {
+        try {
+          out.push(await provider.fetchTranscript(url));
+        } catch (err) {
+          out.push({ error: (err as Error).message });
+        }
+      }
+      return out;
     }
-    return provider.fetchTranscript(url);
+    throw new Error(
+      `provider '${provider.name}' has no transcript support — switch to the tiktok-oss provider (free) to transcribe new videos`,
+    );
   };
 
   const target = classifyTranscriptTarget(arg);
@@ -259,7 +321,7 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
     candidates,
     { top: target.kind === "query" ? opts.top : candidates.length, ...filterOf(opts) },
     {
-      transcribe,
+      transcribeBatch,
       save: (video, doc) => {
         // Ad-hoc URLs (id <= 0) have no row to cache into. Persisting is keyed
         // by (platform, external_id) so every competitor's copy of the video

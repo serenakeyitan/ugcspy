@@ -38,7 +38,7 @@ With a filter, the CLI scans DOWN the ranked list transcribing until it finds N 
 
 ## Prerequisites
 
-Needs `ugcspy install-deps --with-audio` (Whisper, one-time ~1.5GB) and `ffmpeg` on PATH. The error messages name the exact fix — relay them verbatim.
+Needs `ugcspy install-deps --with-audio` (Whisper + a bundled static ffmpeg, one-time ~1.5GB — NO system ffmpeg required; the Whisper model pre-downloads at install). The error messages name the exact fix — relay them verbatim.
 
 ## Output
 

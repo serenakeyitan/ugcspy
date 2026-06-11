@@ -123,15 +123,37 @@ export async function runInstallDeps(opts: InstallDepsOptions = {}): Promise<voi
       process.exit(1);
     }
     audio.succeed("Audio packages installed (whisper + torch)");
-    // Smoke-test the audio path
-    const audioSmoke = ora("Verifying whisper imports").start();
-    const audioSmokeResult = await run(py, ["-c", "import whisper; print('ok')"]);
+    // Smoke-test the audio path — imageio_ffmpeg too: it bundles the static
+    // ffmpeg the transcript pipeline uses, so NO system ffmpeg is needed.
+    const audioSmoke = ora("Verifying whisper + bundled ffmpeg").start();
+    const audioSmokeResult = await run(py, [
+      "-c",
+      "import whisper, imageio_ffmpeg; imageio_ffmpeg.get_ffmpeg_exe(); print('ok')",
+    ]);
     if (!audioSmokeResult.ok || !audioSmokeResult.stdout.includes("ok")) {
-      audioSmoke.fail("Whisper import check failed");
+      audioSmoke.fail("Whisper / bundled-ffmpeg check failed");
       console.error(chalk.dim((audioSmokeResult.stderr || audioSmokeResult.stdout).slice(-2000)));
       process.exit(1);
     }
-    audioSmoke.succeed("Whisper ready");
+    audioSmoke.succeed("Whisper + bundled ffmpeg ready");
+
+    // Pre-download the Whisper model NOW (it caches in ~/.cache/whisper), so
+    // the user's first `ugcspy transcript` isn't a silent multi-minute model
+    // download behind a spinner. Non-fatal: a network blip here just defers
+    // the download back to first use.
+    const modelName = (process.env.UGCSPY_WHISPER_MODEL ?? "base").trim() || "base";
+    const model = ora(`Pre-downloading the Whisper '${modelName}' model (~140MB, one-time)`).start();
+    const modelResult = await run(py, [
+      "-c",
+      `import whisper; whisper.load_model(${JSON.stringify(modelName)}); print('ok')`,
+    ]);
+    if (modelResult.ok && modelResult.stdout.includes("ok")) {
+      model.succeed(`Whisper '${modelName}' model cached`);
+    } else {
+      model.warn(
+        `Model pre-download failed — the first transcript will download it instead. (${(modelResult.stderr || "").trim().slice(-200)})`,
+      );
+    }
   }
 
   console.log(chalk.green("\n✓ tiktok-oss is ready.\n"));

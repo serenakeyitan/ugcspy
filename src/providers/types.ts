@@ -17,6 +17,9 @@ export interface DataProvider {
   // talking/non-talking signal). Expensive (~10-40s/video) — callers cache the
   // result in the videos table. Optional — needs an audio pipeline (whisper).
   fetchTranscript?(videoUrl: string): Promise<TranscriptDoc>;
+  // Batch form: one model load for the whole wave; results align with the
+  // input order, per-video failures come back as {error} elements.
+  fetchTranscriptBatch?(videoUrls: string[]): Promise<Array<TranscriptDoc | { error: string }>>;
 }
 
 export class ProviderError extends Error {

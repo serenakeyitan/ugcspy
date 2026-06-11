@@ -79,14 +79,23 @@ def main() -> None:
         run_keyword(keyword, days)
         return
 
-    # Transcript mode needs whisper + yt-dlp + ffmpeg, NOT TikTokApi/Chromium —
-    # dispatch it before the TikTokApi import so it works on a core install
-    # that added --with-audio but never touched the browser fallbacks.
+    # Transcript mode needs whisper + yt-dlp (+ the bundled static ffmpeg),
+    # NOT TikTokApi/Chromium — dispatch it before the TikTokApi import so it
+    # works on a core install that added --with-audio but never touched the
+    # browser fallbacks. Two forms: {"url": "..."} → one doc object (legacy);
+    # {"urls": [...]} → array of docs, ONE model load for the whole batch.
     if mode == "transcript":
+        urls = payload.get("urls")
+        if isinstance(urls, list) and urls:
+            cleaned = [str(u).strip() for u in urls if str(u).strip()]
+            if not cleaned:
+                fail("missing urls")
+            run_transcript(cleaned, batch=True)
+            return
         url = (payload.get("url") or "").strip()
         if not url:
             fail("missing url")
-        run_transcript(url)
+        run_transcript([url], batch=False)
         return
 
     try:
@@ -1989,43 +1998,124 @@ def _transcript_download_audio(url: str, tmpdir: str) -> str:
     return path
 
 
-def run_transcript(url: str) -> None:
-    """Emit one JSON transcript doc for a single video URL (exit 0), or a JSON
-    error envelope (exit 1). Needs whisper (--with-audio) + ffmpeg; both
-    checked up front with actionable messages."""
+def _resolve_ffmpeg() -> Optional[str]:
+    """ffmpeg resolution for a machine with NOTHING installed: prefer a system
+    ffmpeg, else the static binary the imageio-ffmpeg pip package ships inside
+    the venv (installed by `install-deps --with-audio`). None only when both
+    are absent (e.g. --with-audio was installed before imageio-ffmpeg joined
+    requirements-audio.txt)."""
+    import shutil
+
+    system = shutil.which("ffmpeg")
+    if system:
+        return system
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _load_audio_pcm(path: str, ffmpeg_exe: str):
+    """Decode an audio file to the float32 mono 16kHz array Whisper expects.
+    Same pipeline as whisper.load_audio, but with an EXPLICIT ffmpeg path —
+    whisper's own loader shells out to a bare `ffmpeg` on PATH, which doesn't
+    exist on a fresh machine (the imageio static binary isn't named ffmpeg, so
+    PATH tricks can't help)."""
+    import subprocess
+
+    import numpy as np
+
+    cmd = [
+        ffmpeg_exe,
+        "-nostdin",
+        "-threads",
+        "0",
+        "-i",
+        path,
+        "-f",
+        "s16le",
+        "-ac",
+        "1",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "16000",
+        "-",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, timeout=120)
+    if proc.returncode != 0:
+        tail = proc.stderr.decode("utf-8", "replace").strip()[-300:]
+        raise RuntimeError(f"ffmpeg decode failed: {tail or 'no stderr'}")
+    return np.frombuffer(proc.stdout, np.int16).flatten().astype(np.float32) / 32768.0
+
+
+def _transcribe_one(url: str, model, model_name: str, ffmpeg_exe: str) -> dict:
+    """Download + transcribe ONE url; returns a doc dict, or an {"error": ...}
+    envelope (never raises) so one bad video can't sink a batch."""
     import shutil
     import tempfile
 
     if not url.startswith(("http://", "https://")):
-        fail("transcript url must be http(s)")
+        return {"error": "transcript url must be http(s)", "video_url": url}
+    tmpdir = tempfile.mkdtemp(prefix="ugcspy-transcript-")
+    try:
+        audio_path = _transcript_download_audio(url, tmpdir)
+        audio = _load_audio_pcm(audio_path, ffmpeg_exe)
+        # fp16 warnings on CPU are harmless; whisper falls back to fp32 itself.
+        result = model.transcribe(audio)
+        doc = _transcript_normalize(result if isinstance(result, dict) else {})
+        doc["video_url"] = url
+        doc["whisper_model"] = model_name
+        return doc
+    except RuntimeError as e:
+        return {"error": str(e), "video_url": url}
+    except Exception as e:  # noqa: BLE001 — one video's failure must surface as data, not a traceback
+        return {"error": f"transcription failed: {type(e).__name__}: {e}", "video_url": url}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def run_transcript(urls: list[str], batch: bool) -> None:
+    """Transcribe one or many video URLs with ONE model load (the load costs
+    ~3-5s + a one-time ~140MB download — per-video reloads dominated wall time
+    on multi-video runs). Single form (batch=False) emits one doc object and
+    exits nonzero on failure (the original contract); batch form emits a JSON
+    array aligned with the input order, where each element is a doc or an
+    {"error": ...} envelope, and exits 0 if at least one video succeeded."""
     try:
         import whisper
     except ImportError:
         fail(
             "whisper not installed in the active interpreter. Run `ugcspy install-deps --with-audio` (one-time, ~3-5min + ~1.5GB)."
         )
-    if shutil.which("ffmpeg") is None:
+    ffmpeg_exe = _resolve_ffmpeg()
+    if ffmpeg_exe is None:
         fail(
-            "ffmpeg not found on PATH — whisper needs it to read audio. Install it: `brew install ffmpeg` (macOS) or `apt install ffmpeg` (Linux)."
+            "no ffmpeg available — re-run `ugcspy install-deps --with-audio` (bundles a static ffmpeg via imageio-ffmpeg; no system install needed)."
         )
 
-    tmpdir = tempfile.mkdtemp(prefix="ugcspy-transcript-")
+    model_name = os.environ.get("UGCSPY_WHISPER_MODEL", "base").strip() or "base"
     try:
-        audio_path = _transcript_download_audio(url, tmpdir)
-        model_name = os.environ.get("UGCSPY_WHISPER_MODEL", "base").strip() or "base"
         model = whisper.load_model(model_name)
-        # fp16 warnings on CPU are harmless; whisper falls back to fp32 itself.
-        result = model.transcribe(audio_path)
-        doc = _transcript_normalize(result if isinstance(result, dict) else {})
-        doc["video_url"] = url
-        doc["whisper_model"] = model_name
+    except Exception as e:  # noqa: BLE001
+        fail(f"whisper model '{model_name}' failed to load: {type(e).__name__}: {e}")
+
+    docs = []
+    for i, url in enumerate(urls):
+        docs.append(_transcribe_one(url, model, model_name, ffmpeg_exe))
+        print(f"transcript {i + 1}/{len(urls)} done", file=sys.stderr, flush=True)
+
+    if not batch:
+        doc = docs[0]
+        if "error" in doc:
+            fail(doc["error"])
         print(json.dumps(doc))
-    except RuntimeError as e:
-        fail(str(e))
-    except Exception as e:  # noqa: BLE001 — one video's failure must surface as JSON, not a traceback
-        fail(f"transcription failed: {type(e).__name__}: {e}")
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        return
+    print(json.dumps(docs))
+    if all("error" in d for d in docs):
+        sys.exit(1)
 
 
 if __name__ == "__main__":
