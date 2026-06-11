@@ -25,6 +25,7 @@ Other commands:
 - "Turn this video into a brief I can hand to a creator" → `/ugcspy-fork <url>`
 - "How was this video made? What technique? What overlay?" → `/ugcspy-decode <url>` (deep production breakdown — format, OCR'd narrative, brand-pitch placement, shot list. Writes decode.json + decode.html.)
 - "Make a video like X but with creator Y" / "same format different creator" / "copy this structure for @other-creator" → `/ugcspy-remix <target> <source>` (decodes both, produces a hand-able brief that fits B's style into A's structure)
+- "Make this video pitch BRAND instead" / "insert BRAND into this script" / "rebrand this transcript, change nothing else" → `/ugcspy-rebrand <video> <brand>` (minimal-edit promotion swap/insert on the transcript — the hook is never touched, one smooth brand beat, everything else byte-identical)
 - "Reverse-engineer this video into a reproducible recipe (cuts, prompts, hook structure)" → `/ugcspy-recipe <url>` — uses the bundled video-recipe agent at `vendor/video-recipe/`. Heavier than `/ugcspy-fork` (requires ffmpeg + whisper + the full Python pipeline) but produces a structured `recipe.json` that an AI agent could use to attempt reproduction.
 - "Slack-alert me when a competitor breaks out" (only if explicitly asked) → see Watch + daemon below
 

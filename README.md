@@ -172,6 +172,7 @@ The plugin is the recommended way to use ugcspy. Inside Claude Code:
 | `/ugcspy-search <brand>` | Runs the search, renders the table inline |
 | `/ugcspy-fork <id>` | Quick creator brief — hook + beat sheet. Generated in chat using your Claude Code subscription. **No API key.** |
 | `/ugcspy-transcript <brand-or-id>` | Spoken hook + full Whisper transcript for the top N videos (or one). `--talking` / `--non-talking` filters montage vs voiceover content from the audio itself. Cached per video. |
+| `/ugcspy-rebrand <video> <brand>` | Minimal-edit script rebrand: swap/insert the promotion for a target brand at one smooth, content-matched beat. The hook is never touched; everything outside the brand beat stays byte-identical. |
 | `/ugcspy-decode <id>` | Deep production decode — format, OCR'd overlay narrative, brand-pitch placement (soft 软广 vs hard sell), shot list. Writes `decode.json` + `decode.html`. Works on both human-shot AND AI-montage videos. |
 | `/ugcspy-remix <target> <source>` | Cross-video format transfer. Decodes BOTH videos and writes a hand-able brief telling creator B how to shoot their own version of video A's format. |
 | `/ugcspy-recipe <id>` | Reverse-engineer an AI-montage into a reproducible `recipe.json` (cuts, per-clip prompts, voiceover) |
