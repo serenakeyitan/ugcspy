@@ -87,8 +87,12 @@ def main() -> None:
     if mode == "transcript":
         urls = payload.get("urls")
         if isinstance(urls, list) and urls:
-            cleaned = [str(u).strip() for u in urls if str(u).strip()]
-            if not cleaned:
+            # Keep EVERY input position — the batch contract is one result per
+            # url, aligned by index. A blank element becomes a per-item error
+            # envelope via _transcribe_one; dropping it here would shift the
+            # array and make the caller discard the whole wave as misaligned.
+            cleaned = [str(u).strip() for u in urls]
+            if not any(cleaned):
                 fail("missing urls")
             run_transcript(cleaned, batch=True)
             return

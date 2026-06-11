@@ -14,6 +14,7 @@ import {
   collectTranscripts,
   docFromCache,
   externalIdFromUrl,
+  MAX_WAVE_SIZE,
   hookFor,
   transcribeScanCap,
 } from "../src/commands/transcript.ts";
@@ -259,6 +260,35 @@ describe("collectTranscripts (wave batching — one model load per wave)", () =>
     expect(entries[0]!.video.id).toBe(2);
     expect(failures.length).toBe(1);
     expect(failures[0]).toContain("yt-dlp died");
+  });
+
+  test("a no-url row consumes a scan slot — the cap can't be overrun", async () => {
+    // Regression: no-url rows incremented `scanned` without shrinking the
+    // wave budget, so an unfiltered --top 1 whose #1 lacked a URL silently
+    // transcribed #2 — scanning deeper than the user asked.
+    const noUrl = makeVideo(1, { video_url: "" });
+    const b = batcher({});
+    const { entries, scanned, failures } = await collectTranscripts(
+      [noUrl, makeVideo(2)],
+      { top: 1 },
+      { transcribeBatch: b.transcribeBatch, save: () => {} },
+    );
+    expect(scanned).toBe(transcribeScanCap(1, false)); // exactly the cap
+    expect(entries.length).toBe(0);
+    expect(failures.length).toBe(1);
+    expect(b.calls.length).toBe(0); // #2 was never transcribed
+  });
+
+  test("unfiltered waves are capped at MAX_WAVE_SIZE so one bridge call can't blow the deadline", async () => {
+    const videos = Array.from({ length: 20 }, (_, i) => makeVideo(i + 1));
+    const b = batcher({});
+    const { entries } = await collectTranscripts(videos, { top: 20 }, {
+      transcribeBatch: b.transcribeBatch,
+      save: () => {},
+    });
+    expect(entries.length).toBe(20);
+    expect(Math.max(...b.calls.map((c) => c.length))).toBeLessThanOrEqual(MAX_WAVE_SIZE);
+    expect(b.calls.length).toBe(Math.ceil(20 / MAX_WAVE_SIZE));
   });
 
   test("a batch-LEVEL throw (no whisper) fails the wave and stops scanning", async () => {

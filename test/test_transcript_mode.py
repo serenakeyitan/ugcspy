@@ -342,6 +342,26 @@ def test_batch_with_all_failures_exits_nonzero_but_still_emits_the_array(capsys,
     assert len(docs) == 2 and all("error" in d for d in docs)
 
 
+def test_batch_keeps_blank_urls_aligned(capsys, monkeypatch):
+    """A blank element must yield a per-item error envelope at ITS index —
+    dropping it would shift the array and the caller would discard the whole
+    wave as misaligned."""
+    _install_fake_pipeline(monkeypatch)
+    import io
+
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps({"mode": "transcript", "urls": ["https://www.tiktok.com/@a/video/1", "  ", "https://www.tiktok.com/@b/video/2"]})),
+    )
+    tf.main()
+    docs = json.loads(capsys.readouterr().out)
+    assert len(docs) == 3
+    assert docs[0]["video_url"] == "https://www.tiktok.com/@a/video/1"
+    assert "error" in docs[1]
+    assert docs[2]["video_url"] == "https://www.tiktok.com/@b/video/2"
+
+
 def test_dispatch_batch_urls(capsys, monkeypatch):
     import io
 

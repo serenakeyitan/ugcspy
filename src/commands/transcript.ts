@@ -110,6 +110,13 @@ export interface CollectDeps {
 // over-transcribe far past it (overshoot is cached, not wasted).
 export const FILTER_WAVE_SIZE = 6;
 
+// Hard wave ceiling for ALL runs: the bridge emits its result array only when
+// every video in the call finishes, and it lives under one fixed deadline
+// (UGCSPY_BRIDGE_TIMEOUT_MS, default 30min). At the documented 10-40s/video an
+// unbounded `--top 100` wave could blow the deadline and lose ALL completed
+// work; 8 × 40s worst-case stays comfortably inside it.
+export const MAX_WAVE_SIZE = 8;
+
 // Walk the ranked candidates, transcribing (or reading cache) until `top`
 // entries match the filter or the scan cap is hit. Uncached candidates are
 // batched into single bridge calls — the whisper model loads ONCE per wave
@@ -146,12 +153,20 @@ export async function collectTranscripts(
     }
 
     // Collect the next contiguous run of uncached candidates into one wave.
+    // The guard re-checks the cap LIVE: no-url rows consume scan slots during
+    // collection, and the wave itself must fit the remaining budget — without
+    // this, a no-url row let the loop drift past `cap` (scanning deeper than
+    // the user asked, e.g. an unfiltered --top 1 silently inspecting #2).
     const budget = Math.min(
-      cap - scanned,
       filtering ? FILTER_WAVE_SIZE : opts.top - entries.length,
+      MAX_WAVE_SIZE,
     );
     const wave: VideoRecord[] = [];
-    while (i < candidates.length && wave.length < budget) {
+    while (
+      i < candidates.length &&
+      wave.length < budget &&
+      scanned + wave.length < cap
+    ) {
       const v = candidates[i]!;
       if (docFromCache(v)) break; // cached row — handle on the next loop pass
       i += 1;
