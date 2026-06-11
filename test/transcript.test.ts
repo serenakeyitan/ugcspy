@@ -13,6 +13,7 @@ import {
   classifyTranscriptTarget,
   collectTranscripts,
   docFromCache,
+  externalIdFromUrl,
   hookFor,
   transcribeScanCap,
 } from "../src/commands/transcript.ts";
@@ -400,6 +401,38 @@ describe("saveTranscript (real schema, in-memory db)", () => {
     expect(row.caption).toBe("refreshed caption #brand"); // caption refreshed
     expect(row.hook_source).toBe("whisper"); // spoken hook survived
     expect(row.hook_text).toBe("Here is the spoken hook line.");
+  });
+});
+
+describe("externalIdFromUrl (share-link cache matching)", () => {
+  test("canonical, query-param, and mobile URLs all yield the id", () => {
+    const id = "7645079875358919966";
+    expect(externalIdFromUrl(`https://www.tiktok.com/@x/video/${id}`)).toBe(id);
+    expect(externalIdFromUrl(`https://www.tiktok.com/@x/video/${id}?is_from_webapp=1&q=share`)).toBe(id);
+    expect(externalIdFromUrl(`https://m.tiktok.com/v/whatever/video/${id}/`)).toBe(id);
+  });
+  test("short-links without /video/<id> yield null (fall back to exact match)", () => {
+    expect(externalIdFromUrl("https://vm.tiktok.com/ZMabc123/")).toBeNull();
+  });
+});
+
+describe("cached music rows must not promote non-lexical cues to hooks", () => {
+  test("docFromCache tags music-row text as non_lexical, so the hook falls back to caption", () => {
+    // transcriptText keeps "(sighs)"-style cues for display, so a cached music
+    // row CAN carry text. On the first run hookFor skipped it (kind
+    // non_lexical); the cached doc must preserve that, not re-tag it speech.
+    const cachedMusic = makeVideo(1, {
+      transcript: "(sighs)",
+      transcript_kind: "music",
+      transcript_words: 0,
+      transcript_duration_sec: 20,
+      transcribed_at: "2026-06-10 00:00:00",
+    });
+    const doc = docFromCache(cachedMusic)!;
+    expect(doc.segments[0]!.kind).toBe("non_lexical");
+    expect(transcriptText(doc)).toBe("(sighs)"); // display unchanged
+    const hook = hookFor(cachedMusic, doc);
+    expect(hook.source).toBe("caption"); // NOT "(sighs)" as a spoken hook
   });
 });
 

@@ -93,6 +93,27 @@ def test_speech_kind_and_lexical_word_count():
     assert doc["lexical_word_count"] == 8
 
 
+def test_cjk_speech_counts_characters_not_space_tokens():
+    """A narrated Mandarin video has no spaces — text.split() would call a whole
+    sentence ONE word and --talking would wrongly exclude it (Pingo AI's
+    Chinese-tutor creators are exactly this case)."""
+    result = {
+        "language": "zh",
+        "segments": [
+            {"start": 0.0, "end": 5.0, "text": "心理学表明你最喜欢的颜色揭示你的性格", "no_speech_prob": 0.05},
+        ],
+    }
+    doc = tf._transcript_normalize(result)
+    assert doc["audio_kind"] == "speech"
+    # 18 CJK chars — far above the 8-word talking gate, as it should be.
+    assert doc["lexical_word_count"] == 18
+
+
+def test_mixed_cjk_and_latin_counts_both():
+    # 我用学习 = 4 CJK chars; "BeFreed", "every", "day" = 3 latin tokens → 7
+    assert tf._lexical_word_count("我用 BeFreed 学习 every day") == 7
+
+
 def test_mixed_kind_counts_only_speech_words():
     doc = tf._transcript_normalize(MIXED_RESULT)
     assert doc["audio_kind"] == "mixed"

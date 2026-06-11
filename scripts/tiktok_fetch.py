@@ -1847,6 +1847,20 @@ def _transcript_non_lexical_re():
     )
 
 
+def _lexical_word_count(text: str) -> int:
+    """Word count that works for languages WITHOUT spaces. `text.split()` calls
+    a whole Chinese/Japanese sentence ONE word, so a fully-narrated Mandarin
+    video (e.g. Pingo AI's Chinese-tutor creators) would land under the
+    talking threshold. CJK characters count ~1 word each (Chinese averages
+    ~1.5 chars/word — close enough for an 8-word gate); everything else counts
+    by whitespace tokens."""
+    import re
+
+    cjk = re.findall(r"[぀-ヿ㐀-䶿一-鿿가-힯]", text)
+    rest = re.sub(r"[぀-ヿ㐀-䶿一-鿿가-힯]", " ", text)
+    return len(cjk) + len(rest.split())
+
+
 def _transcript_normalize(result: dict) -> dict:
     """Whisper raw result → transcript doc with per-segment kind tags and a
     whole-track audio_kind summary ("speech" | "music" | "mixed").
@@ -1893,7 +1907,7 @@ def _transcript_normalize(result: dict) -> dict:
         kind = "non_lexical" if (text and non_lexical.match(text)) else "speech"
         if kind == "speech":
             speech_seg_count += 1
-            lexical_word_count += len(text.split())
+            lexical_word_count += _lexical_word_count(text)
         segments.append(
             {
                 "start": round(start, 3),

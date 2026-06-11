@@ -4,6 +4,7 @@ import { openDb } from "../db/index.ts";
 import { isTalking, saveTranscript, spokenHook, transcriptText } from "../db/videos.ts";
 import { loadConfig } from "../lib/config.ts";
 import { getProvider } from "../providers/index.ts";
+import { authorFromUrl } from "../providers/tiktok-oss.ts";
 import type { Platform, TranscriptDoc, VideoRecord } from "../types.ts";
 import { parseQuery, readCachedVideos } from "./search.ts";
 
@@ -26,6 +27,19 @@ export type TranscriptTarget =
   | { kind: "dbid"; id: number }
   | { kind: "external"; externalId: string }
   | { kind: "query"; raw: string };
+
+// Canonical TikTok video id from any pasted URL form (share links carry query
+// params, m.tiktok.com hosts, trailing junk — but all keep /video/<id>).
+export function externalIdFromUrl(url: string): string | null {
+  const m = url.match(/\/video\/(\d+)/);
+  return m ? m[1]! : null;
+}
+
+// Display handle: the row's author when known, else parsed from the video URL
+// (user-mode catalog rows can carry a NULL author_handle).
+export function displayHandle(video: Pick<VideoRecord, "author_handle" | "video_url">): string {
+  return video.author_handle || authorFromUrl(video.video_url) || "?";
+}
 
 export function classifyTranscriptTarget(arg: string): TranscriptTarget {
   const trimmed = arg.trim();
@@ -54,8 +68,10 @@ export interface TranscriptEntry {
 
 // Rebuild a TranscriptDoc-shaped object from the DB cache columns. The cached
 // transcript is the flattened text (segments aren't persisted), so the doc
-// carries one synthetic speech segment when text exists. Classification fields
-// (audio_kind, lexical_word_count) round-trip exactly.
+// carries ONE synthetic segment when text exists. For a "music" row that text
+// can only be non-lexical cues like "(sighs)" — tag it non_lexical so
+// spokenHook never promotes a cue to a hook on cache hits. Classification
+// fields (audio_kind, lexical_word_count) round-trip exactly.
 export function docFromCache(video: VideoRecord): TranscriptDoc | null {
   if (!video.transcript_kind || !video.transcribed_at) return null;
   const kind = video.transcript_kind;
@@ -64,7 +80,16 @@ export function docFromCache(video: VideoRecord): TranscriptDoc | null {
   return {
     language: video.transcript_lang ?? null,
     duration_sec: video.transcript_duration_sec ?? 0,
-    segments: text ? [{ start: 0, end: video.transcript_duration_sec ?? 0, text, kind: "speech" }] : [],
+    segments: text
+      ? [
+          {
+            start: 0,
+            end: video.transcript_duration_sec ?? 0,
+            text,
+            kind: kind === "music" ? "non_lexical" : "speech",
+          },
+        ]
+      : [],
     audio_kind: kind,
     lexical_word_count: video.transcript_words ?? 0,
     video_url: video.video_url,
@@ -100,17 +125,17 @@ export async function collectTranscripts(
     const fromCache = doc !== null;
     if (!doc) {
       if (!video.video_url) {
-        failures.push(`@${video.author_handle ?? "?"} ${video.external_id}: no video_url`);
+        failures.push(`@${displayHandle(video)} ${video.external_id}: no video_url`);
         continue;
       }
       deps.progress?.(
-        `Transcribing @${video.author_handle ?? "?"} (${video.view_count.toLocaleString()} views)...`,
+        `Transcribing @${displayHandle(video)} (${video.view_count.toLocaleString()} views)...`,
       );
       try {
         doc = await deps.transcribe(video.video_url);
         deps.save(video, doc);
       } catch (err) {
-        failures.push(`@${video.author_handle ?? "?"} ${video.external_id}: ${(err as Error).message}`);
+        failures.push(`@${displayHandle(video)} ${video.external_id}: ${(err as Error).message}`);
         continue;
       } finally {
         deps.progress?.(null);
@@ -132,14 +157,18 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
   const db = openDb();
   const config = loadConfig();
   const provider = getProvider(config);
-  if (!provider.fetchTranscript) {
-    console.error(
-      chalk.red(
-        `Provider '${provider.name}' has no transcript support. Use the tiktok-oss provider (free) for transcripts.`,
-      ),
-    );
-    process.exit(1);
-  }
+  // No up-front provider gate: cached transcripts must stay readable even when
+  // the configured search provider can't transcribe (e.g. the user switched to
+  // scrapecreators after building the cache with tiktok-oss). The check fires
+  // lazily, only when a cache miss actually needs a transcription.
+  const transcribe = (url: string): Promise<TranscriptDoc> => {
+    if (!provider.fetchTranscript) {
+      throw new Error(
+        `provider '${provider.name}' has no transcript support — switch to the tiktok-oss provider (free) to transcribe new videos`,
+      );
+    }
+    return provider.fetchTranscript(url);
+  };
 
   const target = classifyTranscriptTarget(arg);
   let candidates: VideoRecord[];
@@ -162,9 +191,18 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
     }
     candidates = [row];
   } else if (target.kind === "url") {
-    const row = db
-      .prepare(`SELECT * FROM videos WHERE video_url = ? ORDER BY id LIMIT 1`)
-      .get(target.url) as VideoRecord | undefined;
+    // Pasted URLs vary (share query params, m.tiktok.com, trailing slash) but
+    // all canonical forms carry /video/<id> — match the cache by external_id
+    // first so a known video isn't re-transcribed as "ad-hoc" just because the
+    // share link didn't string-match the stored canonical URL.
+    const externalId = externalIdFromUrl(target.url);
+    const row = (externalId
+      ? db
+          .prepare(`SELECT * FROM videos WHERE external_id = ? ORDER BY id LIMIT 1`)
+          .get(externalId)
+      : db
+          .prepare(`SELECT * FROM videos WHERE video_url = ? ORDER BY id LIMIT 1`)
+          .get(target.url)) as VideoRecord | undefined;
     // An uncached URL still works — transcribe ad-hoc with a synthetic record;
     // there's just no row to persist the cache into.
     candidates = row
@@ -221,7 +259,7 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
     candidates,
     { top: target.kind === "query" ? opts.top : candidates.length, ...filterOf(opts) },
     {
-      transcribe: (url) => provider.fetchTranscript!(url),
+      transcribe,
       save: (video, doc) => {
         // Ad-hoc URLs (id <= 0) have no row to cache into. Persisting is keyed
         // by (platform, external_id) so every competitor's copy of the video
@@ -273,7 +311,7 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
     const badge = talking ? chalk.green("TALKING") : chalk.magenta("NON-TALKING");
     const meta = `${doc.audio_kind}, ${doc.lexical_word_count} words, ${Math.round(doc.duration_sec)}s${fromCache ? ", cached" : ""}`;
     console.log(
-      `\n${chalk.bold(`#${i + 1}`)} ${chalk.cyan(`@${video.author_handle ?? "?"}`)} — ${views}${badge} ${chalk.dim(`(${meta})`)}`,
+      `\n${chalk.bold(`#${i + 1}`)} ${chalk.cyan(`@${displayHandle(video)}`)} — ${views}${badge} ${chalk.dim(`(${meta})`)}`,
     );
     if (video.video_url) console.log(chalk.dim(video.video_url));
     const hook = hookFor(video, doc);
