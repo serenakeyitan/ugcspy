@@ -14,6 +14,7 @@ User arguments: `$ARGUMENTS` (video id or URL, target brand, optional one-line b
 3. **One promotion, not a takeover.** The brand appears at ONE beat (two only if the source had two promotional beats). The video's subject stays the content; the brand is a supporting detail the way real UGC drops it.
 4. **Truthful to the target brand.** The inserted claim must describe something the brand actually does. Never inherit the old product's claims wholesale — adapt them to what the target brand really is.
 5. **Searchable.** Say the brand NAME clearly once, in a form a viewer can type into a search bar. Spelled-out name beats a vague "this app".
+6. **Never the final beat.** The brand line sits 靠后或者中间 (mid-to-late), but the video's own closer ALWAYS comes after it — the last thing the viewer hears is the creator's voice, never the brand. A brand sign-off reads as an ad and tanks conversion; buried one beat before the close, it lands as the detail the viewer scrolls back for. If the source video's only natural host moment is its final line, insert BEFORE it — do not append after the closer.
 
 ## Step 1 — Get the transcript
 
@@ -39,7 +40,7 @@ Read the transcript and decide what kind of video this is:
 - **INSERT case — no promotion.** Find the single most natural host moment: the place where the creator explains *how* they do the thing, *what* they use, or transitions toward a takeaway. Insert one short brand sentence (or graft a clause onto an existing sentence) that grows out of the content right before it. The transition must reuse the video's own vocabulary and voice — if the creator says "bro", the insertion can say bro; if the creator is clinical, stay clinical.
 - **FLAG case — the brand can't live here honestly.** If the product IS the format (the video is a demo of the original app — e.g. an AI-tutor conversation where the product is the other voice), or the topic has no truthful bridge to the brand, say so plainly. Offer the least-stretchy option you can, explicitly labeled as a stretch, and let the user decide. Do not force it — a forced insert reads as an ad and defeats the purpose.
 
-Placement instinct: real UGC drops the brand right after the value moment (the tip that worked, the result shown), not at the top and not as a closing tagline. Mid-to-late beats convert to searches; the hook's job is retention and it already exists — leave it alone (rule 1).
+Placement instinct: real UGC drops the brand right after the value moment (the tip that worked, the result shown), not at the top and not as a closing tagline. Mid-to-late beats convert to searches; the hook's job is retention and it already exists — leave it alone (rule 1). And per rule 6, the creator's own closer must follow the brand line — when in doubt, slot the insert one beat earlier than feels natural rather than one beat later.
 
 ## Step 4 — Output format
 
@@ -66,5 +67,6 @@ If useful for the search-up goal, add one line of suggested caption tags (`#<bra
 - [ ] Does the claim match what the brand actually does (per Step 2 evidence)?
 - [ ] Read the transition sentence aloud in the creator's voice — does it sound like them, not like a sponsor read?
 - [ ] Is the video still about its subject, with the brand as a detail?
+- [ ] Is there at least one beat of the creator's OWN content after the brand line? (The script must never end on the brand.)
 
 If any box fails, fix it before showing the user. If rule 4 can't be satisfied, switch to the FLAG case.
