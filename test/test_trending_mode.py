@@ -100,6 +100,20 @@ def test_scalar_data_envelope_is_an_empty_round_not_a_crash(capsys, monkeypatch)
     assert [v["external_id"] for v in out] == ["1"]
 
 
+def test_dict_shaped_unique_id_does_not_leak_into_urls(capsys, monkeypatch):
+    """Live failure #3 on this field: author.unique_id arrived as a DICT —
+    truthy, so it survived `or ""` and got f-string-serialized into the
+    video URL (tiktok.com/@{'12': 853...}/video/...)."""
+    out, _ = _run(monkeypatch, [
+        [dict(_item(1), author={"unique_id": {"12": 8530226031517591668}}), _item(2)],
+        [],
+        [],
+    ], capsys)
+    by_id = {v["external_id"]: v for v in out}
+    assert by_id["1"]["_author"] == ""
+    assert "{" not in by_id["1"]["video_url"]
+
+
 def test_relay_down_fails_soft_with_partial_results(capsys, monkeypatch):
     out, _ = _run(monkeypatch, [
         [_item(1)],

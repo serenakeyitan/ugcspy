@@ -258,7 +258,13 @@ def _tikwm_item_to_raw(item: dict) -> Optional[dict]:
     # author arrives as an object on feed/search but as a PLAIN STRING on some
     # feed/list rotations — one untrusted shape must not crash the run.
     a = item.get("author")
-    author = (a.get("unique_id") or "") if isinstance(a, dict) else (a if isinstance(a, str) else "")
+    if isinstance(a, dict):
+        uid = a.get("unique_id")
+        # unique_id itself is untrusted — a dict/number here is truthy and
+        # would get f-string-serialized into the video URL (seen live).
+        author = uid if isinstance(uid, str) else ""
+    else:
+        author = a if isinstance(a, str) else ""
     posted_at = _safe_ts(create_ts)
     if posted_at is None:
         return None  # malformed/hostile timestamp → drop the item, not the run

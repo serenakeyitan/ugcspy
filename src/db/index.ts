@@ -10,11 +10,13 @@ export function openDb(path: string = DEFAULT_DB_PATH): Database {
   const onDisk = path !== ":memory:";
   if (onDisk) mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const db = new Database(path);
+  // busy_timeout FIRST: the journal_mode=WAL handshake itself takes locks
+  // (and runs WAL recovery when another process died mid-write), so without
+  // the timeout already armed, two concurrent opens fail instantly with
+  // SQLITE_BUSY_RECOVERY — hit live by two CLI processes starting together.
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
   db.exec("PRAGMA journal_mode = WAL;");
-  // Concurrent writers (a daemon tick + a manual search) get 5s of retry
-  // instead of an instant SQLITE_BUSY error.
-  db.exec("PRAGMA busy_timeout = 5000;");
   migrate(db);
   if (onDisk) {
     // The DB stores Slack webhook URLs (write credentials) — keep it owner-only
