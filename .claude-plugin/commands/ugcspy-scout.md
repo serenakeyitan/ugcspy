@@ -5,75 +5,101 @@ argument-hint: "<your-brand> [one-line: what the brand does] [--region US]"
 
 You are scouting TEMPLATE SOURCES for a brand whose copy-worthy accounts are not yet known. The deliverable: a ranked shortlist of videos + accounts worth remixing — [script] templates via `/ugcspy-rebrand`, [overlay] templates via `/ugcspy-decode` — each labeled with its lane and why it fits.
 
-User arguments: `$ARGUMENTS` (the user's brand, optional one-line description, optional region).
+User arguments: `$ARGUMENTS` (the user's brand, optional one-line description, optional region; region defaults to US).
 
-## The three lanes (run all three, cheapest-signal first)
+## Step 0 — you need to know what the brand does
 
-**Lane 3 — direct competitors (流量保底, run FIRST).** The user's niche has brands already doing UGC; their proven scripts are the safest templates.
+If no one-line description was given and you can't infer it from cached data, ASK the user one short question ("what does <brand> do, in one line?") before any discovery — lane phrases and every truthfulness judgment depend on it. Do not guess a niche from the brand name alone.
 
-```bash
-ugcspy discover "<niche phrase derived from what the brand does>" --json
-```
+## Phase A — cheap corpus passes (all lanes, ~1-2 min each, no approval needed)
 
-Derive 1-2 niche phrases from the brand description (e.g. an AI reading app → "ai learning app", "book summary app"). Read the `brands` table: campaign codes (`Codes` column) are near-proof of a run UGC program; `acct`/`app` signals mark brand-shaped tags; `bg` marks generic topic tags. YOU judge which rows are real brands — the table is evidence, not a verdict. Consolidate tag families yourself (#pingo + #pingoai = one brand). For each real competitor brand found:
+Run these in this order — the trending pull comes first because its tag set powers the `bg` genericity discount on every later niche scan:
 
 ```bash
-ugcspy search <brand-tag>        # their full UGC roster, ranked by views
+ugcspy discover <REGION> --trending --json        # ① lane 1+2: fetches + caches trend:<REGION> AND mines it — ONE pull
+ugcspy discover "<niche phrase 1>" --json          # ② lane 3: the brand's own niche (derive 1-2 phrases from the description)
+ugcspy discover "<adjacent niche>" --json          # ③ lane 2: same buyer, different product (fitness app → "language learning app", "budgeting app")
 ```
 
-**Lane 2 — cross-category playbooks (套用 hooks from other verticals).** Hook formulas transfer across categories; a viral UGC structure from a non-competing product can be re-aimed at the user's brand without competing for the same audience.
+Do NOT also run `ugcspy trending` separately — `discover --trending` already fetches and caches the same rotating feed; a second pull wastes a fetch and mixes two different rotations into the `trend:<REGION>` cache.
 
-- Mine the trending corpus for UGC-program brands in OTHER categories: `ugcspy discover <REGION> --trending --json`
-- Also run `ugcspy discover` on 1-2 ADJACENT-but-different niches (same audience, different product — e.g. the user's brand is a fitness app → scout "language learning app", "budgeting app": same self-improvement buyer).
-- For each cross-category brand with strong evidence, pull their top talking videos and judge HOOK PORTABILITY: does the hook formula survive with the product swapped? ("Psychology shows your X reveals Y" ports anywhere; "watch me unbox this" doesn't.)
+Each `discover --json` returns `{corpus_size, cache_key, brands[], creators[]}` — aggregates, not videos. Candidate VIDEOS come later from `search --json` / `transcript --json`.
 
-**Lane 1 — today's viral hits (蹭热度, opportunistic).** Network-wide heat, mostly NOT brand content — the lowest-precision lane, but the only one that catches today's wave.
+## Phase B — shortlist brands and accounts (judgment, zero cost)
+
+From the combined `brands[]` evidence across all Phase A scans:
+- Campaign codes (`campaignCodes` > 0) are near-proof of a run UGC program; `appVariant`/`authorMatch` mark brand-shaped tags; `background: true` marks generic topic tags. The table is evidence, not a verdict — YOU make the brand-vs-topic call.
+- Consolidate tag families yourself (#pingo + #pingoai = one brand).
+- From `creators[]`, note recurring accounts (the "accounts to watch" half of the deliverable).
+
+Shortlist 2-4 candidate brands across lanes 2+3. STOP and confirm with the user before any deep pull: a full `ugcspy search` is ~5-8 min per brand. **Deep-search at most ONE brand without explicit approval for more.**
+
+## Phase C — candidate videos (the only expensive phase)
+
+**Lane 3/2 (the one approved brand):**
 
 ```bash
-ugcspy trending <REGION>                      # default US; cached as trend:<REGION>
-ugcspy transcript trend:<REGION> --top 8      # classifies every hit TALKING / NON-TALKING
+ugcspy search <brand-tag> --json                          # full roster; id + video_url + caption per row
+ugcspy transcript <brand-tag> --top 3 --talking --json    # hooks + transcripts for its top talking videos
 ```
 
-The TALKING/NON-TALKING badge splits the hits into the two template classes below — don't pre-filter with `--talking` here or you'll never see the overlay candidates.
+**Lane 1 (trending hooks — corpus already cached by Phase A):**
 
-Judge every hit for remixability before proposing it (rules below). Talking hits are script templates; high-fit NON-talking hits (overlay-text montages over a trending sound) are format templates — keep those too, routed to the decode path. Discard what's neither: sports clips, news moments, and meme formats with no text narrative. Finding 1-2 genuinely remixable trend formats is a good day.
+```bash
+ugcspy transcript trend:<REGION> --top 8 --json           # classifies the TOP 8 cached hits, not the whole corpus
+```
+
+Report the coverage honestly ("classified 8 of N cached trending videos"). Don't pre-filter with `--talking` here — the NON-TALKING badge is how overlay candidates surface.
+
+Always use `--json` for candidate-producing calls: the shortlist needs `id`, `video_url`, and `hook` fields, and the human-readable tables don't carry ids.
 
 ## Remixability judgment (applies to every candidate, all lanes)
 
 Two template classes — label every proposal as one or the other:
 
-**[script] — talking videos** (`--talking`; transcript present). Usable only if:
+**[script] — talking videos** (TALKING badge; transcript present). Usable only if:
 - **The hook is product-independent.** The first line would survive with a different product in the video (rule out product demos where the product IS the format — /ugcspy-rebrand's FLAG case).
 - **The brand beat is insertable/swappable** under /ugcspy-rebrand's iron rules: one beat, truthful for the user's brand, and — duration-aware — at or before the midpoint for >30s scripts.
 Route: `/ugcspy-rebrand <video-id> <user-brand>`.
 
-**[overlay] — non-talking videos** whose remixable asset is the ON-SCREEN TEXT sequence + format structure (overlay-text montage over a sound). Usable only if the overlay narrative is product-independent the same way a spoken hook would be. The brand insert is an overlay caption beat, not a spoken sentence.
-Route: `/ugcspy-decode <video-id>` (OCRs the overlay narrative) then `/ugcspy-remix`.
+**[overlay] — non-talking videos** whose remixable asset is the ON-SCREEN TEXT sequence + format structure. The transcript tool CANNOT see overlay text (its hook field is caption-derived, not OCR) — so before ranking an overlay candidate, run `/ugcspy-decode <video-id>` to OCR the actual overlay narrative and confirm it's product-independent. If you shortlist one without decoding, label it **"unverified overlay candidate"** and do NOT quote an overlay line you haven't seen.
+Route: `/ugcspy-decode <video-id>` first; remix needs a chosen source creator afterwards (`/ugcspy-remix <target-id> <source-id>` takes TWO videos — don't emit it with one).
 
-**Either class** must also be **shootable** by a normal UGC creator (talking head, listicle voiceover, green-screen, b-roll montage) — not a stadium event or a 50-cut edit.
+**Either class** must also be **shootable** by a normal UGC creator (talking head, listicle voiceover, green-screen, b-roll montage). Be honest that cut-count/visual complexity is only verifiable via decode — flag, don't guess.
+
+## Ranking rubric (apply in this order)
+
+1. **Hook portability** — survives a product swap cleanly.
+2. **Honest brand-beat fit** — a truthful insert exists under the rebrand rules (incl. the >30s midpoint cap).
+3. **Shootability** for a normal creator.
+4. **Evidence strength** — campaign codes / proven UGC program behind it beats a one-off hit.
+5. **Views and freshness** — tiebreaks only.
 
 ## Output format
 
-A single ranked shortlist (aim for 5-10 entries, best first), each entry:
+**1. Ranked template shortlist** (aim for 5-10 entries, best first):
 
 ```
-#N [lane 1|2|3] [script|overlay] @account — <views> — <link>
-   Hook: "<spoken hook verbatim>"            (script) — or the opening overlay line (overlay)
+#N [lane 1|2|3] [script|overlay] @account — <views> — <video_url>
+   Hook: "<spoken hook verbatim>"           (script — from transcript --json)
+   Overlay: "<opening overlay line>"        (overlay — ONLY after /ugcspy-decode; else "unverified overlay candidate")
    Why it fits: <one sentence tying format → the user's brand>
-   Next: /ugcspy-rebrand <video-id> <user-brand>     (script)
-   Next: /ugcspy-decode <video-id>                    (overlay)
+   Next: /ugcspy-rebrand <id> <user-brand>  (script)  |  /ugcspy-decode <id>  (overlay)
 ```
 
-Then a one-paragraph read on which lane looks strongest for this brand right now, and anything you scanned and rejected that the user might expect to see (no silent dropping — if lane 1 was all sports clips today, say so).
+**2. Accounts to watch** — recurring creators from `discover.creators[]` worth copying as ACCOUNTS (handle, videos-in-corpus, top views, lane, one-line rationale).
+
+**3. The honest read** — one paragraph: which lane looks strongest for this brand right now, what you scanned and rejected (no silent dropping — if lane 1 was all sports clips today, say so), and any INCONCLUSIVE results: empty corpora may be relay failures not "no content" (a 0-video discover on an active niche is suspect — say so and suggest a retry), transcript scan caps reached, partial-platform search failures, batch transcription errors. Distinguish "scanned and rejected" from "failed to scan" everywhere.
 
 ## Cost expectations (tell the user upfront)
 
-- Lane 3 niche scans: ~1-2 min each. A competitor's full `search` is ~5-8 min for an active brand — ask before running more than one.
-- Transcriptions: ~10-40s per uncached video, batched; cached are instant.
-- Lane 1 trending pull: ~30-60s.
+- Phase A: ~1-2 min per discover scan (3-4 scans total).
+- Phase C: ONE brand deep-search ~5-8 min (never more without approval); transcripts ~10-40s per uncached video, batched, cached forever; each overlay decode ~30s.
 
 ## What NOT to do
 
-- Don't propose non-talking videos as SCRIPT templates — they have no spoken words for /ugcspy-rebrand to remix. Propose them as [overlay] format templates routed to /ugcspy-decode, or not at all.
+- Don't propose non-talking videos as SCRIPT templates — there are no spoken words for /ugcspy-rebrand to remix. Propose them as [overlay] candidates routed through /ugcspy-decode, or not at all.
+- Don't quote overlay lines you haven't decoded — the transcript tool can't see on-screen text.
 - Don't treat the brand-candidates table as truth — it's structural evidence; you make the brand-vs-topic call.
-- Don't run a full `ugcspy search` on every candidate brand — shortlist first, confirm with the user, then deep-pull.
+- Don't run `ugcspy trending` AND `discover --trending` in the same session — one rotating-feed pull, used for both.
+- Don't deep-search more than one candidate brand without explicit user approval.
