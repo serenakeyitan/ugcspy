@@ -11,7 +11,7 @@ description: Use this skill when the user asks about competitor UGC on TikTok or
 
 The default question is "find me UGC creators promoting BRAND" — that's plain-word search:
 
-- "Find creators promoting BeFreed" → `ugcspy search befreed` (hashtag mode, third-party)
+- "Find creators promoting [brand]" → `ugcspy search <brand>` (hashtag mode, third-party)
 - "Who's posting about Liquid Death?" → `ugcspy search liquiddeath`
 - "Show me all the Glossier UGC from the last week" → `ugcspy search glossier --sort recency --days 7`
 - "Top 20 creators talking about Notion" → `ugcspy search notion --limit 20`
@@ -41,16 +41,16 @@ ugcspy search <query> [--platform tiktok|instagram|all] [--limit N] \
 ```
 
 Auto-detects mode from query prefix:
-- `befreed` (no prefix) → hashtag mode = third-party creators promoting BeFreed
-- `@befreed` → user mode = BeFreed's own account posts
-- `#befreed` → explicit hashtag mode
+- `liquiddeath` (no prefix) → hashtag mode = third-party creators promoting Liquid Death
+- `@liquiddeath` → user mode = Liquid Death's own account posts
+- `#liquiddeath` → explicit hashtag mode
 - `--mode keyword` (explicit flag, never auto-detected) → broad niche/topic discovery — the corpus a script writer browses, NOT limited to videos tagging a brand. E.g. "find skincare routine UGC" → `ugcspy search --mode keyword "skincare routine"`. Pure HTTP, zero setup.
 
 Returns videos ranked by **views descending** (default — BigSpy-style highest-reach-first) or recency. Hashtag mode includes a `Creator` column showing each row's actual poster, plus a "most prolific creators" summary at the bottom (the SMM insight: who's posting about this brand most often).
 
-Precision filter: hashtag results only keep videos whose caption carries the brand via `#brand`, `#brand_NNNN` (campaign codes), `#brandapp`, `@brand`, or the plain-text brand token at word boundaries (e.g. "reading with befreed is so clutch"). This rejects unrelated videos that TikTok's hashtag endpoint over-matches.
+Precision filter: hashtag results only keep videos whose caption carries the brand via `#brand`, `#brand_NNNN` (campaign codes), `#brandapp`, `@brand`, or the plain-text brand token at word boundaries (e.g. "hydrating with liquiddeath is so clutch"). This rejects unrelated videos that TikTok's hashtag endpoint over-matches.
 
-**First-run wall time is a few minutes for an active brand (~5-8 min for BeFreed).** The CLI runs two stages: browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay), then a yt-dlp coverage walk of each discovered creator's full catalog (16-way concurrent, `UGCSPY_WALK_CONCURRENCY`) — the walk is where the time goes. Tell the user this is expected before running. Subsequent searches on the same brand serve from cache instantly. Use `--refresh` to force a re-fetch (same time).
+**First-run wall time is a few minutes for an active brand (~5-8 min for a brand with ~150 discovered creators).** The CLI runs two stages: browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay), then a yt-dlp coverage walk of each discovered creator's full catalog (16-way concurrent, `UGCSPY_WALK_CONCURRENCY`) — the walk is where the time goes. Tell the user this is expected before running. Subsequent searches on the same brand serve from cache instantly. Use `--refresh` to force a re-fetch (same time).
 
 ### Fork (video → creator brief)
 

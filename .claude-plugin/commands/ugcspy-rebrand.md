@@ -3,7 +3,7 @@ description: Rebrand a UGC video transcript to a target brand with MINIMAL edits
 argument-hint: "<video-id-or-tiktok-url> <target-brand> [one-line: what the brand does]"
 ---
 
-You are rebranding ONE UGC video transcript so it promotes a target brand (e.g. BeFreed) instead of — or in addition to — whatever it promoted before. The output is a script a creator can re-shoot or re-voice. The viewer should finish the video and want to search the brand name; the video must NOT become an ad.
+You are rebranding ONE UGC video transcript so it promotes a target brand instead of — or in addition to — whatever it promoted before. The output is a script a creator can re-shoot or re-voice. The viewer should finish the video and want to search the brand name; the video must NOT become an ad.
 
 User arguments: `$ARGUMENTS` (video id or URL, target brand, optional one-line brand description).
 
@@ -18,7 +18,7 @@ User arguments: `$ARGUMENTS` (video id or URL, target brand, optional one-line b
    - **≤30s scripts**: 靠后或者中间 (mid-to-late) is fine — short videos hold most viewers to the end.
    - **>30s scripts**: drop-off makes late beats worthless — the brand line must land **no later than the midpoint** (中间或更早, roughly 30–50% in). A beautiful insert at 80% of a 60-second video converts nobody.
    - If a long script's only honest host beat sits past the midpoint, FLAG the video instead of forcing a late insert — recommend a shorter video in the same content family instead.
-   - In list-format videos, grafting onto a mid-list item (e.g. "I did that one on BeFreed first" after book #3 of 5) is allowed and usually the cleanest way to hit the midpoint.
+   - In list-format videos, grafting onto a mid-list item (e.g. "I did that one on <brand> first" after book #3 of 5) is allowed and usually the cleanest way to hit the midpoint.
 
 ## Step 1 — Get the transcript
 
@@ -32,7 +32,7 @@ Cached transcripts return instantly. If transcription fails, relay the error ver
 
 Do not invent marketing copy. In priority order:
 
-1. **The brand's own UGC corpus in the local cache** — `ugcspy transcript <brand> --top 3 --talking --json` (or `ugcspy search <brand> --json` captions). Real creators' pitch lines tell you the brand's true function AND the native register for dropping it ("it's 2026, just use an app like BeFreed", "10-minute little podcasts" — that's how the cohort actually talks).
+1. **The brand's own UGC corpus in the local cache** — `ugcspy transcript <brand> --top 3 --talking --json` (or `ugcspy search <brand> --json` captions). Real creators' pitch lines tell you the brand's true function AND the native register for dropping it — real creators write things like "it's 2026, just use an app like <brand>" or "the app is called <brand> btw"; that offhand register, not ad copy, is what you're matching.
 2. **The user's one-liner argument**, if they gave one.
 3. **Ask the user** one short question: "what does <brand> do, in one line?" — only if 1 and 2 both came up empty.
 

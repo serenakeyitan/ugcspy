@@ -62,35 +62,37 @@ export function normalizeSearchOptions(raw: {
 
 // Precision filter for hashtag results.
 //
-// TikTok's hashtag endpoint over-matches: searching #befreed returns videos
-// containing "be freed" / "freed" in unrelated contexts. For brand UGC
-// discovery we want only videos where the creator EXPLICITLY tagged the
-// brand. Accepted signals (in order of confidence):
+// TikTok's hashtag endpoint over-matches: searching a brand tag like #notion
+// also returns videos that merely use the ordinary word "notion" in unrelated
+// contexts. For brand UGC discovery we want only videos where the creator
+// EXPLICITLY tagged the brand. Accepted signals (in order of confidence):
 //
-//   1. Exact hashtag boundary: #befreed (not #befreedish, not #befreeishly)
-//   2. Campaign code: #befreed_NNNN (BeFreed and others use numeric codes)
-//   3. Brand-app variant: #befreedapp (very common pattern)
-//   4. Brand handle mention: @befreed
+//   1. Exact hashtag boundary: #yourbrand (not #yourbrandish)
+//   2. Campaign code: #yourbrand_NNNN (many brands use numeric campaign codes)
+//   3. Brand-app variant: #yourbrandapp (very common pattern)
+//   4. Brand handle mention: @yourbrand
 //
-// Audited against BeFreed: keeps explicit-tag UGC AND plain-text brand mentions,
-// while rejecting unrelated "be free"/"#freedom"/"#befree" posts. The accepted
-// signals (any one):
-//   1. Exact hashtag boundary: #befreed (not #befreedish)
-//   2. Campaign code: #befreed_0117
-//   3. Brand-app variant: #befreedapp
-//   4. Handle mention: @befreed (not @befreedom)
+// Audited against the mid-size brand we benchmarked: keeps explicit-tag UGC
+// AND plain-text brand mentions, while rejecting near-miss hashtags and posts
+// that merely contain look-alike words or phrases. The accepted signals
+// (any one):
+//   1. Exact hashtag boundary: #yourbrand (not #yourbrandish)
+//   2. Campaign code: #yourbrand_0117
+//   3. Brand-app variant: #yourbrandapp
+//   4. Handle mention: @yourbrand (not @yourbrandx)
 //   5. Plain-text brand token: the literal brand name as a standalone word
-//      (e.g. "reading with befreed is so clutch")
+//      (e.g. "reading with <brand> is so clutch")
 //
-// Signal #5 is the fix for the dropped-top-performers bug: the highest-reach
-// genuine BeFreed UGC (776K views, "Learning with befreed...") writes the brand
-// as plain text, no # or @. Requiring a tag dropped exactly the videos a
-// "rank by performance" product most needs. Verified on BeFreed's full 1,223-
-// video raw feed: signal #5 recovers 16 genuine brand videos and re-admits
-// ZERO junk — "#freedom", "#befree" (a Russian clothing brand), "be free",
-// horse-breeding, etc. don't contain the literal token "befreed", so the word-
-// boundary match excludes them. (The token IS the brand name, so this is
-// brand-specific precision, not a generic loosening.)
+// Signal #5 is the fix for the dropped-top-performers bug: for the mid-size
+// brand we benchmarked, the highest-reach genuine UGC (776K views) wrote the
+// brand as plain text, no # or @. Requiring a tag dropped exactly the videos a
+// "rank by performance" product most needs. Verified on that brand's full
+// 1,223-video raw feed: signal #5 recovers 16 genuine brand videos and
+// re-admits ZERO junk — near-miss hashtags, same-spelled tags from unrelated
+// brands, and ordinary phrases that only resemble the brand word don't contain
+// the literal brand token, so the word-boundary match excludes them. (The
+// token IS the brand name, so this is brand-specific precision, not a generic
+// loosening.)
 export function isHashtagMatch(caption: string, tag: string): boolean {
   if (!caption) return false;
   const lower = caption.toLowerCase();
@@ -104,15 +106,16 @@ export function isHashtagMatch(caption: string, tag: string): boolean {
   );
   if (hashtagPattern.test(lower)) return true;
 
-  // 4. Brand handle mention (@befreed, but not @befreedom).
+  // 4. Brand handle mention (@yourbrand, but not @yourbrandx).
   const mentionPattern = new RegExp(`@${escaped}(?![a-z0-9_])`, "i");
   if (mentionPattern.test(lower)) return true;
 
   // 5. Plain-text brand token — the brand name as a standalone word, no # or @.
-  // Word boundaries on both sides so "befreedom" / "unbefreed" don't match and
-  // "#befreed"/"@befreed" (already caught above) don't double-count. Safe
-  // because the token equals the brand name; generic words like "free" are NOT
-  // the tag, so junk ("#freedom", "be free") still fails.
+  // Word boundaries on both sides so longer words that merely contain the
+  // brand don't match and "#yourbrand"/"@yourbrand" (already caught above)
+  // don't double-count. Safe because the token equals the brand name; mere
+  // fragments of it and look-alike phrases are NOT the tag, so junk still
+  // fails.
   const plainPattern = new RegExp(`(?<![a-z0-9_])${escaped}(?![a-z0-9_])`, "i");
   if (plainPattern.test(lower)) return true;
 
@@ -420,7 +423,7 @@ function printTable(query: ParsedQuery, rows: VideoRecord[]): void {
   console.log(table.toString());
 
   // For hashtag mode, surface the most prolific creators — that's the SMM
-  // insight worth its own line ("oh, @growthwithmya7 has the most posts about
+  // insight worth its own line ("oh, @some.creator has the most posts about
   // this brand, I should reach out to them").
   if (showCreator) {
     const byCreator = new Map<string, number>();

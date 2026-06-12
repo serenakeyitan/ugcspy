@@ -21,7 +21,7 @@ sqlite3 ~/.ugcspy/db.sqlite "SELECT json_object('id', id, 'platform', platform, 
 
 Parse the JSON. If empty, tell the user to run `/ugcspy-search <brand>` first so the video is in cache.
 
-Note: `author_handle` may be set (the actual creator who posted the video, varies per row in hashtag-mode results) or null (legacy data). Use it in the brief: a third-party UGC video by `@growwithnomes` with `#befreed` is a different storytelling reference than the brand's own post.
+Note: `author_handle` may be set (the actual creator who posted the video, varies per row in hashtag-mode results) or null (legacy data). Use it in the brief: a third-party UGC video by `@some.creator` with `#yourbrand` is a different storytelling reference than the brand's own post.
 
 ## Step 2 — Generate the brief in this chat
 

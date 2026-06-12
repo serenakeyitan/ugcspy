@@ -11,8 +11,8 @@ User arguments: `$ARGUMENTS`
 
 The user can pass three things:
 - **Numeric search id** (e.g. `42`) — look up the video_url in SQLite, then derive the TikTok video id from the URL
-- **TikTok URL** (e.g. `https://www.tiktok.com/@growthwithmya7/video/7637483885516918030`)
-- **Existing recipe-dir path** (e.g. `vendor/video-recipe/recipes/7637483885516918030`)
+- **TikTok URL** (e.g. `https://www.tiktok.com/@creator.handle/video/<id>`)
+- **Existing recipe-dir path** (e.g. `vendor/video-recipe/recipes/<video-id>`)
 
 For a numeric id: note that the `/ugcspy-search` table's `#` column is a display position, NOT the database id. If the number came from the table, resolve it first by re-running the same search with `--json` (cached, instant) and taking the Nth element's `id`/`video_url`. Then:
 
@@ -110,4 +110,4 @@ After the summary, suggest one of these depending on what the user seems to want
 - The OCR-driven overlay reconstruction is approximate. Heavy kinetic typography loses 20-40% of characters per frame; the chunking algorithm partially compensates but the result is more like "what the overlay roughly says" than verbatim.
 - The spoken transcript prefers the platform's own caption track (`source: embedded_subs`) when available — near-verbatim and music-proof. When the platform serves no captions, it falls back to Whisper (`source: whisper`), which is generally accurate for clear English speech but degrades on heavy background music, multiple speakers, or strong accents. Whisper word-timestamps are accurate to ~200ms; embedded-caption timing is cue-granular (coarser, but the text is more accurate). Whisper defaults to whisper-base; bump with `--whisper-model small` (or higher) on tricky audio. Music-only / non-speech audio is detected and reported via `has_speech` / `audio_kind` rather than filled with hallucinated lyrics.
 - Format classification is heuristic with ~75% accuracy on common UGC patterns. The `signals[]` array is more trustworthy than the `kind` label for ambiguous videos.
-- Brand-pitch detection prefers caption-anchored signals (@mentions, campaign-coded hashtags like #brand_NNNN) over generic words to avoid false positives like picking "purple" over "befreed". (It scans overlay OCR text AND the spoken-transcript word timestamps — audio mentions of the brand contribute to `first_mention_at_sec` and placement.)
+- Brand-pitch detection prefers caption-anchored signals (@mentions, campaign-coded hashtags like #brand_NNNN) over generic words to avoid false positives (e.g. picking a frequent content word like "purple" over the actual brand token). (It scans overlay OCR text AND the spoken-transcript word timestamps — audio mentions of the brand contribute to `first_mention_at_sec` and placement.)

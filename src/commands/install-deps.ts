@@ -157,7 +157,7 @@ export async function runInstallDeps(opts: InstallDepsOptions = {}): Promise<voi
   }
 
   console.log(chalk.green("\n✓ tiktok-oss is ready.\n"));
-  console.log(`Try: ${chalk.cyan("ugcspy search befreed --platform tiktok --limit 10")}`);
+  console.log(`Try: ${chalk.cyan("ugcspy search liquiddeath --platform tiktok --limit 10")}`);
   console.log(
     chalk.dim(
       "Hashtag search runs browser-free (tikwm relay + yt-dlp). The first search on an active brand takes a few minutes while Stage 2 walks every discovered creator's catalog; results are cached after that, ranked by views.",

@@ -21,7 +21,7 @@ The classification is trustworthy on music: Whisper hallucinates plausible lyric
 
 ## Selection forms
 
-- **Brand/handle query** (`befreed`, `#pingoai`, `@jacob.befreed`) — top N by views (default 3, `--top N`) from the CACHED search. Run `/ugcspy-search <brand>` first if there's no cache.
+- **Brand/handle query** (`liquiddeath`, `#pingoai`, `@glossier`) — top N by views (default 3, `--top N`) from the CACHED search. Run `/ugcspy-search <brand>` first if there's no cache.
 - **DB id** (from `search --json` output's `id` field) — one video. The search table's `#` column is a display position, NOT the id — resolve via `--json` first, same rule as `/ugcspy-decode`.
 - **TikTok URL** — one video, works even if it was never searched (ad-hoc, not cached).
 

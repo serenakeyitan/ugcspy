@@ -3,7 +3,7 @@ description: Take the format of one video and produce a brief for a different cr
 argument-hint: "<target-id-or-url> <source-creator-id-or-url>"
 ---
 
-The user wants to take the FORMAT of video A (the proven hit they want to copy the structure of) and produce a brief telling creator B how to shoot their own version of that format. Common case: "make a video like @growthwithmya7's purple post, but in @eilisa.befreed's style."
+The user wants to take the FORMAT of video A (the proven hit they want to copy the structure of) and produce a brief telling creator B how to shoot their own version of that format. Common case: "make a video like @creator.a's viral post, but in @creator.b's style."
 
 This is structurally different from `/ugcspy-fork` (single video → quick brief) and `/ugcspy-recipe` (single video → AI render plan). Remix needs to decode BOTH videos and produce a brief that fits B's existing style into A's structure.
 
@@ -43,8 +43,8 @@ Read this `decode.json` — this is the CREATOR's existing style we want to resp
 
 Before generating the brief, surface any genuine mismatches between target format and source creator style. Real examples:
 
-- Target is `greenscreen_kinetic_listicle` (67s, complex Mya format) but source creator's videos are all `talking_head_floating_card` (7-10s) → tell the user: "Eilisa's existing posts are short single-thought videos; the Mya 60-second greenscreen listicle is a 6-10x format jump. This is doable but it's a creative stretch, not a minor adaptation."
-- Target's brand and source's typical brand differ → flag it ("target promotes Notion, source typically promotes BeFreed — make sure you mean to swap the brand")
+- Target is `greenscreen_kinetic_listicle` (67s, a complex kinetic format) but source creator's videos are all `talking_head_floating_card` (7-10s) → tell the user: "the source creator's existing posts are short single-thought videos; the target's 60-second greenscreen listicle is a 6-10x format jump. This is doable but it's a creative stretch, not a minor adaptation."
+- Target's brand and source's typical brand differ → flag it ("target promotes Notion, source typically promotes Glossier — make sure you mean to swap the brand")
 - Source creator has very few videos in their decoded sample → flag low-confidence on their "typical style"
 
 Don't suppress these honestly. The user can override if they want; they just need to know what they're choosing.
@@ -95,7 +95,7 @@ A spoken script in <source.uploader>'s voice, roughly matching the target's word
 - Reads naturally aloud — if a sentence sounds awkward when spoken, rewrite it
 
 ## Overlay text to burn in (the visible-cue layer)
-A separate, shorter version optimized for on-screen reading — usually punchier and more abbreviated than the spoken script. Matches the target's overlay-to-spoken ratio (e.g. Mya's overlay is ~30% of her spoken word count; Eilisa's overlay matches her spoken nearly 1:1).
+A separate, shorter version optimized for on-screen reading — usually punchier and more abbreviated than the spoken script. Matches the target's overlay-to-spoken ratio (e.g. in decoded samples, one creator's overlay ran ~30% of her spoken word count while another's matched nearly 1:1).
 
 ## Production checklist
 <reuse target.reproduction_notes.format_specific_tooling — that's the technique>

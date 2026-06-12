@@ -9,7 +9,7 @@ export class MockProvider implements DataProvider {
     // Reuse the same generator but stamp a different author per row, so the
     // result looks like third-party UGC. Deterministic per (tag, platform).
     const baseline = await this.fetchRecentVideos(`#${tag}`, platform, days);
-    const creators = ["growthwithmya7", "apluslisa", "yapswithalicia", "diegodayy", "ask_julia"];
+    const creators = ["growth.with.gia", "apluslisa", "yapswithalicia", "diegodayy", "ask_julia"];
     return baseline.map((v, i) => ({
       ...v,
       author_handle: creators[i % creators.length],

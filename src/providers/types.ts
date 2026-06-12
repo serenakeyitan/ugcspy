@@ -2,9 +2,9 @@ import type { Platform, RawVideo, TranscriptDoc } from "../types.ts";
 
 export interface DataProvider {
   readonly name: string;
-  // Fetch a specific handle's own videos (e.g. @befreed's posts).
+  // Fetch a specific handle's own videos (e.g. @glossier's posts).
   fetchRecentVideos(handle: string, platform: Platform, days: number): Promise<RawVideo[]>;
-  // Fetch videos tagged with a hashtag (e.g. #befreed posted by ANY creator).
+  // Fetch videos tagged with a hashtag (e.g. #liquiddeath posted by ANY creator).
   // This is how we find third-party UGC promoting a brand. Optional — providers
   // may throw a clear error if they don't support hashtag search yet.
   fetchHashtagVideos?(tag: string, platform: Platform, days: number): Promise<RawVideo[]>;

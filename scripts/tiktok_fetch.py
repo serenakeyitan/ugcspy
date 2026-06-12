@@ -2,8 +2,8 @@
 """Bridge between ugcspy CLI and davidteather/TikTok-Api.
 
 Stdin: JSON
-  Handle mode:  { "mode": "user",    "handle":  "@befreed", "days": 30 }
-  Hashtag mode: { "mode": "hashtag", "tag":     "befreed",  "days": 30 }
+  Handle mode:  { "mode": "user",    "handle":  "@glossier",   "days": 30 }
+  Hashtag mode: { "mode": "hashtag", "tag":     "liquiddeath", "days": 30 }
   (Legacy:      { "handle": "@x",    "days": 30 } is treated as user mode.)
 
 Stdout (success): JSON array of RawVideo objects (matching src/types.ts).
@@ -421,7 +421,7 @@ async def run_hashtag(tag: str, days: int) -> None:
         Find creator HANDLES from two complementary sources, then union +
         signal-rank into a ranked roster:
           • ALL brand hashtags — the main #<brand> challenge PLUS every
-            campaign-code/compound variant (#befreed_0124, #usebefreed), each
+            campaign-code/compound variant (#yourbrand_0124, #useyourbrand), each
             feed deep-paged (_tikwm_discover_all_brand_hashtags).
           • Follow-graph snowball — walk who the high-signal seeds FOLLOW
             (tikwm /api/user/following, depth-1), recovering the low-view long
@@ -445,7 +445,7 @@ async def run_hashtag(tag: str, days: int) -> None:
     # Browser-free discovery (pure HTTP, can't crash). PURE-HASHTAG model — two
     # complementary sources, no noisy full-text keyword search:
     #   1. ALL brand hashtags — the main #<brand> tag PLUS every campaign-code
-    #      and compound variant (#befreed_0124, #usebefreed, ...), each feed
+    #      and compound variant (#yourbrand_0124, #useyourbrand, ...), each feed
     #      deep-paged. Every creator here came from a real brand HASHTAG, so the
     #      source is high-purity by construction (vs the old full-text keyword
     #      search, which was ~8% pure and forced the walk to chew through noise).
@@ -739,11 +739,13 @@ def _is_brand_hashtag(name: str, brand: str) -> bool:
     endpoint matches loosely, so its result list mixes real brand tags with
     coincidental ones; we filter at the NAME level (no per-video work).
 
-    Keeps:  #befreed, #befreed_0124 (campaign code), #usebefreed (prefix),
-            #befreedaffirmations (brand + suffix word)
-    Rejects: #befree, #freed, #beafraid (don't contain the full brand token);
-             #befreedom (brand token + an ENGLISH-word continuation, i.e. the
-             unrelated word 'freedom').
+    Keeps (for brand 'yourbrand'):
+            #yourbrand, #yourbrand_0124 (campaign code), #useyourbrand (prefix),
+            #yourbrandvibes (brand + suffix word)
+    Rejects: #yourbran, #brand (don't contain the full brand token); tags where
+             the brand token continues into an unrelated ENGLISH word (e.g. a
+             brand ending in 'freed' picking up 'om' and becoming the ordinary
+             word 'freedom').
 
     Rule: the brand token must appear. It qualifies when it sits at a boundary
     (followed by a digit, underscore, separator, or end — the campaign-code and
@@ -760,7 +762,7 @@ def _is_brand_hashtag(name: str, brand: str) -> bool:
         return False
     # Continuations that turn the brand token into a DIFFERENT English word.
     # Keep this tiny and brand-specific-agnostic; only the most common traps.
-    DENY_SUFFIX_STARTS = ("om",)  # befreed+om = "freedom"-style coincidence
+    DENY_SUFFIX_STARTS = ("om",)  # brand ending in 'freed' + om = "freedom"-style coincidence
     for m in re.finditer(re.escape(b), nm):
         after = nm[m.end() :]
         if not after:
@@ -774,7 +776,7 @@ def _is_brand_hashtag(name: str, brand: str) -> bool:
 
 def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> tuple[list[tuple[str, str]], bool]:
     """Enumerate EVERY brand-related challenge (the main #<brand> tag plus all
-    campaign-code variants like #befreed_0124 and compounds like #usebefreed),
+    campaign-code variants like #yourbrand_0124 and compounds like #useyourbrand),
     each paired with its CORRECT challenge_id.
 
     Why this exists: tikwm's challenge/search returns the variant tags, but the
@@ -782,8 +784,8 @@ def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> tuple[list
     which collapsed a variant name onto the wrong (usually the main) challenge_id
     — so a variant's feed was never actually read. Here we read the search list
     in full and keep each (name -> its own id), filtered by _is_brand_hashtag so
-    #befree / #freed noise is dropped at the NAME level (no full-text search, no
-    per-video work). PURE HTTP, via _tikwm_get (retry + backoff) — this is the
+    near-miss tags that don't carry the full brand token are dropped at the NAME
+    level (no full-text search, no per-video work). PURE HTTP, via _tikwm_get (retry + backoff) — this is the
     FIRST link in the discovery chain, and a single transient blip here used to
     silently zero the entire hashtag search (empty roster, clean exit 0).
 
@@ -974,7 +976,7 @@ def _hashtag_feed_delay() -> float:
 def _tikwm_discover_by_hashtag(tag: str, pages: int = 20) -> list[str]:
     """Discover creators who tagged #<tag> via tikwm's challenge-posts endpoint —
     PURE HTTP, no browser. This is the browser-free replacement for the Chromium
-    hashtag passes: it walks the #befreed challenge feed and collects every
+    hashtag passes: it walks the #<brand> challenge feed and collects every
     creator who posted under it. Returns handles whose caption genuinely carries
     the brand. Empty list if the challenge can't be resolved (fails soft)."""
     import urllib.parse
@@ -1052,8 +1054,8 @@ def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> di
     """Following-graph snowball discovery (depth-1). Brand-UGC creators form a
     tight mutually-following collective, so walking who the known seeds FOLLOW
     surfaces long-tail creators that keyword/hashtag search never ranks high
-    enough to return (verified: keyword search missed @bobby/@eilisa/@lance/
-    @paige.befreed that the follow-graph finds). PURE HTTP, browser-free.
+    enough to return (verified: keyword search missed several long-tail
+    creators that the follow-graph finds). PURE HTTP, browser-free.
 
     Returns {handle: score} where score reflects how many seeds follow that
     handle — a creator followed by MANY known brand creators is very likely a
@@ -1277,11 +1279,12 @@ def _upgrade_metrics(existing, fresh, brand_tag=""):
 async def _user_search_seeds(api, tag):
     """Use TikTok's user-search endpoint to find handles containing the
     brand name. Returns a list of usernames (no @). These are CANDIDATES
-    — many will be noise (palestine_willbefreed, befreedwinefarm, etc.)
-    that get filtered out in pass 3 when their captions don't match.
+    — many will be noise (unrelated accounts whose names merely contain
+    the brand string) that get filtered out in pass 3 when their captions
+    don't match.
 
     We pull from two queries: `tag` and `tagapp`, since the official
-    account often uses the latter (e.g. @befreedapp)."""
+    account often uses the latter (e.g. @yourbrandapp)."""
     seen = []
     seen_set = set()
     for query in [tag, f"{tag}app"]:
@@ -1303,7 +1306,7 @@ async def _user_search_seeds(api, tag):
 def _merge_seed_creators(videos, tag, user_search_seeds):
     """Combine seed signals from all passes:
       A. Creators whose handle contains the brand name (strongest signal —
-         these are dedicated UGC accounts like @laura.befreed)
+         these are dedicated UGC accounts like @creator.<brand>)
       B. Creators who already have a caption that passed the filter (proven
          UGC for this brand)
       C. Usernames from pass-0 user search (may be noise but cheap to add)
@@ -1374,7 +1377,8 @@ async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff, max_rounds=
          (creator-walks, other hashtag variants) — that compounds
          badly because pass 3 is where most of our coverage comes from.
 
-    Empirical tuning (verified May 2026 with BeFreed as testbed):
+    Empirical tuning (verified May 2026 against the mid-size brand we
+    benchmarked):
 
       max_rounds | saturation | total corpus | wall time
       -----------|------------|--------------|-----------
@@ -1420,7 +1424,7 @@ async def _fetch_one_hashtag(api, variant, videos, seen_ids, cutoff, max_rounds=
 
 def _discover_campaign_codes(videos, tag):
     """Extract campaign-code variants from caption text. If we see
-    `#befreed_0117` mentioned in the captions of pass-1 results, that's
+    `#yourbrand_0117` mentioned in the captions of pass-1 results, that's
     a live campaign code worth querying directly for more coverage.
 
     Returns a sorted list of unique codes (max 12 to bound runtime)."""
@@ -1430,7 +1434,7 @@ def _discover_campaign_codes(videos, tag):
     for v in videos:
         for match in code_pattern.finditer(v.get("caption") or ""):
             # Keep the code VERBATIM: hashtag names are literal strings, so
-            # zero-padding '#befreed_117' to 'befreed_0117' queried a different
+            # zero-padding '#yourbrand_117' to 'yourbrand_0117' queried a different
             # (almost certainly empty) hashtag and never read the real feed.
             seen_codes.add(match.group(1))
     # Cap at 12 to bound wall time (each adds ~3-8s scrape)
@@ -1441,7 +1445,7 @@ def _is_real_ugc_caption(caption, tag):
     """Mirror of TS isHashtagMatch — does this caption carry the brand via
     hashtag, @mention, OR plain-text brand token? The plain-text form (#5)
     recovers high-reach genuine UGC that writes the brand name without a # or @
-    (e.g. 'reading with befreed is so clutch') — verified to add real videos
+    (e.g. 'obsessed with <brand> right now') — verified to add real videos
     and zero junk because the token equals the brand name. Used to qualify seed
     creators. Python lookbehind needs fixed width, so we use (?<![...]) classes."""
     import re
@@ -1465,7 +1469,7 @@ def _caption_maybe_truncates_brand(caption, tag) -> bool:
 
     THE BUG this guards: yt-dlp's --flat-playlist NON-DETERMINISTICALLY truncates
     a video's caption to ~72 chars. When the brand hashtag sits right at that
-    boundary, `#befreed_0124` arrives as `#befree` (or `#befreedX` cut to a
+    boundary, `#yourbrand_0124` arrives as `#yourbr` (or `#yourbrandX` cut to a
     partial), and _is_real_ugc_caption rejects it — silently dropping a genuine
     (often high-view) brand video. We can't tell from yt-dlp alone, so we detect
     the *signature* of that clip and let the caller re-fetch the full caption
@@ -1474,7 +1478,7 @@ def _caption_maybe_truncates_brand(caption, tag) -> bool:
     Signals (any):
       1. A run that is a NON-EMPTY PREFIX of the brand token appears immediately
          after '#' or '@' at/near the very end of the caption (the classic
-         '...#befree' cut). Requires len>=3 so we don't rescue on a stray '#b'.
+         '...#yourbr' cut). Requires len>=3 so we don't rescue on a stray '#b'.
       2. The caption length is at the known truncation ceiling (<=73) AND it
          ends without sentence/space terminator AND the brand prefix's first few
          letters appear — a weaker fallback for odd clips.
@@ -1489,9 +1493,10 @@ def _caption_maybe_truncates_brand(caption, tag) -> bool:
     cap = caption.rstrip()
     low = cap.lower()
     # yt-dlp marks a clipped caption with a trailing literal "..." ellipsis
-    # (the '...#befree...' we saw on the 2.6M purple video). That ellipsis is
-    # BOTH the truncation signal and noise that hides the real tail token, so
-    # strip a trailing run of dots / unicode ellipsis before inspecting the end.
+    # (the '...#yourbr...' shape we saw on a rescued 2.6M-view brand video).
+    # That ellipsis is BOTH the truncation signal and noise that hides the real
+    # tail token, so strip a trailing run of dots / unicode ellipsis before
+    # inspecting the end.
     had_ellipsis = bool(re.search(r"(\.{2,}|…)\s*$", low))
     low = re.sub(r"(\.{2,}|…)\s*$", "", low).rstrip()
     # Signal 1: trailing "#<prefix>" or "@<prefix>" where prefix is a strict,
@@ -1501,12 +1506,13 @@ def _caption_maybe_truncates_brand(caption, tag) -> bool:
     if m:
         frag = m.group(1)
         if frag.startswith(brand):
-            # frag EXTENDS the brand token. Complete accepted forms (#befreed,
-            # #befreed_0124, #befreedapp) pass _is_real_ugc_caption and never
+            # frag EXTENDS the brand token. Complete accepted forms (#yourbrand,
+            # #yourbrand_0124, #yourbrandapp) pass _is_real_ugc_caption and never
             # reach this function — so a brand-extending frag here is either a
-            # clipped accepted form ('#befreed_0124' cut at the underscore
-            # arrives as '#befreed_'; '#befreedapp' cut to '#befreeda') which we
-            # rescue, or a genuinely different tag ('#befreedom') which we drop.
+            # clipped accepted form ('#yourbrand_0124' cut at the underscore
+            # arrives as '#yourbrand_'; '#yourbrandapp' cut to '#yourbranda')
+            # which we rescue, or a genuinely different tag (the brand token
+            # continuing into an unrelated word) which we drop.
             rest = frag[len(brand):]
             return rest == "_" or bool(rest and "app".startswith(rest))
         if len(frag) >= 3 and brand.startswith(frag) and frag != brand:
@@ -1567,11 +1573,13 @@ def _tikwm_video_caption(video_id: str, author: str = "x") -> Optional[str]:
 #   clamped to ~30 upstream and cursor pagination doesn't advance (TikTokApi
 #   issues #1183/#1105/#1119). So it can only ever return a creator's NEWEST ~50
 #   posts, which both caps per-creator coverage AND starves older months (the
-#   recency cliff). Measured: top BeFreed creators flatlined at exactly 50-55.
+#   recency cliff). Measured: the benchmark brand's top creators flatlined at
+#   exactly 50-55.
 #
 #   yt-dlp's native TikTokUserIE walks https://www.tiktok.com/api/creator/
 #   item_list/ with a real createTime cursor loop back to the creator's first
-#   post — the full public catalog. Verified live: @annaa.learns 55 → 149.
+#   post — the full public catalog. Verified live: one test creator's walk went
+#   from 55 to 149 videos.
 #   `--flat-playlist` returns id/url/title(caption)/timestamp/counts WITHOUT a
 #   per-video fetch, so it sidesteps yt-dlp's 2026 per-video extraction breakage
 #   AND gives us the caption needed for the brand-precision filter in one shot.
@@ -1760,7 +1768,7 @@ async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
                 if not _is_real_ugc_caption(cap, tag):
                     # The brand filter rejected this caption. yt-dlp's flat-playlist
                     # truncates captions to ~72 chars NON-DETERMINISTICALLY, which
-                    # can clip the brand tag (`#befreed_0124` -> `#befree`) and drop
+                    # can clip the brand tag (`#yourbrand_0124` -> `#yourbr`) and drop
                     # a genuine — often high-view — brand video. If the caption shows
                     # that clip signature, re-fetch the FULL caption from tikwm and
                     # re-test before discarding. Otherwise it's a real non-match.
@@ -1781,7 +1789,8 @@ async def _fetch_one_creator(api, handle, videos, seen_ids, cutoff, tag):
                         elif not _is_real_ugc_caption(full, tag):
                             # tikwm answered and the FULL caption genuinely lacks the
                             # brand — this was a real non-match (the prefix was
-                            # coincidental, e.g. '#befree' of an unrelated word). Drop.
+                            # coincidental: the clipped tag belonged to an
+                            # unrelated word). Drop.
                             continue
                         else:
                             raw["caption"] = full  # verified: keep untruncated caption

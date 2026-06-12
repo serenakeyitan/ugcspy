@@ -33,7 +33,7 @@ export function migrate(db: Database): void {
       raw_metrics_json TEXT NOT NULL DEFAULT '{}',
       -- Scope uniqueness to the competitor. A video can legitimately appear in
       -- more than one view — e.g. the same clip shows up under a brand hashtag
-      -- search (#befreed) AND under the creator's own catalog (@jacob.befreed).
+      -- search (#yourbrand) AND under the creator's own catalog (@creator.handle).
       -- A global UNIQUE(platform, external_id) made the second writer UPDATE the
       -- first's row instead of inserting, so whichever view ran second looked
       -- truncated (a creator's full pull returned only the videos no prior brand

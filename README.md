@@ -40,7 +40,7 @@ bun run src/cli.ts install-deps     # ~30-60s — TikTokApi + yt-dlp into a mana
 bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
 bun run build                        # produces dist/cli.js
 npm install --global .               # symlinks ugcspy onto PATH
-ugcspy search befreed --platform tiktok --limit 10   # first run on an active brand: ~5-8 min
+ugcspy search liquiddeath --platform tiktok --limit 10   # first run on an active brand: ~5-8 min
 ```
 
 After publishing to npm: `npm install -g ugcspy`.
@@ -50,12 +50,12 @@ After publishing to npm: `npm install -g ugcspy`.
 ## Quick start (after install)
 
 ```bash
-ugcspy search befreed --platform tiktok --limit 10
+ugcspy search liquiddeath --platform tiktok --limit 10
 ```
 
 That's it — the table is the brand's **top UGC videos ranked by views** (last 30 days by default), with the creators behind them. To turn a video into a creator brief, use the Claude Code plugin: `/ugcspy-fork <video-id>` from inside Claude Code.
 
-**Heads up on wall time.** A FIRST search on an active UGC brand takes a few minutes, not seconds — BeFreed (~150 discovered creators) runs ~5-8 minutes. Stage 1 discovers every creator via brand-hashtag feeds + a follow-graph snowball (pure HTTP); Stage 2 walks each creator's full catalog with yt-dlp, 16-way concurrent — that walk is where the time goes. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh crawl. See [How hashtag search actually works](#how-hashtag-search-actually-works-browser-free-two-stage) for the architecture.
+**Heads up on wall time.** A FIRST search on an active UGC brand takes a few minutes, not seconds — the mid-size brand we benchmarked (~150 discovered creators) runs ~5-8 minutes. Stage 1 discovers every creator via brand-hashtag feeds + a follow-graph snowball (pure HTTP); Stage 2 walks each creator's full catalog with yt-dlp, 16-way concurrent — that walk is where the time goes. Subsequent searches on the same brand serve from SQLite cache instantly. Add `--refresh` to force a fresh crawl. See [How hashtag search actually works](#how-hashtag-search-actually-works-browser-free-two-stage) for the architecture.
 
 If you only want to try the CLI shape without setting up the scraper, pick `mock` in `ugcspy init` instead of `tiktok-oss` — it serves deterministic synthetic data with zero setup.
 
@@ -66,8 +66,8 @@ Three search modes — two auto-detected from the query prefix, one explicit:
 ```bash
 # Plain word → hashtag mode = third-party creators promoting the brand
 # (the BigSpy use case — finding UGC, not the brand's own marketing)
-ugcspy search befreed --platform tiktok
-ugcspy search liquiddeath
+ugcspy search liquiddeath --platform tiktok
+ugcspy search rarebeauty
 ugcspy search notion
 
 # @handle → user mode = the brand's OWN account posts (full catalog)
@@ -83,13 +83,13 @@ ugcspy search --mode keyword "skincare routine"
 ugcspy search --mode keyword "cozy desk setup" --sort views
 
 # Newest first instead of highest-reach
-ugcspy search befreed --sort recency
+ugcspy search liquiddeath --sort recency
 
 # JSON output for piping
-ugcspy search befreed --json | jq '.[] | {creator: .author_handle, views: .view_count}'
+ugcspy search liquiddeath --json | jq '.[] | {creator: .author_handle, views: .view_count}'
 
 # Force a refresh (bypass the SQLite cache)
-ugcspy search befreed --refresh
+ugcspy search liquiddeath --refresh
 ```
 
 The default sort is **views descending** — same as BigSpy ranks ads by impressions.
@@ -98,11 +98,11 @@ The default sort is **views descending** — same as BigSpy ranks ads by impress
 
 The BigSpy-for-UGC question is "who's posting about this brand?", not "what is the brand posting?". Hashtag mode answers the first; `@handle` answers the second. Both are useful, but the wedge — the thing you can't easily get from any existing SaaS — is finding the third-party creator cohort.
 
-A precision filter rejects videos that TikTok's hashtag endpoint over-matches (e.g. "be freed" / "freed" appearing in unrelated contexts collide with `#befreed`). Only videos whose caption carries the brand via `#brand`, a `#brand_NNNN` campaign code, the `#brandapp` variant, an `@brand` mention, or the plain-text brand token at word boundaries are kept.
+A precision filter rejects videos that TikTok's hashtag endpoint over-matches (e.g. for a brand named "notion", captions using the everyday word "notion" in unrelated contexts collide with `#notion`). Only videos whose caption carries the brand via `#brand`, a `#brand_NNNN` campaign code, the `#brandapp` variant, an `@brand` mention, or the plain-text brand token at word boundaries are kept.
 
 ### How hashtag search actually works (browser-free, two-stage)
 
-Single-hashtag scraping has a soft ceiling: TikTok's `#befreed` challenge feed dedupes hard per-creator and only surfaces a handful of each creator's posts. So one hashtag call is **wildly incomplete** for any active UGC brand. ugcspy fixes this by separating two jobs that people usually conflate:
+Single-hashtag scraping has a soft ceiling: TikTok's `#liquiddeath` challenge feed dedupes hard per-creator and only surfaces a handful of each creator's posts. So one hashtag call is **wildly incomplete** for any active UGC brand. ugcspy fixes this by separating two jobs that people usually conflate:
 
 - **Discovery** — *which creators exist?* (find handles). Done over HTTP via the [tikwm](https://www.tikwm.com) relay. No browser.
 - **Coverage** — *all of each creator's brand videos?* Done with **yt-dlp**, which walks a creator's full public catalog directly from `www.tiktok.com`.
@@ -110,52 +110,53 @@ Single-hashtag scraping has a soft ceiling: TikTok's `#befreed` challenge feed d
 The flow:
 
 ```
-  ugcspy search "#befreed"
+  ugcspy search "#liquiddeath"
         │
         ▼
-┌─────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │ STAGE 1 — DISCOVERY  (find creator handles, pure HTTP)       │
 │                                                              │
-│  ① ALL brand hashtags          ② Follow-graph snowball       │
-│     challenge/search → every       walk who the core seeds   │
-│     #befreed* tag (main +          FOLLOW (depth-1) → recover │
-│     #befreed_0124, #usebefreed)    the low-view long tail     │
-│     deep-page each feed            that never reaches a feed  │
-│         │                              │                      │
-│         └──────────────┬───────────────┘                     │
-│                        ▼                                      │
+│  ① ALL brand hashtags             ② Follow-graph snowball    │
+│     challenge/search → every         walk who the core seeds │
+│     #liquiddeath* tag (main +        FOLLOW (depth-1) →      │
+│     #liquiddeath_0124,               recover the low-view    │
+│     #drinkliquiddeath)               long tail that never    │
+│     deep-page each feed              reaches a feed          │
+│         │                               │                    │
+│         └───────────────┬───────────────┘                    │
+│                         ▼                                    │
 │            union + score by signal                           │
-│            (in N brand challenges, followed by N seeds)       │
-│            → ranked creator roster                            │
-└────────────────────────┬─────────────────────────────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────────┐
+│            (in N brand challenges, followed by N seeds)      │
+│            → ranked creator roster                           │
+└─────────────────────────┬────────────────────────────────────┘
+                          ▼
+┌──────────────────────────────────────────────────────────────┐
 │ STAGE 2 — COVERAGE  (yt-dlp, 16-way concurrent)              │
 │                                                              │
 │  for each creator (highest signal first):                    │
 │     yt-dlp walks their FULL catalog                          │
 │         │                                                    │
 │         ▼                                                    │
-│     brand filter per video  (#befreed / #befreed_NNNN /      │
-│         │                    @befreed / plain "befreed")     │
+│     brand filter per video  (#brand / #brand_NNNN /          │
+│         │                    @brand / plain "brand")         │
 │         │   ↳ caption clipped at the 72-char boundary?       │
 │         │     re-fetch the full caption from tikwm (rescue)  │
 │         ▼                                                    │
 │     keep brand videos, with CURRENT view counts              │
-└────────────────────────┬─────────────────────────────────────┘
-                         ▼
+└─────────────────────────┬────────────────────────────────────┘
+                          ▼
             dedup + rank by views  →  SQLite cache  →  table
 ```
 
-**Why two stages.** Discovery (tikwm) finds *names*; it doesn't need every video. Coverage (yt-dlp) pulls *all* videos for a found name — verified 100% catalog (e.g. 151/151 for `@annaa.learns`) and reaches years-old posts. A single yt-dlp walk is fast (~6-7s even for 150 videos), so Stage 2's wall-time is dominated by fan-out across the roster, which is why it runs **16-way concurrent** (`UGCSPY_WALK_CONCURRENCY`).
+**Why two stages.** Discovery (tikwm) finds *names*; it doesn't need every video. Coverage (yt-dlp) pulls *all* videos for a found name — verified 100% catalog (e.g. 151/151 for one benchmarked creator) and reaches years-old posts. A single yt-dlp walk is fast (~6-7s even for 150 videos), so Stage 2's wall-time is dominated by fan-out across the roster, which is why it runs **16-way concurrent** (`UGCSPY_WALK_CONCURRENCY`).
 
 **Brand precision.** A video is only kept if its caption carries the brand via `#brand`, a `#brand_NNNN` campaign code, an `@brand` mention, or the plain-text brand token. The discovery stage is intentionally *wide* (it collects every creator a hashtag surfaces); precision is enforced here, per video.
 
-**The caption-truncation rescue.** yt-dlp's flat-playlist clips captions to ~72 chars and appends `…`. When the brand tag sits at that boundary, `#befreed_0124` arrives as `#befree…` and the filter would wrongly drop a genuine — often high-view — brand video. ugcspy detects the clip signature and re-fetches that one video's **full** caption from tikwm before discarding it. (This is what surfaced @growthwithmya7's 2.6M "purple" video as the true #1 BeFreed clip — it had been silently dropped.)
+**The caption-truncation rescue.** yt-dlp's flat-playlist clips captions to ~72 chars and appends `…`. When the brand tag sits at that boundary, `#yourbrand_0124` arrives as `#yourbr…` and the filter would wrongly drop a genuine — often high-view — brand video. ugcspy detects the clip signature and re-fetches that one video's **full** caption from tikwm before discarding it. (This rescue is what surfaced a 2.6M-view video as a brand's true #1 clip — it had been silently dropped.)
 
 **The stable tikwm client.** tikwm honors `count` loosely (8–18 videos for a requested 30) and intermittently serves a transient empty/error page mid-feed. Every tikwm call goes through a retry-with-backoff helper that tolerates this variance, so a deep challenge walk is **deterministic** — the same query returns the same creators run after run (measured 176/176/176, where the naive client swung 29↔111).
 
-**Coverage vs the trade-off.** Pure-hashtag + snowball reaches ~89% of a brand's real creator roster (51/57 for BeFreed) — cleanly and fast. The creators it can't reach are a handful of very-low-view accounts whose videos never enter *any* TikTok challenge feed; no hashtag method can surface them. (An earlier full-text keyword search caught them but at ~8% precision, forcing the walk to chew through ~90% noise — so it was dropped in favor of the clean hashtag path.)
+**Coverage vs the trade-off.** Pure-hashtag + snowball reaches ~89% of a brand's real creator roster (51/57 for the mid-size brand we benchmarked) — cleanly and fast. The creators it can't reach are a handful of very-low-view accounts whose videos never enter *any* TikTok challenge feed; no hashtag method can surface them. (An earlier full-text keyword search caught them but at ~8% precision, forcing the walk to chew through ~90% noise — so it was dropped in favor of the clean hashtag path.)
 
 **What we cannot do (free path limits):**
 - **Pull a brand's "following"/"liked" lists.** TikTok gates these behind auth.
@@ -183,7 +184,7 @@ The plugin is the recommended way to use ugcspy. Inside Claude Code:
 **Common flow** for "I found a great video, I want to make something like it":
 
 ```
-/ugcspy-search befreed                # find ranked third-party UGC
+/ugcspy-search liquiddeath            # find ranked third-party UGC
 /ugcspy-decode 4                       # understand HOW the #1 video was made
 /ugcspy-remix 4 12                     # OR: brief creator @12 to shoot their version
 /ugcspy-fork 4                         # OR: just get a quick brief

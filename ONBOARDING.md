@@ -100,12 +100,12 @@ If `--version` prints an older number, the user has a stale install on PATH. Run
 ## Step 6 — Verification search
 
 ```bash
-ugcspy search befreed --platform tiktok --limit 10
+ugcspy search liquiddeath --platform tiktok --limit 10
 ```
 
 This is also the user's main use case in one line: **`ugcspy search <brand>` returns the brand's top UGC videos ranked by views** (the default sort), with the creators behind them. `--days 30` is the default window; `--limit` only trims the table, not the crawl.
 
-Wall time for a FIRST search on an active brand is **a few minutes, not seconds** (BeFreed, which walks ~150 discovered creators, takes ~5-8 minutes). Discovery runs browser-free over pure HTTP (the tikwm relay) — no Chromium window, no login. The wall time is mostly Stage 2 coverage: yt-dlp walking each ranked creator's full catalog (16-way concurrent by default). Tell the user upfront so they don't think it hung. Repeat searches on the same brand serve from cache instantly; `--refresh` forces a fresh crawl.
+Wall time for a FIRST search on an active brand is **a few minutes, not seconds** (the mid-size brand we benchmarked — ~150 discovered creators to walk — took ~5-8 minutes). Discovery runs browser-free over pure HTTP (the tikwm relay) — no Chromium window, no login. The wall time is mostly Stage 2 coverage: yt-dlp walking each ranked creator's full catalog (16-way concurrent by default). Tell the user upfront so they don't think it hung. Repeat searches on the same brand serve from cache instantly; `--refresh` forces a fresh crawl.
 
 ## Step 7 — Fallbacks (only if step 6 returns 0 videos)
 
@@ -115,7 +115,7 @@ If retries still return nothing, you can enable the optional Chromium fallback (
 
 ```bash
 ugcspy install-deps --with-browser   # one-time, ~150MB
-UGCSPY_USE_CHROMIUM=1 ugcspy search befreed --platform tiktok --limit 10
+UGCSPY_USE_CHROMIUM=1 ugcspy search liquiddeath --platform tiktok --limit 10
 ```
 
 `MS_TOKEN` only matters for the Chromium/TikTokApi paths — the legacy `user`-mode fallback and the optional `UGCSPY_USE_CHROMIUM=1` discovery above. It does nothing for the default browser-free search, and `--mode keyword` is pure HTTP (tikwm) and ignores it entirely. If you do need it for the Chromium paths, set it from browser cookies:
@@ -201,9 +201,9 @@ The most common flow for "I found a great video, I want to make something like i
 
 ## Honest limits to mention if asked
 
-- First search per brand takes a few minutes (~5-8 min for an active brand like BeFreed — Stage 2 walks every discovered creator's catalog); cached after.
+- First search per brand takes a few minutes (~5-8 min for an active UGC brand with ~150 discovered creators — Stage 2 walks every discovered creator's catalog); cached after.
 - Free path covers TikTok only; Instagram needs paid ScrapeCreators.
-- Creator coverage is ~89% of the brand's UGC roster (51/57 for BeFreed); the unreachable few are very-low-view creators whose videos never enter any challenge feed, so the hashtag + follow-graph snowball never sees them.
+- Creator coverage is ~89% of the brand's UGC roster (51/57 for the mid-size brand we benchmarked); the unreachable few are very-low-view creators whose videos never enter any challenge feed, so the hashtag + follow-graph snowball never sees them.
 - Stage 2 coverage walks each creator's full public catalog from www.tiktok.com — that path is not rate-limited, so the 16-way default (`UGCSPY_WALK_CONCURRENCY=16`) is safe. Lower it if a host is CPU-bound.
 - video-recipe step 4 (vision reading) needs Claude Code or another harness with file + vision tools.
 
@@ -221,7 +221,7 @@ bun run src/cli.ts install-deps     # ~30-60s — TikTokApi + yt-dlp into a mana
 bun run src/cli.ts init --yes        # non-interactive; defaults to tiktok-oss
 bun run build                        # produces dist/cli.js
 npm install --global .               # symlinks ugcspy onto PATH
-ugcspy search befreed --platform tiktok --limit 10   # first run on an active brand: ~5-8 min
+ugcspy search liquiddeath --platform tiktok --limit 10   # first run on an active brand: ~5-8 min
 
 # Optional: video-recipe deps (needs Python 3.11+)
 python3 --version                                       # confirm 3.11+

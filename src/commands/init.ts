@@ -122,9 +122,9 @@ function printNextStep(config: Config): void {
         `  add ${chalk.cyan("--with-audio")} (Whisper for spoken-narrative capture; ~3-5min + ~1.5GB).`,
       ),
     );
-    console.log(`Then: ${chalk.cyan("ugcspy search befreed --platform tiktok")}`);
+    console.log(`Then: ${chalk.cyan("ugcspy search liquiddeath --platform tiktok")}`);
   } else {
-    console.log(`Run ${chalk.cyan("ugcspy search befreed")} to try a search.`);
+    console.log(`Run ${chalk.cyan("ugcspy search liquiddeath")} to try a search.`);
   }
 }
 

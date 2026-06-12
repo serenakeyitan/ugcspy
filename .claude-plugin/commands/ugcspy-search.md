@@ -15,8 +15,8 @@ ugcspy search $ARGUMENTS
 
 ## Three search modes (two auto-detected from query prefix, one explicit)
 
-- **Plain word** (e.g. `befreed`, `glossier`, `liquiddeath`) → **hashtag mode**: finds third-party creators promoting the brand. This is the BigSpy-for-UGC default — most users want this.
-- **`@handle`** (e.g. `@befreed`) → **user mode**: pulls the brand's OWN posts.
+- **Plain word** (e.g. `liquiddeath`, `glossier`, `notion`) → **hashtag mode**: finds third-party creators promoting the brand. This is the BigSpy-for-UGC default — most users want this.
+- **`@handle`** (e.g. `@glossier`) → **user mode**: pulls the brand's OWN posts.
 - **`#tag`** → explicit hashtag mode.
 - **`--mode keyword "<topic phrase>"`** (never auto-detected) → **keyword mode**: broad niche/topic discovery, NOT limited to videos tagging a brand. Pure HTTP, works with zero setup.
 - **`--mode user|hashtag|keyword`** flag overrides auto-detection.
@@ -49,7 +49,7 @@ Don't force the question if the user clearly only wanted the list. But if they s
 
 ## Wall time
 
-Hashtag-mode first-run on an active brand takes a few minutes (~5-8 min for BeFreed): browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay) followed by a yt-dlp coverage walk of each discovered creator's full catalog (16-way concurrent by default, `UGCSPY_WALK_CONCURRENCY`) — the walk dominates. Tell the user this BEFORE invoking. User-mode (`@brand`) is much faster (~10-20s, single fetch).
+Hashtag-mode first-run on an active brand takes a few minutes (~5-8 min for a brand with ~150 discovered creators): browser-free discovery (enumerate every brand hashtag + follow-graph snowball over the tikwm relay) followed by a yt-dlp coverage walk of each discovered creator's full catalog (16-way concurrent by default, `UGCSPY_WALK_CONCURRENCY`) — the walk dominates. Tell the user this BEFORE invoking. User-mode (`@brand`) is much faster (~10-20s, single fetch).
 
 Subsequent searches on the same brand serve from cache instantly. Use `--refresh` for a fresh fetch.
 
