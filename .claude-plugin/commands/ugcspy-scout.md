@@ -3,7 +3,7 @@ description: Find script/video templates and accounts to copy when the sources a
 argument-hint: "<your-brand> [one-line: what the brand does] [--region US]"
 ---
 
-You are scouting TEMPLATE SOURCES for a brand whose copy-worthy accounts are not yet known. The deliverable: a ranked shortlist of videos + accounts worth remixing (via `/ugcspy-rebrand`), each labeled with its lane and why it fits.
+You are scouting TEMPLATE SOURCES for a brand whose copy-worthy accounts are not yet known. The deliverable: a ranked shortlist of videos + accounts worth remixing — [script] templates via `/ugcspy-rebrand`, [overlay] templates via `/ugcspy-decode` — each labeled with its lane and why it fits.
 
 User arguments: `$ARGUMENTS` (the user's brand, optional one-line description, optional region).
 
@@ -31,8 +31,10 @@ ugcspy search <brand-tag>        # their full UGC roster, ranked by views
 
 ```bash
 ugcspy trending <REGION>                      # default US; cached as trend:<REGION>
-ugcspy transcript trend:<REGION> --talking --top 5
+ugcspy transcript trend:<REGION> --top 8      # classifies every hit TALKING / NON-TALKING
 ```
+
+The TALKING/NON-TALKING badge splits the hits into the two template classes below — don't pre-filter with `--talking` here or you'll never see the overlay candidates.
 
 Judge every hit for remixability before proposing it (rules below). Talking hits are script templates; high-fit NON-talking hits (overlay-text montages over a trending sound) are format templates — keep those too, routed to the decode path. Discard what's neither: sports clips, news moments, and meme formats with no text narrative. Finding 1-2 genuinely remixable trend formats is a good day.
 
