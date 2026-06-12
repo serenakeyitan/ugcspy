@@ -57,12 +57,13 @@ Always use `--json` for candidate-producing calls: the shortlist needs `id`, `vi
 
 ## Quota semantics — "top N" means N videos that FIT
 
-When the user asks for "top 5 videos", the goal is **5 remixable videos that pass every condition** (language, lane view floor, the 100× outlier proof for lanes 2-3, class rules, honest brand-beat fit) — NOT the first 5 scanned:
+**The default quota is 5.** If the user didn't specify an amount, you MUST deliver at least 5 videos that pass every condition. When they say "top N", the goal is **N remixable videos that pass every condition** (language, lane view floor, the 100× outlier proof for lanes 2-3, class rules, honest brand-beat fit) — NOT the first N scanned:
 
 - A scanned candidate that fails any condition is **FLAGGED with its reason and does NOT count** toward N.
 - Keep scanning until you have N fits: continue down the ranked list, transcribe the next wave, pull the next corpus — in that order of cost.
 - Tell the user the running score as you go ("3/5 fits, scanned 11").
-- Stop early ONLY when the sources are exhausted or the next step would break a cost guardrail (e.g. a second unapproved deep-search) — then report the shortfall plainly: "found 3/5; lane 1 is dry today and filling the last 2 needs another brand deep-pull (~5-8 min) — want it?". A shortfall with a reason beats padding the list with unfit entries.
+- "Many corpora needed" is NOT a stop reason — keep pulling fresh niche corpora and transcription waves until the quota is met. Stop early ONLY when the next step needs an approval the user must give (e.g. a second deep-search) or the sources are genuinely exhausted — then report the shortfall plainly with the cost of continuing. A shortfall with a reason beats padding the list with unfit entries — but the default expectation is that you fill the quota.
+- Hunt efficiently: before burning account pulls, pre-scan the LOCAL cache for spike-shaped authors (an author with several cached rows where the max dwarfs the rest) — it's free and prioritizes likely 100× outliers. Cache rows are selection-biased, so the account pull remains the verification.
 
 ## View thresholds + the 100× outlier proof (fit conditions)
 
