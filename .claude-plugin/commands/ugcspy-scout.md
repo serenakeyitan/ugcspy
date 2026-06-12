@@ -34,25 +34,32 @@ ugcspy trending <REGION>                      # default US; cached as trend:<REG
 ugcspy transcript trend:<REGION> --talking --top 5
 ```
 
-Judge each talking hit for remixability before proposing it (rules below). Expect to discard most — sports clips, news, and meme formats without a speakable script are not templates. Finding 1-2 genuinely remixable trend formats is a good day.
+Judge every hit for remixability before proposing it (rules below). Talking hits are script templates; high-fit NON-talking hits (overlay-text montages over a trending sound) are format templates — keep those too, routed to the decode path. Discard what's neither: sports clips, news moments, and meme formats with no text narrative. Finding 1-2 genuinely remixable trend formats is a good day.
 
 ## Remixability judgment (applies to every candidate, all lanes)
 
-A video is a usable template only if:
-- **It talks.** A spoken script exists to remix (`--talking`; transcript present).
+Two template classes — label every proposal as one or the other:
+
+**[script] — talking videos** (`--talking`; transcript present). Usable only if:
 - **The hook is product-independent.** The first line would survive with a different product in the video (rule out product demos where the product IS the format — /ugcspy-rebrand's FLAG case).
 - **The brand beat is insertable/swappable** under /ugcspy-rebrand's iron rules: one beat, truthful for the user's brand, and — duration-aware — at or before the midpoint for >30s scripts.
-- **The format is shootable** by a normal UGC creator (talking head, listicle voiceover, green-screen) — not a stadium event or a 50-cut edit.
+Route: `/ugcspy-rebrand <video-id> <user-brand>`.
+
+**[overlay] — non-talking videos** whose remixable asset is the ON-SCREEN TEXT sequence + format structure (overlay-text montage over a sound). Usable only if the overlay narrative is product-independent the same way a spoken hook would be. The brand insert is an overlay caption beat, not a spoken sentence.
+Route: `/ugcspy-decode <video-id>` (OCRs the overlay narrative) then `/ugcspy-remix`.
+
+**Either class** must also be **shootable** by a normal UGC creator (talking head, listicle voiceover, green-screen, b-roll montage) — not a stadium event or a 50-cut edit.
 
 ## Output format
 
 A single ranked shortlist (aim for 5-10 entries, best first), each entry:
 
 ```
-#N [lane 1|2|3] @account — <views> — <link>
-   Hook: "<the hook verbatim>"
+#N [lane 1|2|3] [script|overlay] @account — <views> — <link>
+   Hook: "<spoken hook verbatim>"            (script) — or the opening overlay line (overlay)
    Why it fits: <one sentence tying format → the user's brand>
-   Next: /ugcspy-rebrand <video-id> <user-brand>
+   Next: /ugcspy-rebrand <video-id> <user-brand>     (script)
+   Next: /ugcspy-decode <video-id>                    (overlay)
 ```
 
 Then a one-paragraph read on which lane looks strongest for this brand right now, and anything you scanned and rejected that the user might expect to see (no silent dropping — if lane 1 was all sports clips today, say so).
@@ -65,6 +72,6 @@ Then a one-paragraph read on which lane looks strongest for this brand right now
 
 ## What NOT to do
 
-- Don't propose non-talking videos as script templates.
+- Don't propose non-talking videos as SCRIPT templates — they have no spoken words for /ugcspy-rebrand to remix. Propose them as [overlay] format templates routed to /ugcspy-decode, or not at all.
 - Don't treat the brand-candidates table as truth — it's structural evidence; you make the brand-vs-topic call.
 - Don't run a full `ugcspy search` on every candidate brand — shortlist first, confirm with the user, then deep-pull.
