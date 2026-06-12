@@ -57,12 +57,35 @@ Always use `--json` for candidate-producing calls: the shortlist needs `id`, `vi
 
 ## Quota semantics — "top N" means N videos that FIT
 
-When the user asks for "top 5 videos", the goal is **5 remixable videos that pass every condition** (language, class rules, honest brand-beat fit) — NOT the first 5 scanned:
+When the user asks for "top 5 videos", the goal is **5 remixable videos that pass every condition** (language, lane view floor, the 100× outlier proof for lanes 2-3, class rules, honest brand-beat fit) — NOT the first 5 scanned:
 
 - A scanned candidate that fails any condition is **FLAGGED with its reason and does NOT count** toward N.
 - Keep scanning until you have N fits: continue down the ranked list, transcribe the next wave, pull the next corpus — in that order of cost.
 - Tell the user the running score as you go ("3/5 fits, scanned 11").
 - Stop early ONLY when the sources are exhausted or the next step would break a cost guardrail (e.g. a second unapproved deep-search) — then report the shortfall plainly: "found 3/5; lane 1 is dry today and filling the last 2 needs another brand deep-pull (~5-8 min) — want it?". A shortfall with a reason beats padding the list with unfit entries.
+
+## View thresholds + the 100× outlier proof (fit conditions)
+
+**Minimum views per lane (defaults — the user can override any of them):**
+
+| Lane | Floor | Why |
+|---|---|---|
+| 1 · network-wide trending | **≥ 10,000,000** | 全网 heat is cheap; only true mega-hits are worth riding |
+| 2 · cross-category | **≥ 1,000,000** | a hook formula must be PROVEN viral in its own vertical before porting it |
+| 3 · direct competitors | **≥ 300,000** | niche numbers run smaller; this still filters the noise floor |
+
+Below-floor candidates are FLAGGED ("below lane floor") and never count toward the quota.
+
+**The 100× outlier proof (lanes 2 and 3).** A big number on a big account proves the account, not the script. A candidate counts only if its views are **≥ 100× the creator's PREVIOUS video** (the post immediately before it by date) — that spike is what proves the SCRIPT is amazingly good. Verify cheaply with a single account pull:
+
+```bash
+ugcspy search @<creator> --json --days 365     # ~10-20s; sort by posted_at, find the video preceding the candidate
+```
+
+- Run this check LAST, only on candidates that already pass everything else (it costs one pull per creator).
+- Record the evidence in the entry: `Outlier: 3.9M vs prior 12K = 325×`.
+- Spirit over letter: if the preceding video was itself an outlier, judge against the account's TYPICAL video instead — the question is always "did the script outperform the account?". A consistently-mega account (every video ≥ the floor) proves the account, not the script: FLAG as "account-powered, not script-powered" unless the user wants account-level templates.
+- Lane 1 is exempt (trending is one-off by nature), but note the account baseline when it's easy to see.
 
 ## Remixability judgment (applies to every candidate, all lanes)
 
@@ -83,7 +106,7 @@ Route: `/ugcspy-decode <video-id>` first; remix needs a chosen source creator af
 1. **Hook portability** — survives a product swap cleanly.
 2. **Honest brand-beat fit** — a truthful insert exists under the rebrand rules (incl. the >30s midpoint cap).
 3. **Shootability** for a normal creator.
-4. **Evidence strength** — campaign codes / proven UGC program behind it beats a one-off hit.
+4. **Evidence strength** — the 100× outlier ratio (bigger = stronger script proof), campaign codes, a proven UGC program behind it.
 5. **Views and freshness** — tiebreaks only.
 
 ## Output format
@@ -94,6 +117,7 @@ Route: `/ugcspy-decode <video-id>` first; remix needs a chosen source creator af
 #N [lane 1|2|3] [script|overlay] @account — <views> — <duration>s — <language> — TALKING|NON-TALKING — <video_url>
    Hook: "<spoken hook verbatim>"           (script — from transcript --json)
    Overlay: "<opening overlay line>"        (overlay — ONLY after /ugcspy-decode; else "unverified overlay candidate")
+   Outlier: <views> vs prior <views> = <N>×        (lanes 2-3 — the script-not-account proof)
    Original transcript: <full transcript text>
    Remix (target brand): <the full remixed script per /ugcspy-rebrand's rules, insert highlighted, with its position %>
    Why it fits: <one sentence tying format → the user's brand>
@@ -113,6 +137,7 @@ When the deliverable is a dashboard, use one uniform per-video section for ALL l
 - Phase A: ~1-2 min per discover scan (3-4 scans total).
 - Phase C: ONE brand deep-search ~5-8 min (never more without approval); transcripts ~10-40s per uncached video, batched, cached forever; each overlay decode ~30s.
 - Filling a quota of N FIT videos usually takes several transcription waves (unfit candidates don't count) — report the running fits/scanned score between waves.
+- Outlier verification: one ~10-20s account pull per surviving candidate (run last).
 
 ## What NOT to do
 
