@@ -102,6 +102,21 @@ Route: `/ugcspy-decode <video-id>` first; remix needs a chosen source creator af
 
 **Either class** must also be **shootable** by a normal UGC creator (talking head, listicle voiceover, green-screen, b-roll montage). Be honest that cut-count/visual complexity is only verifiable via decode — flag, don't guess.
 
+### Known false-positive classes (flag on sight — all found in live runs)
+
+These pass the automated filters (English, talking, big views) but are never script templates:
+
+- **Demo-dependent scripts** — narration of physical actions ("slide the paper under the tab", "go to Settings, tap Apps", "hold the baby like this"). The words only mean something with the visuals; the script cannot stand alone. Common in life-hack / how-to niches.
+- **Song lyrics misread as talking** — a lyric bed clears the 8-word gate (Whisper hears words). Tell: repeated lines, rhyme, no addressee, no claim. No script.
+- **Clip accounts** — handles like *clips/*reels reposting third-party speech (podcast moments, expert anecdotes). The words belong to someone else; not a shootable creator script.
+- **AI-celebrity-voiced faceless accounts** — handle names a celebrity (e.g. <name>.motivat). The script may read fine, but check the account before trusting it; usually account-powered anyway.
+- **Photo-mode posts** — image carousels with a music bed. They surface as transcription failures ("no audio stream") or 0-word NON-TALKING. Not an error: route to [overlay]/decode. A meaningful slice of self-improvement niches posts this way.
+- **Story skits / meme punchlines** — narrative sketches and joke formats with no method beat; a punchline ending leaves no room before the final beat (rule 6).
+
+### Picking corpora that actually yield
+
+Niches dense in **single-voice advice monologues and listicles** (psychology explainers, "things to do alone", self-worth lists) yield script templates; niches dense in **physical demos** (life hacks, phone tricks, parenting hacks, cooking) yield demo-dependent flags — scan them last or for [overlay] only. For 100×-outlier hunting, prefer corpora where small accounts go viral on writing (story/advice formats) over celebrity-, clip-, and hack-dominated feeds.
+
 ## Ranking rubric (apply in this order)
 
 1. **Hook portability** — survives a product swap cleanly.
