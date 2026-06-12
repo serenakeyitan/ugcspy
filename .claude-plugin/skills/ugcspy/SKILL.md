@@ -25,6 +25,7 @@ Other commands:
 - "Turn this video into a brief I can hand to a creator" → `/ugcspy-fork <url>`
 - "How was this video made? What technique? What overlay?" → `/ugcspy-decode <url>` (deep production breakdown — format, OCR'd narrative, brand-pitch placement, shot list. Writes decode.json + decode.html.)
 - "Make a video like X but with creator Y" / "same format different creator" / "copy this structure for @other-creator" → `/ugcspy-remix <target> <source>` (decodes both, produces a hand-able brief that fits B's style into A's structure)
+- "Who should we copy?" / "find viral videos we can remix" / "discover competitors' UGC" / "what's trending that fits us" → `/ugcspy-scout <your-brand>` (three discovery lanes: daily viral hits, cross-category UGC playbooks, direct competitors — ranked template shortlist)
 - "Make this video pitch BRAND instead" / "insert BRAND into this script" / "rebrand this transcript, change nothing else" → `/ugcspy-rebrand <video> <brand>` (minimal-edit promotion swap/insert on the transcript — the hook is never touched, one smooth brand beat, everything else byte-identical)
 - "Reverse-engineer this video into a reproducible recipe (cuts, prompts, hook structure)" → `/ugcspy-recipe <url>` — uses the bundled video-recipe agent at `vendor/video-recipe/`. Heavier than `/ugcspy-fork` (requires ffmpeg + whisper + the full Python pipeline) but produces a structured `recipe.json` that an AI agent could use to attempt reproduction.
 - "Slack-alert me when a competitor breaks out" (only if explicitly asked) → see Watch + daemon below
@@ -55,6 +56,16 @@ Precision filter: hashtag results only keep videos whose caption carries the bra
 ### Fork (video → creator brief)
 
 The standalone CLI has **no `fork` command** — brief generation is plugin-only. Route to `/ugcspy-fork <video-id-or-url>`: it generates the brief (hook variations, format notes, beat sheet, b-roll, CTA) in chat using the user's Claude Code subscription, with an optional save to `~/.ugcspy/briefs/`.
+
+### Trending + discover (template sources when accounts are unknown)
+
+```bash
+ugcspy trending [region]              # network-wide viral hits, cached as trend:<REGION>
+ugcspy discover "<niche phrase>"      # mine a niche corpus: brand candidates + recurring creators
+ugcspy discover US --trending         # mine the trending corpus for UGC-program brands
+```
+
+Brand candidates carry structural evidence (campaign codes `#x_NNNN` = a run UGC program; app-variant; account-match; `bg` = generic). The table is evidence, not a verdict — judge brand-vs-topic yourself, or route the whole flow through `/ugcspy-scout`.
 
 ### Transcript (hook + spoken narrative + talking/non-talking)
 

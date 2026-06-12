@@ -79,6 +79,12 @@ def main() -> None:
         run_keyword(keyword, days)
         return
 
+    # Trending is pure HTTP via the relay's rotating feed — like keyword mode
+    # it needs no TikTokApi/Chromium, so dispatch before that import.
+    if mode == "trending":
+        run_trending(str(payload.get("region") or "US"), days)
+        return
+
     # Transcript mode needs whisper + yt-dlp (+ the bundled static ffmpeg),
     # NOT TikTokApi/Chromium — dispatch it before the TikTokApi import so it
     # works on a core install that added --with-audio but never touched the
@@ -249,7 +255,10 @@ def _tikwm_item_to_raw(item: dict) -> Optional[dict]:
     video_id = item.get("video_id") or item.get("id") or ""
     if not create_ts or not video_id:
         return None
-    author = (item.get("author") or {}).get("unique_id") or ""
+    # author arrives as an object on feed/search but as a PLAIN STRING on some
+    # feed/list rotations — one untrusted shape must not crash the run.
+    a = item.get("author")
+    author = (a.get("unique_id") or "") if isinstance(a, dict) else (a if isinstance(a, str) else "")
     posted_at = _safe_ts(create_ts)
     if posted_at is None:
         return None  # malformed/hostile timestamp → drop the item, not the run
@@ -321,6 +330,67 @@ def run_keyword(keyword: str, days: int) -> None:
         if next_cursor is None or next_cursor <= cursor:
             break  # guard against a stuck/looping/non-numeric cursor
         cursor = next_cursor
+
+    print(json.dumps(videos))
+
+
+def _trending_rounds(default: int = 8) -> int:
+    """How many times to hit the trending feed per run. The relay's
+    /api/feed/list is a ROTATING feed with no cursor — each call returns a
+    small fresh handful (~3-6 items), so coverage comes from repeated calls +
+    dedupe, not paging. Clamped: more rounds = more relay load for
+    diminishing new ids. Override with UGCSPY_TRENDING_ROUNDS."""
+    n = _as_int(os.environ.get("UGCSPY_TRENDING_ROUNDS"))
+    if n is None or n <= 0:
+        return default
+    return min(n, 30)
+
+
+def run_trending(region: str, days: int) -> None:
+    """Network-wide trending feed (蹭热度 lane): what's viral on TikTok right
+    now in a region, regardless of brand. Same fail-soft contract as keyword
+    mode — always prints a JSON array, empty only on total relay failure.
+    Items flow through the standard RawVideo mapper so the whole downstream
+    chain (cache, transcript, rebrand) works unchanged."""
+    import time
+    import urllib.parse
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    region_clean = (region or "US").strip().upper()[:5] or "US"
+    videos: list[dict] = []
+    seen_ids: set[str] = set()
+    rounds = _trending_rounds()
+    empty_streak = 0
+
+    for i in range(rounds):
+        qs = urllib.parse.urlencode({"region": region_clean, "count": 30})
+        doc = _tikwm_get(f"https://www.tikwm.com/api/feed/list?{qs}")
+        if doc is None:
+            break  # relay down after retries — return what we have (fail soft)
+        data = doc.get("data")
+        items = data if isinstance(data, list) else (data or {}).get("videos") or []
+        fresh = 0
+        for item in items:
+            # Trending carries paid placements (is_ad) — a promoted spot is
+            # not organic heat, and "what's genuinely viral" is the lane.
+            if isinstance(item, dict) and item.get("is_ad"):
+                continue
+            raw = _tikwm_item_to_raw(item)
+            if raw is None or raw["external_id"] in seen_ids:
+                continue
+            posted_at = datetime.fromisoformat(raw["posted_at"])
+            if posted_at < cutoff:
+                continue
+            seen_ids.add(raw["external_id"])
+            videos.append(raw)
+            fresh += 1
+        # The feed rotates; two consecutive rounds with nothing new means
+        # we've drained the current rotation — more calls won't add coverage.
+        empty_streak = empty_streak + 1 if fresh == 0 else 0
+        if empty_streak >= 2:
+            break
+        if i + 1 < rounds:
+            time.sleep(0.4)
 
     print(json.dumps(videos))
 

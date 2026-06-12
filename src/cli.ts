@@ -5,6 +5,7 @@ import { runInit } from "./commands/init.ts";
 import { runInstallDeps } from "./commands/install-deps.ts";
 import { normalizeSearchOptions, runSearch } from "./commands/search.ts";
 import { runTranscript } from "./commands/transcript.ts";
+import { runDiscover, runTrending } from "./commands/discover.ts";
 import { runWatchAdd, runWatchList, runWatchRemove } from "./commands/watch.ts";
 import { runDaemon } from "./commands/daemon.ts";
 import { runRender } from "./commands/render.ts";
@@ -73,6 +74,40 @@ program
     // normalizeSearchOptions handles the legacy "engagement" sort alias and
     // the --mode whitelist (tested in test/search.test.ts).
     await runSearch(query, normalizeSearchOptions(raw));
+  });
+
+program
+  .command("trending [region]")
+  .description(
+    "Network-wide viral hits for a region (default US) — the trend-riding discovery lane. No brand filter; ranked by views and cached as trend:<REGION> so `transcript`/`/ugcspy-rebrand` can chain on them.",
+  )
+  .option("-d, --days <n>", "max age of trending posts", positiveInt, 7)
+  .option("-l, --limit <n>", "max rows", positiveInt, 20)
+  .option("--json", "emit JSON instead of a table")
+  .action(async (region: string | undefined, raw) => {
+    await runTrending(region ?? "US", {
+      days: raw.days,
+      limit: raw.limit,
+      json: Boolean(raw.json),
+    });
+  });
+
+program
+  .command("discover <query>")
+  .description(
+    "Mine a corpus for template sources when the accounts are unknown: brand candidates (the #brand_NNNN campaign-code fingerprint of a run UGC program) + recurring creators. <query> = a niche phrase (keyword corpus) or, with --trending, a region code.",
+  )
+  .option("--trending", "treat <query> as a region code and mine the trending corpus instead of a niche keyword")
+  .option("-d, --days <n>", "trailing window in days", positiveInt, 30)
+  .option("-l, --limit <n>", "max rows per table", positiveInt, 15)
+  .option("--json", "emit JSON instead of tables")
+  .action(async (query: string, raw) => {
+    await runDiscover(query, {
+      days: raw.days,
+      limit: raw.limit,
+      json: Boolean(raw.json),
+      source: raw.trending ? "trending" : "keyword",
+    });
   });
 
 program

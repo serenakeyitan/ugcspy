@@ -68,6 +68,12 @@ export class TikTokOssProvider implements DataProvider {
     return this.runBridge({ mode: "keyword", keyword, days });
   }
 
+  // Network-wide trending feed for a region (the 蹭热度 discovery lane) — the
+  // relay's rotating feed, deduped bridge-side. Pure HTTP, no venv extras.
+  async fetchTrendingVideos(region: string, days: number): Promise<RawVideo[]> {
+    return this.runBridge({ mode: "trending", region, days });
+  }
+
   // Transcribe one video's audio via the bridge's transcript mode (whisper +
   // yt-dlp in the managed venv). Same deadline contract as the search modes.
   async fetchTranscript(videoUrl: string): Promise<TranscriptDoc> {
@@ -204,7 +210,10 @@ export function parseBridgeOutput(exit: number, stdout: string, stderr: string):
   return (parsed as Array<RawVideo & { _author?: string }>).map((v) => {
     const out: RawVideo = { ...v };
     delete (out as { _author?: string })._author;
-    const author = v._author?.trim() || authorFromUrl(out.video_url);
+    // _author crosses an untrusted JSON boundary — a non-string (numeric id,
+    // object) must degrade to the URL parse, not crash the whole result set.
+    const author =
+      (typeof v._author === "string" ? v._author.trim() : "") || authorFromUrl(out.video_url);
     if (author) out.author_handle = author;
     return out;
   });

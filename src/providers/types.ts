@@ -13,6 +13,10 @@ export interface DataProvider {
   // discovery — the broad corpus a script writer browses for format inspiration.
   // Optional — only providers with a real video-search source implement it.
   fetchKeywordVideos?(keyword: string, platform: Platform, days: number): Promise<RawVideo[]>;
+  // Network-wide trending videos for a region (no brand filter) — the raw
+  // material for trend-riding template discovery. Optional — needs a
+  // trending-capable source.
+  fetchTrendingVideos?(region: string, days: number): Promise<RawVideo[]>;
   // Download ONE video's audio and transcribe it (hook + spoken narrative +
   // talking/non-talking signal). Expensive (~10-40s/video) — callers cache the
   // result in the videos table. Optional — needs an audio pipeline (whisper).

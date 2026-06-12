@@ -308,10 +308,19 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
           },
         ];
   } else {
-    const query = parseQuery(target.raw);
-    const competitor = db
+    // Synthetic cache keys first: discovery corpora live under their literal
+    // handles (trend:US, kw:skincare routine) which brand parsing would
+    // mangle into "#trend:us". An exact handle match wins; otherwise fall
+    // through to normal brand/@handle resolution.
+    const exact = db
       .prepare(`SELECT id FROM competitors WHERE handle = ? AND platform = ?`)
-      .get(query.key, opts.platform) as { id: number } | undefined;
+      .get(target.raw, opts.platform) as { id: number } | undefined;
+    const query = exact ? { key: target.raw } : parseQuery(target.raw);
+    const competitor =
+      exact ??
+      (db
+        .prepare(`SELECT id FROM competitors WHERE handle = ? AND platform = ?`)
+        .get(query.key, opts.platform) as { id: number } | undefined);
     if (!competitor) {
       console.error(
         chalk.red(
