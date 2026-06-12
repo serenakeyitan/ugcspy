@@ -7,9 +7,11 @@ You are scouting TEMPLATE SOURCES for a brand whose copy-worthy accounts are not
 
 User arguments: `$ARGUMENTS` (the user's brand, optional one-line description, optional region; region defaults to US).
 
-## Step 0 — you need to know what the brand does
+## Step 0 — you need to know what the brand does (and the language)
 
 If no one-line description was given and you can't infer it from cached data, ASK the user one short question ("what does <brand> do, in one line?") before any discovery — lane phrases and every truthfulness judgment depend on it. Do not guess a niche from the brand name alone.
+
+**Language defaults to ENGLISH.** Unless the user specifies a language/market, only English-language videos count as templates — verify with the transcript JSON's `language` field, not the caption (captions and audio often differ). Non-English candidates are FLAGGED ("wrong language — ask if you want the <xx> market") and never count toward the quota. If the user names a language or region market, that language replaces English as the filter.
 
 ## Phase A — cheap corpus passes (all lanes, ~1-2 min each, no approval needed)
 
@@ -53,6 +55,15 @@ Report the coverage honestly ("classified 8 of N cached trending videos"). Don't
 
 Always use `--json` for candidate-producing calls: the shortlist needs `id`, `video_url`, and `hook` fields, and the human-readable tables don't carry ids.
 
+## Quota semantics — "top N" means N videos that FIT
+
+When the user asks for "top 5 videos", the goal is **5 remixable videos that pass every condition** (language, class rules, honest brand-beat fit) — NOT the first 5 scanned:
+
+- A scanned candidate that fails any condition is **FLAGGED with its reason and does NOT count** toward N.
+- Keep scanning until you have N fits: continue down the ranked list, transcribe the next wave, pull the next corpus — in that order of cost.
+- Tell the user the running score as you go ("3/5 fits, scanned 11").
+- Stop early ONLY when the sources are exhausted or the next step would break a cost guardrail (e.g. a second unapproved deep-search) — then report the shortfall plainly: "found 3/5; lane 1 is dry today and filling the last 2 needs another brand deep-pull (~5-8 min) — want it?". A shortfall with a reason beats padding the list with unfit entries.
+
 ## Remixability judgment (applies to every candidate, all lanes)
 
 Two template classes — label every proposal as one or the other:
@@ -77,15 +88,21 @@ Route: `/ugcspy-decode <video-id>` first; remix needs a chosen source creator af
 
 ## Output format
 
-**1. Ranked template shortlist** (aim for 5-10 entries, best first):
+**1. Ranked template shortlist** (the user's quota of FIT videos, best first). **Every entry carries the SAME fields regardless of lane** — lanes 1 and 2 are not summaries; they get the full lane-3 treatment:
 
 ```
-#N [lane 1|2|3] [script|overlay] @account — <views> — <video_url>
+#N [lane 1|2|3] [script|overlay] @account — <views> — <duration>s — <language> — TALKING|NON-TALKING — <video_url>
    Hook: "<spoken hook verbatim>"           (script — from transcript --json)
    Overlay: "<opening overlay line>"        (overlay — ONLY after /ugcspy-decode; else "unverified overlay candidate")
+   Original transcript: <full transcript text>
+   Remix (target brand): <the full remixed script per /ugcspy-rebrand's rules, insert highlighted, with its position %>
    Why it fits: <one sentence tying format → the user's brand>
    Next: /ugcspy-rebrand <id> <user-brand>  (script)  |  /ugcspy-decode <id>  (overlay)
 ```
+
+[script] fits MUST include the executed remix, not just the routing command — the deliverable is scripts the user can shoot, not homework. FLAGGED entries (listed separately, not numbered into the quota) show the same metadata + original transcript + the flag reason instead of a remix.
+
+When the deliverable is a dashboard, use one uniform per-video section for ALL lanes — link, views, duration, language, talking badge, hook, original transcript, remix (or flag verdict) — identical to the lane-3 / creator-dashboard format.
 
 **2. Accounts to watch** — recurring creators from `discover.creators[]` worth copying as ACCOUNTS (handle, videos-in-corpus, top views, lane, one-line rationale).
 
@@ -95,6 +112,7 @@ Route: `/ugcspy-decode <video-id>` first; remix needs a chosen source creator af
 
 - Phase A: ~1-2 min per discover scan (3-4 scans total).
 - Phase C: ONE brand deep-search ~5-8 min (never more without approval); transcripts ~10-40s per uncached video, batched, cached forever; each overlay decode ~30s.
+- Filling a quota of N FIT videos usually takes several transcription waves (unfit candidates don't count) — report the running fits/scanned score between waves.
 
 ## What NOT to do
 
