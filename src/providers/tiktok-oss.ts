@@ -140,17 +140,18 @@ export class TikTokOssProvider implements DataProvider {
   }
 }
 
-// Decide which python runs the bridge. Keyword/niche discovery is pure HTTP
-// (tikwm + stdlib urllib) — it needs NO venv, so it can fall back to a system
-// interpreter rather than forcing an install. user/hashtag modes still require
+// Decide which python runs the bridge. Keyword/niche discovery and the
+// trending feed are pure HTTP (tikwm + stdlib urllib) — they need NO venv, so
+// they can fall back to a system interpreter rather than forcing an install.
+// user/hashtag modes still require
 // the venv (yt-dlp walk; TikTokApi fallbacks). On Windows the system binary is
 // `python` (python.org installs no `python3`, and the WindowsApps `python3.exe`
 // is a Store stub) — match venv.ts / install-deps' platform handling.
 // Exported for tests.
 export function resolveBridgePython(hasVenv: boolean, mode: unknown): string {
   if (hasVenv) return venvPython();
-  if (mode === "keyword") {
-    return platform() === "win32" ? "python" : "python3"; // stdlib-only path; resolved on PATH
+  if (mode === "keyword" || mode === "trending") {
+    return platform() === "win32" ? "python" : "python3"; // stdlib-only paths; resolved on PATH
   }
   throw new ProviderError(
     `tiktok-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (one-time, ~30-60s; browser-free). ` +

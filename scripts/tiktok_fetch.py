@@ -368,7 +368,15 @@ def run_trending(region: str, days: int) -> None:
         if doc is None:
             break  # relay down after retries — return what we have (fail soft)
         data = doc.get("data")
-        items = data if isinstance(data, list) else (data or {}).get("videos") or []
+        # The relay is untrusted: a "successful" envelope can carry a scalar
+        # data value ({"code":0,"data":"temporarily unavailable"}) — that's an
+        # empty round, not a crash.
+        if isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            items = data.get("videos") or []
+        else:
+            items = []
         fresh = 0
         for item in items:
             # Trending carries paid placements (is_ad) — a promoted spot is

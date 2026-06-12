@@ -89,6 +89,17 @@ def test_author_as_plain_string_does_not_crash(capsys, monkeypatch):
     assert by_id["1"]["_author"] == "bare_string_handle"
 
 
+def test_scalar_data_envelope_is_an_empty_round_not_a_crash(capsys, monkeypatch):
+    """Codex gate: {"code":0,"data":"temporarily unavailable"} crashed the
+    documented fail-soft contract by calling .get() on a string."""
+    out, _ = _run(monkeypatch, [
+        [_item(1)],
+        "temporarily unavailable",  # scalar data → empty round
+        [],
+    ], capsys)
+    assert [v["external_id"] for v in out] == ["1"]
+
+
 def test_relay_down_fails_soft_with_partial_results(capsys, monkeypatch):
     out, _ = _run(monkeypatch, [
         [_item(1)],

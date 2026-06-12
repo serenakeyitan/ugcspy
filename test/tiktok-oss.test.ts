@@ -165,6 +165,18 @@ describe("resolveBridgePython (venv gating)", () => {
   });
 });
 
+describe("resolveBridgePython stdlib-only fallbacks", () => {
+  test("keyword AND trending run on system python without the venv", () => {
+    expect(() => resolveBridgePython(false, "keyword")).not.toThrow();
+    expect(() => resolveBridgePython(false, "trending")).not.toThrow();
+  });
+  test("hashtag/user/transcript still require the venv", () => {
+    for (const mode of ["hashtag", "user", "transcript"]) {
+      expect(() => resolveBridgePython(false, mode)).toThrow(/install-deps/);
+    }
+  });
+});
+
 describe("bridgeTimeoutMs", () => {
   test("defaults to 30min", () => {
     expect(bridgeTimeoutMs({})).toBe(1_800_000);
