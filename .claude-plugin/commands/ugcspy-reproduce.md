@@ -43,9 +43,11 @@ The user may pass:
 
 For ids and URLs, you need to first ensure `/ugcspy-recipe` has run on this video. If `vendor/video-recipe/recipes/<id>/recipe.json` doesn't exist, run `/ugcspy-recipe` first then come back.
 
+If `$ARGUMENTS` is a numeric video id from a previous `/ugcspy-search`, resolve it first — same rule as `/ugcspy-fork`: the search table's `#` column is a display position, NOT the database id, so re-run the same search with `--json` (cached, instant) and take the Nth element's `id`/`video_url`. Then:
+
 ```bash
-# If user passed an id:
-sqlite3 ~/.ugcspy/db.sqlite "SELECT video_url FROM videos WHERE id = $ARGUMENTS LIMIT 1;"
+# With the RESOLVED db id (not the raw table position):
+sqlite3 ~/.ugcspy/db.sqlite "SELECT video_url FROM videos WHERE id = <resolved-db-id> LIMIT 1;"
 # Extract the trailing video ID number from the URL
 # Then check: ls vendor/video-recipe/recipes/<videoId>/recipe.json
 ```

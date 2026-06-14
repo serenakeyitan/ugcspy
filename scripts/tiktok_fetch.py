@@ -65,7 +65,13 @@ def main() -> None:
         fail(f"invalid stdin json: {e}")
 
     mode = payload.get("mode") or ("user" if "handle" in payload else None)
-    days = int(payload.get("days", 30))
+    # A non-integer `days` must not raise an uncaught ValueError before dispatch
+    # — that would bypass the documented {"error": ...} envelope. Fall back to
+    # the default rather than failing hard: `days` is an optional window hint.
+    try:
+        days = int(payload.get("days", 30))
+    except (ValueError, TypeError):
+        days = 30
     if mode is None:
         fail("missing mode (user|hashtag)")
 
@@ -798,38 +804,6 @@ def _tikwm_discover_scored(
     return scores
 
 
-def _tikwm_challenge_id(tag: str) -> Optional[str]:
-    """Resolve a hashtag NAME to tikwm's numeric challenge_id (needed because
-    the challenge-posts endpoint takes an id, not a name). PURE HTTP."""
-    import urllib.parse
-    import urllib.request
-
-    qs = urllib.parse.urlencode({"keywords": tag, "count": 10})
-    url = f"https://www.tikwm.com/api/challenge/search?{qs}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
-    try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            doc = json.loads(resp.read().decode("utf-8", "replace"))
-    except Exception:
-        return None
-    if not isinstance(doc, dict) or doc.get("code") != 0:
-        return None
-    data = doc.get("data") or {}
-    challenges = data.get("challenge_list") or data.get("challenges") or []
-    cleaned = tag.lstrip("#@").lower()
-    # Prefer an exact name match; else take the first result.
-    for c in challenges:
-        name = (c.get("cha_name") or c.get("title") or "").lstrip("#").lower()
-        cid = c.get("challenge_id") or c.get("id")
-        if cid and name == cleaned:
-            return str(cid)
-    for c in challenges:
-        cid = c.get("challenge_id") or c.get("id")
-        if cid:
-            return str(cid)
-    return None
-
-
 def _is_brand_hashtag(name: str, brand: str) -> bool:
     """True if a hashtag NAME genuinely belongs to the brand. The challenge/search
     endpoint matches loosely, so its result list mixes real brand tags with
@@ -875,10 +849,10 @@ def _tikwm_all_brand_challenges(brand: str, search_pages: int = 3) -> tuple[list
     campaign-code variants like #yourbrand_0124 and compounds like #useyourbrand),
     each paired with its CORRECT challenge_id.
 
-    Why this exists: tikwm's challenge/search returns the variant tags, but the
-    old _tikwm_challenge_id() took count=10 and fell back to "first result",
-    which collapsed a variant name onto the wrong (usually the main) challenge_id
-    — so a variant's feed was never actually read. Here we read the search list
+    Why this exists: tikwm's challenge/search returns the variant tags, but a
+    naive name->id resolver (take count=10, fall back to "first result")
+    collapses a variant name onto the wrong (usually the main) challenge_id — so
+    a variant's feed would never actually be read. Here we read the search list
     in full and keep each (name -> its own id), filtered by _is_brand_hashtag so
     near-miss tags that don't carry the full brand token are dropped at the NAME
     level (no full-text search, no per-video work). PURE HTTP, via _tikwm_get (retry + backoff) — this is the
@@ -1067,53 +1041,6 @@ def _hashtag_feed_delay() -> float:
     except (ValueError, TypeError):
         pass
     return 0.3
-
-
-def _tikwm_discover_by_hashtag(tag: str, pages: int = 20) -> list[str]:
-    """Discover creators who tagged #<tag> via tikwm's challenge-posts endpoint —
-    PURE HTTP, no browser. This is the browser-free replacement for the Chromium
-    hashtag passes: it walks the #<brand> challenge feed and collects every
-    creator who posted under it. Returns handles whose caption genuinely carries
-    the brand. Empty list if the challenge can't be resolved (fails soft)."""
-    import urllib.parse
-    import urllib.request
-
-    cid = _tikwm_challenge_id(tag)
-    if not cid:
-        return []
-    found: set[str] = set()
-    cursor = 0
-    for _ in range(pages):
-        qs = urllib.parse.urlencode({"challenge_id": cid, "count": 30, "cursor": cursor})
-        url = f"https://www.tikwm.com/api/challenge/posts?{qs}"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (ugcspy)"})
-        try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                doc = json.loads(resp.read().decode("utf-8", "replace"))
-        except Exception:
-            break
-        if not isinstance(doc, dict) or doc.get("code") != 0:
-            break
-        data = doc.get("data") or {}
-        items = data.get("videos") or []
-        if not items:
-            break
-        for item in items:
-            author = (item.get("author") or {}).get("unique_id")
-            # WIDE discovery: every creator under the #<brand> challenge is a
-            # brand signal by construction (they tagged it). Don't re-filter on
-            # the surfaced video's title — the yt-dlp coverage pass applies the
-            # per-video brand filter across each creator's full catalog. Dropping
-            # a creator here because one title lacks the token loses their UGC.
-            if author:
-                found.add(author.lower())
-        if not data.get("hasMore"):
-            break
-        nxt = _as_int(data.get("cursor"))
-        if nxt is None or nxt <= cursor:
-            break
-        cursor = nxt
-    return sorted(found)
 
 
 def _tikwm_user_id(handle: str) -> Optional[str]:

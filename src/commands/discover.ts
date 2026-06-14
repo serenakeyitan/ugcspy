@@ -107,6 +107,12 @@ export function mineBrandCandidates(
     // mega-video can't swamp structure. Tags that also live in the
     // network-wide trending corpus are generic by construction — crush them
     // unless they carry a hard brand signal.
+    //
+    // NOTE: these weights are the one piece of *judgment* in this otherwise
+    // mechanical command. They score STRUCTURAL evidence (code counts, author
+    // breadth), not taste, so they live here for now. If a `/ugcspy-discover`
+    // skill ever needs to own the ranking, lift the weighting out of
+    // mineBrandCandidates() and emit the raw structural signals unscored.
     let score =
       s.codes * 25 +
       (s.app ? 15 : 0) +
