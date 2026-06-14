@@ -55,6 +55,14 @@ export function migrate(db: Database): void {
       competitor_id INTEGER NOT NULL REFERENCES competitors(id) ON DELETE CASCADE,
       slack_webhook_url TEXT NOT NULL,
       threshold_multiplier REAL NOT NULL DEFAULT 2.0,
+      -- Absolute view-count alert: when set (non-NULL), the watch fires the
+      -- moment any tracked video crosses this many views — independent of the
+      -- relative breakout multiplier. NULL = classic relative-breakout mode.
+      view_threshold INTEGER,
+      -- Optional target brand for the reminder's remix-ready payload: the alert
+      -- carries the crossed video + its transcript + this brand, so the creator
+      -- can /ugcspy-rebrand it on the spot. NULL = link-only reminder.
+      remix_brand TEXT,
       state TEXT NOT NULL DEFAULT 'warming_up',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -82,6 +90,9 @@ export function migrate(db: Database): void {
     `ALTER TABLE videos ADD COLUMN transcript_words INTEGER`,
     `ALTER TABLE videos ADD COLUMN transcript_duration_sec REAL`,
     `ALTER TABLE videos ADD COLUMN transcribed_at TEXT`,
+    // Absolute view-threshold alerts (added after the relative-breakout watches).
+    `ALTER TABLE watches ADD COLUMN view_threshold INTEGER`,
+    `ALTER TABLE watches ADD COLUMN remix_brand TEXT`,
   ]) {
     try {
       db.exec(stmt);

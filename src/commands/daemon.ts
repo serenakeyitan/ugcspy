@@ -3,8 +3,13 @@ import ora from "ora";
 import { openDb } from "../db/index.ts";
 import { upsertVideos } from "../db/videos.ts";
 import { loadConfig } from "../lib/config.ts";
-import { detectBreakouts, evaluateWatchState, filterRecent24h } from "../lib/breakout.ts";
-import { postBreakoutAlert } from "../lib/slack.ts";
+import {
+  detectBreakouts,
+  detectThresholdCrossings,
+  evaluateWatchState,
+  filterRecent24h,
+} from "../lib/breakout.ts";
+import { postBreakoutAlert, postThresholdReminder } from "../lib/slack.ts";
 import { getProvider } from "../providers/index.ts";
 import type { Competitor, Platform, VideoRecord, Watch } from "../types.ts";
 
@@ -39,6 +44,39 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
         upsertVideos(db, w.competitor_id, fresh);
 
         const trailing = readTrailingWindow(db, w.competitor_id, opts.windowDays);
+
+        // ABSOLUTE view-threshold mode: fire the moment any tracked video crosses
+        // the bar. No warmup gate (an absolute milestone is meaningful on day 1)
+        // and not limited to the last 24h. Per-video at-most-once via alerts_fired.
+        if (w.view_threshold != null) {
+          const crossings = detectThresholdCrossings(trailing, w.view_threshold).filter(
+            (c) => !alreadyFired(db, c.video.id, w.id),
+          );
+          if (w.state !== "active") setWatchState(db, w.id, "active");
+          if (crossings.length === 0) {
+            spinner.succeed(
+              `${w.handle}: no new videos past ${w.view_threshold.toLocaleString()} views (${trailing.length} tracked)`,
+            );
+            continue;
+          }
+          for (const c of crossings) {
+            if (!claimAlert(db, c.video.id, w.id)) continue;
+            const result = await postThresholdReminder(
+              w.slack_webhook_url,
+              { id: w.competitor_id, handle: w.handle, platform: w.platform as Platform, added_at: "" },
+              c,
+              w.remix_brand,
+            );
+            if (!result.ok) {
+              console.error(chalk.red(`Slack post failed (${result.status}): ${result.body}`));
+            }
+          }
+          spinner.succeed(
+            `${w.handle}: sent ${chalk.cyan(crossings.length)} threshold reminder(s)`,
+          );
+          continue;
+        }
+
         const status = evaluateWatchState(w.created_at, trailing.length);
 
         if (status.state === "warming_up") {

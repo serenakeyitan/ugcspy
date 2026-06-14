@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { BreakoutCandidate } from "../src/lib/breakout.ts";
-import { formatAlert, postBreakoutAlert } from "../src/lib/slack.ts";
+import { formatAlert, formatThresholdReminder, postBreakoutAlert } from "../src/lib/slack.ts";
 import type { Competitor, VideoRecord } from "../src/types.ts";
 
 const competitor: Competitor = { id: 1, handle: "@x", platform: "tiktok", added_at: "" };
@@ -46,5 +46,27 @@ describe("formatAlert", () => {
     expect(text).toContain("@x");
     expect(text).toContain("4.2x");
     expect(text).toContain(video.video_url);
+  });
+});
+
+describe("formatThresholdReminder (absolute-threshold reminder with remix CTA)", () => {
+  const crossing: BreakoutCandidate = { video, ratio: 3, threshold: 100_000 };
+
+  test("leads with the crossed-views milestone and the video link", () => {
+    const text = formatThresholdReminder(competitor, crossing, null);
+    expect(text).toContain("@x");
+    expect(text).toContain("100,000");
+    expect(text).toContain(video.video_url);
+  });
+
+  test("with a remix brand, emits the ready /ugcspy-rebrand command using the DB id", () => {
+    const text = formatThresholdReminder(competitor, crossing, "BeFreed");
+    expect(text).toContain("/ugcspy-rebrand 1 BeFreed"); // video.id = 1
+    expect(text).toContain("BeFreed");
+  });
+
+  test("without a remix brand, the CTA carries a <your-brand> placeholder", () => {
+    const text = formatThresholdReminder(competitor, crossing, null);
+    expect(text).toContain("/ugcspy-rebrand 1 <your-brand>");
   });
 });

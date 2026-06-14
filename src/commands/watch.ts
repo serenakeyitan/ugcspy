@@ -8,6 +8,11 @@ export interface WatchOptions {
   slackWebhook?: string;
   threshold: number;
   platform: Platform;
+  // Absolute view-count alert: fire when a tracked video crosses this many
+  // views (overrides the relative threshold mode). Undefined = relative mode.
+  viewThreshold?: number;
+  // Optional target brand for the reminder's /ugcspy-rebrand CTA.
+  remixBrand?: string;
 }
 
 export async function runWatchAdd(
@@ -23,6 +28,16 @@ export async function runWatchAdd(
     console.error(chalk.red(`--threshold must be a positive number (got ${opts.threshold}).`));
     process.exit(1);
   }
+  // Absolute view-threshold mode (--view-threshold): must be a positive integer.
+  const absoluteMode = opts.viewThreshold !== undefined;
+  if (absoluteMode && (!Number.isFinite(opts.viewThreshold) || opts.viewThreshold! <= 0)) {
+    console.error(
+      chalk.red(`--view-threshold must be a positive number (got ${opts.viewThreshold}).`),
+    );
+    process.exit(1);
+  }
+  const viewThreshold = absoluteMode ? Math.round(opts.viewThreshold!) : null;
+  const remixBrand = opts.remixBrand?.trim() || null;
   const webhook = opts.slackWebhook ?? loadConfig().default_slack_webhook;
   if (!webhook) {
     console.error(
@@ -54,24 +69,45 @@ export async function runWatchAdd(
     .prepare(`SELECT id FROM watches WHERE competitor_id = ? AND slack_webhook_url = ?`)
     .get(competitor.id, webhook) as { id: number } | undefined;
   if (existing) {
-    db.prepare(`UPDATE watches SET threshold_multiplier = ? WHERE id = ?`).run(
-      opts.threshold,
-      existing.id,
-    );
+    db.prepare(
+      `UPDATE watches SET threshold_multiplier = ?, view_threshold = ?, remix_brand = ? WHERE id = ?`,
+    ).run(opts.threshold, viewThreshold, remixBrand, existing.id);
     console.log(
       chalk.green(
-        `✓ Updated existing watch for ${handle} on ${opts.platform} → ${opts.threshold}x baseline.`,
+        absoluteMode
+          ? `✓ Updated watch for ${handle} on ${opts.platform} → reminder at ${viewThreshold!.toLocaleString()} views${remixBrand ? ` (remix → ${remixBrand})` : ""}.`
+          : `✓ Updated existing watch for ${handle} on ${opts.platform} → ${opts.threshold}x baseline.`,
       ),
     );
     return;
   }
 
+  // Absolute-threshold watches skip warmup (the milestone is meaningful at once);
+  // relative-breakout watches stay warming_up until the cold-start gate clears.
   db.prepare(
-    `INSERT INTO watches (competitor_id, slack_webhook_url, threshold_multiplier, state) VALUES (?, ?, ?, 'warming_up')`,
-  ).run(competitor.id, webhook, opts.threshold);
+    `INSERT INTO watches (competitor_id, slack_webhook_url, threshold_multiplier, view_threshold, remix_brand, state)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    competitor.id,
+    webhook,
+    opts.threshold,
+    viewThreshold,
+    remixBrand,
+    absoluteMode ? "active" : "warming_up",
+  );
 
-  console.log(chalk.green(`✓ Watching ${handle} on ${opts.platform} at ${opts.threshold}x baseline.`));
-  console.log(chalk.dim(`Cold-start: alerts stay warming_up until 7 days + ≥5 videos.`));
+  if (absoluteMode) {
+    console.log(
+      chalk.green(
+        `✓ Reminding on ${handle} (${opts.platform}) when a video crosses ${viewThreshold!.toLocaleString()} views${remixBrand ? ` — with a /ugcspy-rebrand CTA for ${remixBrand}` : ""}.`,
+      ),
+    );
+  } else {
+    console.log(
+      chalk.green(`✓ Watching ${handle} on ${opts.platform} at ${opts.threshold}x baseline.`),
+    );
+    console.log(chalk.dim(`Cold-start: alerts stay warming_up until 7 days + ≥5 videos.`));
+  }
   console.log(`Run ${chalk.cyan("ugcspy daemon --once")} to manually poll, or set up cron.`);
 }
 
@@ -79,26 +115,34 @@ export async function runWatchList(): Promise<void> {
   const db = openDb();
   const rows = db
     .prepare(
-      `SELECT w.id, w.threshold_multiplier, w.state, w.created_at, c.handle, c.platform
+      `SELECT w.id, w.threshold_multiplier, w.view_threshold, w.remix_brand, w.state, w.created_at, c.handle, c.platform
        FROM watches w JOIN competitors c ON c.id = w.competitor_id
        ORDER BY w.created_at DESC`,
     )
-    .all() as (Pick<Watch, "id" | "threshold_multiplier" | "state" | "created_at"> & Pick<Competitor, "handle" | "platform">)[];
+    .all() as (Pick<
+      Watch,
+      "id" | "threshold_multiplier" | "view_threshold" | "remix_brand" | "state" | "created_at"
+    > &
+      Pick<Competitor, "handle" | "platform">)[];
 
   if (rows.length === 0) {
     console.log(chalk.yellow("No watches configured. Try `ugcspy watch add @glossier`."));
     return;
   }
   const table = new Table({
-    head: ["ID", "Handle", "Platform", "Threshold", "State", "Added"],
+    head: ["ID", "Handle", "Platform", "Trigger", "Remix", "State", "Added"],
     style: { head: ["cyan"], border: ["gray"] },
   });
   for (const r of rows) {
+    // Absolute mode shows the view milestone; relative mode shows the multiplier.
+    const trigger =
+      r.view_threshold != null ? `≥ ${r.view_threshold.toLocaleString()} views` : `${r.threshold_multiplier}x median`;
     table.push([
       String(r.id),
       r.handle,
       r.platform,
-      `${r.threshold_multiplier}x`,
+      trigger,
+      r.remix_brand ?? chalk.dim("—"),
       r.state === "active" ? chalk.green(r.state) : chalk.yellow(r.state),
       r.created_at,
     ]);

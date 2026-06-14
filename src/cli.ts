@@ -147,14 +147,24 @@ const watch = program.command("watch").description("Manage breakout-alert watche
 
 watch
   .command("add <handle>")
-  .description("Watch a competitor and Slack-alert on breakout (≥ threshold × trailing median)")
+  .description(
+    "Watch a brand/creator and Slack-alert on breakout (≥ threshold × median), OR set --view-threshold for an absolute view-milestone reminder with a remix CTA",
+  )
   .option("--slack-webhook <url>", "Slack incoming webhook URL")
-  .option("--threshold <n>", "breakout multiplier", positiveFloat, 2.0)
+  .option("--threshold <n>", "relative breakout multiplier", positiveFloat, 2.0)
+  .option(
+    "--view-threshold <n>",
+    "ABSOLUTE view-count reminder: ping when a tracked video crosses N views (with a remix CTA)",
+    positiveInt,
+  )
+  .option("--remix-brand <name>", "target brand for the reminder's /ugcspy-rebrand CTA")
   .option("-p, --platform <name>", "tiktok | instagram", "tiktok")
   .action(async (handle: string, raw) => {
     await runWatchAdd(handle, {
       slackWebhook: raw.slackWebhook,
       threshold: raw.threshold,
+      viewThreshold: raw.viewThreshold,
+      remixBrand: raw.remixBrand,
       platform: raw.platform as Platform,
     });
   });
