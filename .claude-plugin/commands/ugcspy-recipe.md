@@ -9,7 +9,7 @@ User arguments: `$ARGUMENTS`
 
 ## Routing
 
-If `$ARGUMENTS` is a numeric video id from a previous `/ugcspy-search`, resolve it to a URL first. Note the search table's `#` column is a display position, NOT the database id — if the number came from the table, re-run the same search with `--json` (cached, instant) and take the Nth element's `id`/`video_url`. Then:
+If `$ARGUMENTS` is a numeric video id from a previous `/ugcspy-search`, resolve it to a URL first (same rule as `/ugcspy-fork`): the search table's `#` column is a display position, NOT the database id, so re-run the same search with `--json` (cached, instant) and take the Nth element's `id`/`video_url`. Then:
 
 ```bash
 sqlite3 ~/.ugcspy/db.sqlite "SELECT video_url FROM videos WHERE id = <resolved-db-id>;"

@@ -14,7 +14,7 @@ The user can pass three things:
 - **TikTok URL** (e.g. `https://www.tiktok.com/@creator.handle/video/<id>`)
 - **Existing recipe-dir path** (e.g. `vendor/video-recipe/recipes/<video-id>`)
 
-For a numeric id: note that the `/ugcspy-search` table's `#` column is a display position, NOT the database id. If the number came from the table, resolve it first by re-running the same search with `--json` (cached, instant) and taking the Nth element's `id`/`video_url`. Then:
+For a numeric id, resolve it first (same rule as `/ugcspy-fork`): the `/ugcspy-search` table's `#` column is a display position, NOT the database id, so re-run the same search with `--json` (cached, instant) and take the Nth element's `id`/`video_url`. Then:
 
 ```bash
 sqlite3 ~/.ugcspy/db.sqlite "SELECT video_url FROM videos WHERE id = <resolved-db-id> LIMIT 1;"

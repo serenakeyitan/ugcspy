@@ -147,6 +147,26 @@ describe("parseBridgeOutput (bridge stdout/error contract)", () => {
     );
     expect(v!.author_handle).toBeUndefined();
   });
+
+  test("rows missing/malformed any required field are dropped (fail-soft on untrusted JSON), valid rows kept", () => {
+    const out = parseBridgeOutput(
+      0,
+      JSON.stringify([
+        bridgeRow(), // valid
+        bridgeRow({ video_url: 12345 }), // non-string video_url → dropped
+        bridgeRow({ external_id: null }), // missing external_id → dropped
+        bridgeRow({ caption: undefined }), // missing caption (would crash captionHook.trim) → dropped
+        bridgeRow({ thumbnail_url: 7 }), // non-string thumbnail_url → dropped
+        bridgeRow({ view_count: "lots" }), // non-finite metric → dropped
+        bridgeRow({ platform: "instagram" }), // wrong platform → dropped
+        { platform: "tiktok", caption: "no required fields" }, // dropped
+        bridgeRow({ external_id: "OK2", video_url: "https://www.tiktok.com/@x/video/2" }), // valid
+      ]),
+      "",
+    );
+    expect(out.length).toBe(2);
+    expect(out.map((v) => v.external_id).sort()).toEqual(["7632734206828875021", "OK2"]);
+  });
 });
 
 describe("resolveBridgePython (venv gating)", () => {

@@ -142,12 +142,22 @@ export class TikTokOssProvider implements DataProvider {
       proc.kill();
     }, timeoutMs);
 
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exit = await proc.exited;
-    clearTimeout(timer);
+    // try/finally so a rejection while reading streams or awaiting exit can't
+    // leak the deadline timer or orphan the child. On any failure path the
+    // finally clears the timer and kills a still-running process.
+    let exit: number;
+    let stdout: string;
+    let stderr: string;
+    try {
+      [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      exit = await proc.exited;
+    } finally {
+      clearTimeout(timer);
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+    }
 
     if (timedOut) {
       throw new ProviderError(
@@ -227,7 +237,29 @@ export function parseBridgeOutput(exit: number, stdout: string, stderr: string):
       name,
     );
   }
-  return (parsed as Array<RawVideo & { _author?: string }>).map((v) => {
+  const rows: RawVideo[] = [];
+  for (const v of parsed as Array<RawVideo & { _author?: string }>) {
+    // The bridge output is untrusted JSON. A row missing a required field is
+    // unusable downstream and crashes later (e.g. a missing `caption` blows up
+    // captionHook's `.trim()` during upsert), so drop it here rather than sink
+    // the whole result set — same fail-soft contract the other parsers honor.
+    // Validate EVERY field RawVideo declares non-optional: the 6 strings and
+    // the 4 metric counts. platform is pinned to "tiktok" (the only value this
+    // provider emits).
+    if (
+      v?.platform !== "tiktok" ||
+      typeof v?.external_id !== "string" ||
+      typeof v?.posted_at !== "string" ||
+      typeof v?.caption !== "string" ||
+      typeof v?.thumbnail_url !== "string" ||
+      typeof v?.video_url !== "string" ||
+      !Number.isFinite(v?.view_count) ||
+      !Number.isFinite(v?.like_count) ||
+      !Number.isFinite(v?.comment_count) ||
+      !Number.isFinite(v?.share_count)
+    ) {
+      continue;
+    }
     const out: RawVideo = { ...v };
     delete (out as { _author?: string })._author;
     // _author crosses an untrusted JSON boundary — a non-string (numeric id,
@@ -235,8 +267,9 @@ export function parseBridgeOutput(exit: number, stdout: string, stderr: string):
     const author =
       (typeof v._author === "string" ? v._author.trim() : "") || authorFromUrl(out.video_url);
     if (author) out.author_handle = author;
-    return out;
-  });
+    rows.push(out);
+  }
+  return rows;
 }
 
 // Parse the snowball bridge's {creators, seedResults} envelope. Same exit/JSON
