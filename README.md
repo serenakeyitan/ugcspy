@@ -173,7 +173,7 @@ The plugin is the recommended way to use ugcspy. Inside Claude Code:
 | `/ugcspy-search <brand>` | Runs the search, renders the table inline |
 | `/ugcspy-fork <id>` | Quick creator brief — hook + beat sheet. Generated in chat using your Claude Code subscription. **No API key.** |
 | `/ugcspy-transcript <brand-or-id>` | Spoken hook + full Whisper transcript for the top N videos (or one). `--talking` / `--non-talking` filters montage vs voiceover content from the audio itself. Cached per video. |
-| `/ugcspy-scout <your-brand>` | Template/account discovery when the sources are UNKNOWN — three lanes: today's viral hits (trend-riding), cross-category UGC playbooks (hook formulas that transfer), and direct competitors (niche mining). Ranked, remixability-judged shortlist feeding `/ugcspy-rebrand`. |
+| `/ugcspy-scout <brand> <seed @handles...>` | Organize a hand-vetted set of creators into a mineable library: profile their shared style signature, then lay out each one's remixable videos ready for `/ugcspy-rebrand`. Seed-expansion only — it does NOT auto-discover "similar" creators (the axis that decides brand-fit is largely visual, which the audio/text tools can't verify, so auto-discovery produced confident false fits). You bring the creators you've already eyeballed; it does the organizing. |
 | `/ugcspy-rebrand <video> <brand>` | Minimal-edit script rebrand: swap/insert the promotion for a target brand at one smooth, content-matched beat. The hook is never touched; everything outside the brand beat stays byte-identical. |
 | `/ugcspy-decode <id>` | Deep production decode — format, OCR'd overlay narrative, brand-pitch placement (soft 软广 vs hard sell), shot list. Writes `decode.json` + `decode.html`. Works on both human-shot AND AI-montage videos. |
 | `/ugcspy-remix <target> <source>` | Cross-video format transfer. Decodes BOTH videos and writes a hand-able brief telling creator B how to shoot their own version of video A's format. |
@@ -202,10 +202,13 @@ The skill ([`.claude-plugin/skills/ugcspy/SKILL.md`](.claude-plugin/skills/ugcsp
 | `search <handle>` | Top videos by reach (default) or recency. The thing you came for. |
 | `trending [region]` | Network-wide viral hits (no brand filter), ranked by views, cached as `trend:<REGION>` for the transcript/rebrand chain. |
 | `discover <niche\|region>` | Mine a corpus for template sources: brand candidates via the `#brand_NNNN` campaign-code fingerprint + app-variant/account-match signals, plus recurring creators. |
+| `similar <seeds...>` | Walk the follow-graph of seed creators to surface creators near them, with a per-seed readability hit-rate. Pure HTTP. (NOTE: ~60% of TikTok following lists are private/blocked, so results are often thin — it's a discovery net, not a ranker.) |
 | `transcript <brand\|id\|url>` | Spoken hook + transcript per video, talking/non-talking classification from the audio. Needs `install-deps --with-audio` (self-contained — bundles ffmpeg); transcribed once, cached in SQLite. |
 | `watch add <handle>` | (Optional) Register a competitor for breakout alerts — see below |
 | `watch list` / `watch remove <id>` | Manage watches |
 | `daemon` | (Optional) Poll watches, post Slack alerts on threshold breach |
+
+**`trending` vs `discover` vs `similar` — three doors into discovery, by input type:** `trending` takes a **region** and returns whatever's viral network-wide (topic-agnostic). `discover` takes a **topic/niche phrase** and returns the brands + recurring creators operating in it (competitive recon). `similar` takes **creators you already know** and returns more creators they follow (lookalikes). Region → topic → creator.
 
 **Brief generation lives in the Claude Code plugin, not the standalone CLI.** This is intentional — it means no Anthropic API key, no per-brief cost, no extra setup. If you want briefs without Claude Code, use `search --json` and pipe the output to your LLM of choice.
 
