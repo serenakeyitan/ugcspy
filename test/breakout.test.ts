@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   detectBreakouts,
+  detectThresholdCrossings,
   evaluateWatchState,
   filterRecent24h,
   ONE_DAY_MS,
@@ -169,5 +170,32 @@ describe("detectBreakouts", () => {
     const recent = [v(499, 6), v(500, 7), v(1000, 8)];
     const out = detectBreakouts(recent, baseline, 5.0);
     expect(out.map((c) => c.video.id).sort()).toEqual([1007, 1008]);
+  });
+});
+
+describe("detectThresholdCrossings (absolute view-milestone alerts)", () => {
+  test("fires for every video at or above the threshold, not the ones below", () => {
+    const videos = [v(50_000, 1), v(99_999, 2), v(100_000, 3), v(250_000, 4)];
+    const out = detectThresholdCrossings(videos, 100_000);
+    expect(out.map((c) => c.video.id).sort()).toEqual([1003, 1004]);
+  });
+
+  test("ratio is views ÷ threshold (how far past the bar)", () => {
+    const out = detectThresholdCrossings([v(300_000, 9)], 100_000);
+    expect(out[0]!.ratio).toBe(3);
+    expect(out[0]!.threshold).toBe(100_000);
+  });
+
+  test("is NOT relative to a baseline and NOT limited to recent — old high-view videos still fire", () => {
+    // Unlike detectBreakouts, no median, no 24h filter — a long-past video that's
+    // over the bar is a valid crossing (the per-video dedup makes it once-only).
+    const old = v(500_000, 5);
+    old.posted_at = new Date(Date.now() - 90 * ONE_DAY_MS).toISOString();
+    expect(detectThresholdCrossings([old], 100_000).map((c) => c.video.id)).toEqual([1005]);
+  });
+
+  test("a non-positive or non-finite threshold yields nothing (guards a NULL/0 binding)", () => {
+    expect(detectThresholdCrossings([v(1_000_000, 1)], 0)).toEqual([]);
+    expect(detectThresholdCrossings([v(1_000_000, 1)], Number.NaN)).toEqual([]);
   });
 });

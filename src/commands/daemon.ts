@@ -3,8 +3,13 @@ import ora from "ora";
 import { openDb } from "../db/index.ts";
 import { upsertVideos } from "../db/videos.ts";
 import { loadConfig } from "../lib/config.ts";
-import { detectBreakouts, evaluateWatchState, filterRecent24h } from "../lib/breakout.ts";
-import { postBreakoutAlert } from "../lib/slack.ts";
+import {
+  detectBreakouts,
+  detectThresholdCrossings,
+  evaluateWatchState,
+  filterRecent24h,
+} from "../lib/breakout.ts";
+import { postBreakoutAlert, postThresholdReminder } from "../lib/slack.ts";
 import { getProvider } from "../providers/index.ts";
 import type { Competitor, Platform, VideoRecord, Watch } from "../types.ts";
 
@@ -38,6 +43,44 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
         const fresh = await provider.fetchRecentVideos(w.handle, w.platform as Platform, opts.windowDays);
         upsertVideos(db, w.competitor_id, fresh);
 
+        // ABSOLUTE view-threshold mode: fire the moment any tracked video crosses
+        // the bar. No warmup gate (an absolute milestone is meaningful on day 1),
+        // not limited to the last 24h, AND not limited to the --days trailing
+        // window — a video can slowly cross N views long after it was posted, so
+        // we scan EVERY stored video for this competitor. Per-video at-most-once
+        // via alerts_fired. (The fetch above still refreshes recent view counts;
+        // older rows keep the last counts we captured.)
+        if (w.view_threshold != null) {
+          const allTracked = readAllTracked(db, w.competitor_id);
+          const crossings = detectThresholdCrossings(allTracked, w.view_threshold).filter(
+            (c) => !alreadyFired(db, c.video.id, w.id),
+          );
+          if (w.state !== "active") setWatchState(db, w.id, "active");
+          if (crossings.length === 0) {
+            spinner.succeed(
+              `${w.handle}: no new videos past ${w.view_threshold.toLocaleString()} views (${allTracked.length} tracked)`,
+            );
+            continue;
+          }
+          for (const c of crossings) {
+            if (!claimAlert(db, c.video.id, w.id)) continue;
+            const result = await postThresholdReminder(
+              w.slack_webhook_url,
+              { id: w.competitor_id, handle: w.handle, platform: w.platform as Platform, added_at: "" },
+              c,
+              w.remix_brand,
+            );
+            if (!result.ok) {
+              console.error(chalk.red(`Slack post failed (${result.status}): ${result.body}`));
+            }
+          }
+          spinner.succeed(
+            `${w.handle}: sent ${chalk.cyan(crossings.length)} threshold reminder(s)`,
+          );
+          continue;
+        }
+
+        // RELATIVE breakout mode (view_threshold is NULL): trailing-window baseline.
         const trailing = readTrailingWindow(db, w.competitor_id, opts.windowDays);
         const status = evaluateWatchState(w.created_at, trailing.length);
 
@@ -110,6 +153,18 @@ function readTrailingWindow(
       `SELECT * FROM videos WHERE competitor_id = ? AND datetime(posted_at) >= datetime(?) ORDER BY datetime(posted_at) DESC`,
     )
     .all(competitorId, cutoff) as VideoRecord[];
+}
+
+// Every stored video for a competitor — no date window. Absolute view-threshold
+// watches use this (not readTrailingWindow): a video can cross the milestone long
+// after it was posted, so the --days trailing window would silently miss it.
+function readAllTracked(
+  db: ReturnType<typeof openDb>,
+  competitorId: number,
+): VideoRecord[] {
+  return db
+    .prepare(`SELECT * FROM videos WHERE competitor_id = ? ORDER BY datetime(posted_at) DESC`)
+    .all(competitorId) as VideoRecord[];
 }
 
 function alreadyFired(db: ReturnType<typeof openDb>, videoId: number, watchId: number): boolean {

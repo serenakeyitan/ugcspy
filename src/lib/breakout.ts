@@ -96,3 +96,20 @@ export function detectBreakouts(
     .filter((v) => v.view_count >= threshold)
     .map((video) => ({ video, ratio: video.view_count / median, threshold }));
 }
+
+// Absolute-threshold alerts: a creator tracking a brand/account wants to know
+// when ANY of its videos crosses a fixed view count (e.g. "ping me at 100K").
+// Unlike detectBreakouts, this is NOT relative to a baseline and NOT limited to
+// the last 24h — the creator cares about a specific reach milestone whenever it
+// happens. Per-video at-most-once is enforced by the caller via alerts_fired,
+// so a video that's already past the bar fires exactly once, not every tick.
+// `ratio` here is views ÷ threshold (how far past the bar), for the reminder.
+export function detectThresholdCrossings(
+  videos: VideoRecord[],
+  viewThreshold: number,
+): BreakoutCandidate[] {
+  if (!Number.isFinite(viewThreshold) || viewThreshold <= 0) return [];
+  return videos
+    .filter((v) => v.view_count >= viewThreshold)
+    .map((video) => ({ video, ratio: video.view_count / viewThreshold, threshold: viewThreshold }));
+}

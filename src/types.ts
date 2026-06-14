@@ -113,6 +113,12 @@ export interface Watch {
   competitor_id: number;
   slack_webhook_url: string;
   threshold_multiplier: number;
+  // Absolute view-count alert. When non-null, the watch fires the moment a
+  // tracked video crosses this many views (independent of the relative
+  // breakout multiplier). Null = classic relative-breakout mode.
+  view_threshold: number | null;
+  // Optional target brand for the reminder's remix-ready payload.
+  remix_brand: string | null;
   state: "warming_up" | "active";
   created_at: string;
 }
