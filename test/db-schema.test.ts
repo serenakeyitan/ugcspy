@@ -168,6 +168,19 @@ describe("migration from the old global-unique schema", () => {
       .prepare(`SELECT transcript_kind FROM videos WHERE transcript = 'spoken words' LIMIT 1`)
       .get() as { transcript_kind: string };
     expect(t.transcript_kind).toBe("speech");
+
+    // The rebuild DROPs+recreates videos, so the hot-path indexes must be
+    // re-added in the rebuild block — not only the fresh block. Regression guard:
+    // without that, every legacy upgrade silently loses the perf indexes.
+    const idx = (
+      db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='videos' AND name LIKE 'idx_videos_%'`,
+        )
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name);
+    expect(idx).toContain("idx_videos_platform_external_id");
+    expect(idx).toContain("idx_videos_author_handle");
   });
 
   test("migrate() is idempotent on an already-current schema", () => {
@@ -180,6 +193,44 @@ describe("migration from the old global-unique schema", () => {
       .get() as { sql: string };
     expect(/competitor_id\s*,\s*platform\s*,\s*external_id/i.test(ddl.sql)).toBe(true);
   });
+
+  // Perf indexes: lookups are output-identical (an index only changes the access
+  // path), so these tests assert the index EXISTS and the planner USES it — the
+  // proof the optimization is real, not a no-op.
+  function videoIndexes(db: Database): string[] {
+    return (
+      db
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='videos' AND name LIKE 'idx_videos_%'`,
+        )
+        .all() as Array<{ name: string }>
+    ).map((r) => r.name);
+  }
+  function queryPlan(db: Database, sql: string, ...params: string[]): string {
+    return (db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>)
+      .map((r) => r.detail)
+      .join(" | ");
+  }
+
+  test("hot-path indexes exist on a fresh DB and the planner uses them", () => {
+    const db = freshDb();
+    const idx = videoIndexes(db);
+    expect(idx).toContain("idx_videos_platform_external_id");
+    expect(idx).toContain("idx_videos_author_handle");
+    // saveTranscript's lookup must SEARCH via the index, not SCAN the table.
+    expect(
+      queryPlan(db, `SELECT id FROM videos WHERE platform = ? AND external_id = ?`, "tiktok", "x"),
+    ).toContain("idx_videos_platform_external_id");
+    // cachedMaxViews' GROUP BY must SEARCH via the author_handle index.
+    expect(
+      queryPlan(
+        db,
+        `SELECT author_handle, MAX(view_count) FROM videos WHERE author_handle IN (?) GROUP BY author_handle`,
+        "x",
+      ),
+    ).toContain("idx_videos_author_handle");
+  });
+
 });
 
 describe("openDb hardening (temp path — never ~/.ugcspy)", () => {
