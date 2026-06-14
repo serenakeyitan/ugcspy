@@ -91,6 +91,11 @@ export async function postThresholdReminder(
 ): Promise<SlackPostResult> {
   const { video } = candidate;
   const text = formatThresholdReminder(competitor, candidate, remixBrand);
+  // The context block interpolates the brand into mrkdwn too — sanitize it here
+  // as well, or an untrusted brand name (<!channel>, a link, a backtick) injects
+  // a channel-wide ping / phishing link into the footer even though the lead is
+  // clean. (Regression: this path had no test; only the `text` lead was covered.)
+  const safeBrand = remixBrand ? sanitizeBrand(remixBrand) : "";
   const blocks = [
     { type: "section", text: { type: "mrkdwn", text } },
     {
@@ -98,7 +103,7 @@ export async function postThresholdReminder(
       elements: [
         {
           type: "mrkdwn",
-          text: `views: *${video.view_count.toLocaleString()}* · crossed: *${Math.round(candidate.threshold).toLocaleString()}*${remixBrand ? ` · remix → *${remixBrand}*` : ""}`,
+          text: `views: *${video.view_count.toLocaleString()}* · crossed: *${Math.round(candidate.threshold).toLocaleString()}*${safeBrand ? ` · remix → *${safeBrand}*` : ""}`,
         },
       ],
     },

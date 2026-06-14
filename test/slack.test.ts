@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import type { BreakoutCandidate } from "../src/lib/breakout.ts";
-import { formatAlert, formatThresholdReminder, postBreakoutAlert } from "../src/lib/slack.ts";
+import {
+  formatAlert,
+  formatThresholdReminder,
+  postBreakoutAlert,
+  postThresholdReminder,
+} from "../src/lib/slack.ts";
 import type { Competitor, VideoRecord } from "../src/types.ts";
 
 const competitor: Competitor = { id: 1, handle: "@x", platform: "tiktok", added_at: "" };
@@ -76,5 +81,36 @@ describe("formatThresholdReminder (absolute-threshold reminder with remix CTA)",
     expect(text).not.toContain("`Be"); // backtick can't break out of the inline-code CTA
     // the cleaned brand still appears
     expect(text).toContain("/ugcspy-rebrand 1 !channel BeFreed");
+  });
+
+  test("the POSTed payload — BOTH the text lead AND the context footer — is sanitized", async () => {
+    // Regression: the context block (blocks[1]) interpolated the brand RAW, so a
+    // malicious brand's <!channel> survived in the footer even though the lead was
+    // clean. Capture the actual POST body and assert the WHOLE payload is inert.
+    const orig = globalThis.fetch;
+    let captured = "";
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      captured = init.body;
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      await postThresholdReminder(
+        "http://example.test/hook",
+        competitor,
+        crossing,
+        "<!channel> Be`Freed",
+      );
+    } finally {
+      globalThis.fetch = orig;
+    }
+    const payload = JSON.parse(captured);
+    const whole = JSON.stringify(payload);
+    // No live channel-broadcast mention anywhere in the payload (lead OR footer).
+    expect(whole).not.toContain("<!channel>");
+    // The context footer specifically carries the cleaned brand.
+    const footer = payload.blocks[1].elements[0].text as string;
+    expect(footer).toContain("remix → *!channel BeFreed*");
+    expect(footer).not.toContain("<!channel>");
+    expect(footer).not.toContain("`");
   });
 });
