@@ -69,4 +69,12 @@ describe("formatThresholdReminder (absolute-threshold reminder with remix CTA)",
     const text = formatThresholdReminder(competitor, crossing, null);
     expect(text).toContain("/ugcspy-rebrand 1 <your-brand>");
   });
+
+  test("sanitizes mrkdwn-injection chars in the remix brand (no <!channel>, no backtick break-out)", () => {
+    const text = formatThresholdReminder(competitor, crossing, "<!channel> Be`Freed*");
+    expect(text).not.toContain("<!channel>");
+    expect(text).not.toContain("`Be"); // backtick can't break out of the inline-code CTA
+    // the cleaned brand still appears
+    expect(text).toContain("/ugcspy-rebrand 1 !channel BeFreed");
+  });
 });

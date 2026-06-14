@@ -57,6 +57,15 @@ export function formatAlert(competitor: Competitor, candidate: BreakoutCandidate
 // leads with the video link and, when the watch named a target brand, the exact
 // /ugcspy-rebrand command so the creator can turn the proven video into their
 // own script on the spot.
+// Neutralize Slack mrkdwn control chars in untrusted text (the user-supplied
+// remix brand). Strips `<>` (which create links/<!channel> mentions), backticks
+// (which would break out of the inline-code CTA), and newlines/asterisks — a
+// brand name needs none of these, so removing them is lossless in practice and
+// closes the injection/format-break that codex flagged.
+function sanitizeBrand(s: string): string {
+  return s.replace(/[<>`*\n\r]/g, "").trim();
+}
+
 export function formatThresholdReminder(
   competitor: Competitor,
   candidate: BreakoutCandidate,
@@ -66,9 +75,10 @@ export function formatThresholdReminder(
   const hookSnippet = video.hook_text ? `\n> ${video.hook_text.slice(0, 140)}` : "";
   const crossed = Math.round(threshold).toLocaleString();
   const lead = `🔔 *${competitor.handle}* video crossed *${crossed}* views — time to remix it.\n${video.video_url}${hookSnippet}`;
-  if (remixBrand) {
+  const brand = remixBrand ? sanitizeBrand(remixBrand) : "";
+  if (brand) {
     // video.id is the local DB id /ugcspy-rebrand resolves; give the ready command.
-    return `${lead}\n\n➡️ Remix it for *${remixBrand}*: \`/ugcspy-rebrand ${video.id} ${remixBrand}\``;
+    return `${lead}\n\n➡️ Remix it for *${brand}*: \`/ugcspy-rebrand ${video.id} ${brand}\``;
   }
   return `${lead}\n\n➡️ Remix it: \`/ugcspy-rebrand ${video.id} <your-brand>\``;
 }

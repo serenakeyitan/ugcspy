@@ -28,15 +28,17 @@ export async function runWatchAdd(
     console.error(chalk.red(`--threshold must be a positive number (got ${opts.threshold}).`));
     process.exit(1);
   }
-  // Absolute view-threshold mode (--view-threshold): must be a positive integer.
+  // Absolute view-threshold mode (--view-threshold): must be a positive INTEGER.
+  // Reject fractional values (e.g. 0.1) outright — silently rounding 0.1 → 0
+  // would lock the watch into absolute mode that never fires.
   const absoluteMode = opts.viewThreshold !== undefined;
-  if (absoluteMode && (!Number.isFinite(opts.viewThreshold) || opts.viewThreshold! <= 0)) {
+  if (absoluteMode && (!Number.isInteger(opts.viewThreshold) || opts.viewThreshold! <= 0)) {
     console.error(
-      chalk.red(`--view-threshold must be a positive number (got ${opts.viewThreshold}).`),
+      chalk.red(`--view-threshold must be a positive integer (got ${opts.viewThreshold}).`),
     );
     process.exit(1);
   }
-  const viewThreshold = absoluteMode ? Math.round(opts.viewThreshold!) : null;
+  const viewThreshold = absoluteMode ? opts.viewThreshold! : null;
   const remixBrand = opts.remixBrand?.trim() || null;
   const webhook = opts.slackWebhook ?? loadConfig().default_slack_webhook;
   if (!webhook) {
@@ -69,9 +71,19 @@ export async function runWatchAdd(
     .prepare(`SELECT id FROM watches WHERE competitor_id = ? AND slack_webhook_url = ?`)
     .get(competitor.id, webhook) as { id: number } | undefined;
   if (existing) {
+    // Switching an existing watch to absolute mode flips it active immediately
+    // (a fixed milestone needs no warmup); switching back to relative re-enters
+    // warmup so the cold-start gate re-applies. Same-mode re-adds keep state.
     db.prepare(
-      `UPDATE watches SET threshold_multiplier = ?, view_threshold = ?, remix_brand = ? WHERE id = ?`,
-    ).run(opts.threshold, viewThreshold, remixBrand, existing.id);
+      `UPDATE watches SET threshold_multiplier = ?, view_threshold = ?, remix_brand = ?,
+         state = ? WHERE id = ?`,
+    ).run(
+      opts.threshold,
+      viewThreshold,
+      remixBrand,
+      absoluteMode ? "active" : "warming_up",
+      existing.id,
+    );
     console.log(
       chalk.green(
         absoluteMode
