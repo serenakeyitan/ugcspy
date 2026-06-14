@@ -13,11 +13,11 @@ export async function postBreakoutAlert(
   candidate: BreakoutCandidate,
 ): Promise<SlackPostResult> {
   const { video, ratio, threshold } = candidate;
-  const text = formatAlert(competitor, candidate);
+  const message = formatAlert(competitor, candidate);
   const blocks = [
     {
       type: "section",
-      text: { type: "mrkdwn", text, verbatim: true },
+      text: { type: "mrkdwn", text: message, verbatim: true },
     },
     {
       type: "context",
@@ -37,7 +37,11 @@ export async function postBreakoutAlert(
     const res = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, blocks }),
+      // Top-level `text` is the notification-preview fallback and is NOT covered
+      // by the blocks' `verbatim` flag — Slack auto-parses mentions/URLs in it.
+      // Use a TRUSTED STATIC string; the real (verbatim + escaped) content lives
+      // in `blocks`, so no attacker-controlled text reaches an auto-parsed field.
+      body: JSON.stringify({ text: "ugcspy breakout alert", blocks }),
       signal: AbortSignal.timeout(10_000),
     });
     return { ok: res.ok, status: res.status, body: await res.text() };
@@ -103,14 +107,14 @@ export async function postThresholdReminder(
   remixBrand: string | null,
 ): Promise<SlackPostResult> {
   const { video } = candidate;
-  const text = formatThresholdReminder(competitor, candidate, remixBrand);
+  const message = formatThresholdReminder(competitor, candidate, remixBrand);
   // The context block interpolates the brand into mrkdwn too — sanitize it here
   // as well, or an untrusted brand name (<!channel>, a link, a backtick) injects
   // a channel-wide ping / phishing link into the footer even though the lead is
   // clean. (Regression: this path had no test; only the `text` lead was covered.)
   const safeBrand = remixBrand ? sanitizeBrand(remixBrand) : "";
   const blocks = [
-    { type: "section", text: { type: "mrkdwn", text, verbatim: true } },
+    { type: "section", text: { type: "mrkdwn", text: message, verbatim: true } },
     {
       type: "context",
       elements: [
@@ -126,7 +130,10 @@ export async function postThresholdReminder(
     const res = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, blocks }),
+      // Trusted static top-level `text` (see postBreakoutAlert): the notification
+      // fallback is not verbatim-protected, so attacker-controlled content stays
+      // out of it. The real content rides in `blocks` (verbatim + escaped).
+      body: JSON.stringify({ text: "ugcspy view-threshold reminder", blocks }),
       signal: AbortSignal.timeout(10_000),
     });
     return { ok: res.ok, status: res.status, body: await res.text() };

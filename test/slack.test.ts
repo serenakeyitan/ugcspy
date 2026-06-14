@@ -106,6 +106,61 @@ describe("formatThresholdReminder (absolute-threshold reminder with remix CTA)",
     // doesn't catch). Section + context block both.
     expect((payload.blocks[0].text as { verbatim: boolean }).verbatim).toBe(true);
     expect((payload.blocks[1].elements[0] as { verbatim: boolean }).verbatim).toBe(true);
+    // The top-level `text` notification fallback is NOT verbatim-protected, so it
+    // must be a trusted STATIC string — never the interpolated (attacker-tainted)
+    // message. Otherwise a bare @everyone in the brand/caption would auto-parse here.
+    expect(payload.text).toBe("ugcspy view-threshold reminder");
+  });
+
+  test("a bare @everyone in the brand never reaches the auto-parsed top-level text", async () => {
+    const orig = globalThis.fetch;
+    let captured = "";
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      captured = init.body;
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    try {
+      // Bare @everyone has no `<` — escapeMrkdwn can't touch it; only verbatim
+      // (blocks) + a static top-level text keep it from pinging the channel.
+      await postThresholdReminder("http://example.test/hook", competitor, crossing, "@everyone now");
+    } finally {
+      globalThis.fetch = orig;
+    }
+    const payload = JSON.parse(captured);
+    expect(payload.text).toBe("ugcspy view-threshold reminder"); // static, not "@everyone now"
+    expect(payload.text).not.toContain("@everyone");
+  });
+});
+
+describe("postBreakoutAlert payload (top-level text is a trusted static fallback)", () => {
+  test("the auto-parsed top-level `text` is static, not the tainted alert message", async () => {
+    const orig = globalThis.fetch;
+    let captured = "";
+    globalThis.fetch = (async (_url: string, init: { body: string }) => {
+      captured = init.body;
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    const evilVideo: VideoRecord = {
+      ...video,
+      hook_text: "@everyone <!channel> drop everything",
+      video_url: "https://www.tiktok.com/@x/video/1",
+    };
+    const evilCompetitor: Competitor = { id: 1, handle: "@everyone", platform: "tiktok", added_at: "" };
+    try {
+      await postBreakoutAlert("http://example.test/hook", evilCompetitor, {
+        video: evilVideo,
+        ratio: 3,
+        threshold: 100,
+      });
+    } finally {
+      globalThis.fetch = orig;
+    }
+    const payload = JSON.parse(captured);
+    expect(payload.text).toBe("ugcspy breakout alert");
+    expect(payload.text).not.toContain("@everyone");
+    expect(JSON.stringify(payload)).not.toContain("<!channel>"); // escaped in blocks too
+    expect((payload.blocks[0].text as { verbatim: boolean }).verbatim).toBe(true);
+    expect((payload.blocks[1].elements[0] as { verbatim: boolean }).verbatim).toBe(true);
   });
 });
 
