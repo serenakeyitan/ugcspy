@@ -1,164 +1,191 @@
 ---
-description: Find script/video templates and accounts to copy when the sources are UNKNOWN — three lanes (today's viral hits, cross-category UGC playbooks, direct competitors), ranked by remixability for the user's brand
-argument-hint: "<your-brand> [one-line: what the brand does] [--region US]"
+description: Find CREATORS worth copying long-term for a brand — start from the brand's ideal creators (or build that seed set with them), then surface more creators in the same FORMAT/STYLE, ranked by signature-fit and reach. Creator-centric, not one-off-video-centric.
+argument-hint: "<your-brand> [one-line: what the brand does] [seed @handles or video links] [--region US]"
 ---
 
-You are scouting TEMPLATE SOURCES for a brand whose copy-worthy accounts are not yet known. The deliverable: a ranked shortlist of videos + accounts worth remixing — [script] templates via `/ugcspy-rebrand`, [overlay] templates via `/ugcspy-decode` — each labeled with its lane and why it fits.
+You are scouting CREATORS for a brand to copy as a **long-term well**, not single viral videos to remix once. The deliverable is a ranked shortlist of **creators** whose body of work fits the brand's format/style, each with sample video links so the user can eyeball them and adopt the ones that fit. Once chosen, the user mines those creators' videos every week via `/ugcspy-rebrand`.
 
-User arguments: `$ARGUMENTS` (the user's brand, optional one-line description, optional region; region defaults to US).
+This is **creator-centric**. The old content-centric scout asked "is THIS video remixable?" and surfaced structurally-portable videos that were tonally wrong for the brand (a marriage monologue, a period-education clip). The fix: anchor on the **kind of creator** the brand wants, and rank by similarity to that, not by raw virality.
 
-## Step 0 — you need to know what the brand does (and the language)
+User arguments: `$ARGUMENTS` (brand, optional one-line description, optional seed handles/links, optional region; region defaults to US).
 
-If no one-line description was given and you can't infer it from cached data, ASK the user one short question ("what does <brand> do, in one line?") before any discovery — lane phrases and every truthfulness judgment depend on it. Do not guess a niche from the brand name alone.
+## Step 0 — brand, language, and the SEED SET (the whole thing pivots on this)
 
-**Language defaults to ENGLISH.** Unless the user specifies a language/market, only English-language videos count as templates — verify with the transcript JSON's `language` field, not the caption (captions and audio often differ). Non-English candidates are FLAGGED ("wrong language — ask if you want the <xx> market") and never count toward the quota. If the user names a language or region market, that language replaces English as the filter.
+1. **What does the brand do, in one line?** If not given and not inferable from cached data, ASK — every truthfulness/fit judgment depends on it. Don't guess a niche from the brand name.
 
-## Phase A — cheap corpus passes (all lanes, ~1-2 min each, no approval needed)
+2. **Language defaults to ENGLISH.** Unless the user names a language/market, only English-language creators count — verify with the transcript JSON's `language` field, not captions. Non-English creators are FLAGGED ("wrong language — ask if you want the <xx> market"), never counted. **Language is the real market filter here — `--region` is NOT enforced by the tools** (keyword/account/transcript calls don't filter or report a creator's region). Treat `--region` only as the trending-feed region; for market targeting, lean on the language filter and say so, rather than implying region is applied.
 
-Run these in this order — the trending pull comes first because its tag set powers the `bg` genericity discount on every later niche scan:
+3. **Ask for the seed set — the ideal creators to copy:**
 
-```bash
-ugcspy discover <REGION> --trending --json        # ① lane 1+2: fetches + caches trend:<REGION> AND mines it — ONE pull
-ugcspy discover "<niche phrase 1>" --json          # ② lane 3: the brand's own niche (derive 1-2 phrases from the description)
-ugcspy discover "<adjacent niche>" --json          # ③ lane 2: same buyer, different product (fitness app → "language learning app", "budgeting app")
-```
+   > "Do you have creators whose style you'd want more of? Drop their @handles or some video links. If not, I'll show you options grouped by style and you pick."
 
-Do NOT also run `ugcspy trending` separately — `discover --trending` already fetches and caches the same rotating feed; a second pull wastes a fetch and mixes two different rotations into the `trend:<REGION>` cache.
+   - **They have seeds → Path A** (find more creators like these).
+   - **They don't → Path B** (build the seed set with them first, then Path A).
 
-Each `discover --json` returns `{corpus_size, cache_key, brands[], creators[]}` — aggregates, not videos. Candidate VIDEOS come later from `search --json` / `transcript --json`.
+This question is not optional. Without a seed set you're back to content-centric scouting — the exact problem this version exists to fix.
 
-## Phase B — shortlist brands and accounts (judgment, zero cost)
+---
 
-From the combined `brands[]` evidence across all Phase A scans:
-- Campaign codes (`campaignCodes` > 0) are near-proof of a run UGC program; `appVariant`/`authorMatch` mark brand-shaped tags; `background: true` marks generic topic tags. The table is evidence, not a verdict — YOU make the brand-vs-topic call.
-- Consolidate tag families yourself (#pingo + #pingoai = one brand).
-- From `creators[]`, note recurring accounts (the "accounts to watch" half of the deliverable).
+## Path A — "find more creators like these"
 
-Shortlist 2-4 candidate brands across lanes 2+3. STOP and confirm with the user before any deep pull: a full `ugcspy search` is ~5-8 min per brand. **Deep-search at most ONE brand without explicit approval for more.**
+The seed set defines a **target signature**. You find more creators matching that signature, primarily through the seeds' follow-graph, falling back to corpus when the graph is thin (it usually is — see the caveat).
 
-## Phase C — candidate videos (the only expensive phase)
+### A1 · Profile the seed set → the target signature
 
-**Lane 3/2 (the one approved brand):**
+Pull each seed's roster and recent talking videos; characterize the set on **format/style axes ONLY** (topic is recorded, NOT used as a filter — the brand beat re-aims topic):
 
 ```bash
-ugcspy search <brand-tag> --json                          # full roster; id + video_url + caption per row
-ugcspy transcript <brand-tag> --top 3 --talking --json    # hooks + transcripts for its top talking videos
+ugcspy search @<seed> --days 90 --limit 100 --json   # windowed roster sample: views, durations, captions
+ugcspy transcript @<seed> --top 4 --json             # talking/non-talking, structure, length, tone
 ```
 
-**Lane 1 (trending hooks — corpus already cached by Phase A):**
+`search` returns a **windowed sample** (here: ≤100 of the last 90 days, sorted by views — NOT a literal full roster, and it over-samples their hits). `transcript --top N` transcribes their N TOP-VIEW cached videos (not "recent"). Both are enough to read a signature; just don't describe them as the complete catalog.
+
+Derive the signature on these axes — all of which `search`/`transcript` JSON actually expose:
+- **Talking vs non-talking** (the hard split — `talking` field; script creators vs overlay creators).
+- **Script structure** — listicle / monologue / story / explainer / reaction (read from the transcript text).
+- **Typical length band** — e.g. 15–35s, 60–90s (`duration_sec`).
+- **Tone** — calm / hype / deadpan / warm (read from the transcript).
+- **Topic** — record it for context, but DON'T filter on it.
+
+**Faceless-vs-face is NOT derivable from these tools** (no JSON field reports visual presentation). Don't guess it as a ranking axis — if it matters to the user, have them eyeball the sample links. Note it as an observation only when a thumbnail makes it obvious.
+
+Write the signature down explicitly ("the seed set is: calm 30–60s talking-head psychology/advice monologues"). It's the rubric for everything downstream.
+
+If seeds span two distinct signatures (e.g. some listicles, some monologues), say so and treat them as two target signatures — rank within each.
+
+### A2 · Graph pass — the follow-graph (fire it FIRST, it's one fast call)
+
+Run this BEFORE A1's seed profiling — it's a single fast call, and with several seeds the profiling roster-pulls + transcripts take minutes; don't make the cheap graph wait behind them. (Kick it off, then profile while it runs.)
 
 ```bash
-ugcspy transcript trend:<REGION> --top 8 --json           # classifies the TOP 8 cached hits, not the whole corpus
+ugcspy similar @<seed1> @<seed2> @<seed3> ... --json   # handles OR pasted TikTok URLs both work
 ```
 
-Report the coverage honestly ("classified 8 of N cached trending videos"). Don't pre-filter with `--talking` here — the NON-TALKING badge is how overlay candidates surface.
+Returns `{seeds, count, creators:[{handle, seedsFollowing, cachedMaxViews}], seedResults:[{handle, status}]}`. `seedsFollowing` = how many seeds follow that candidate; a creator multiple seeds independently follow is a strong cluster signal.
 
-Always use `--json` for candidate-producing calls: the shortlist needs `id`, `video_url`, and `hook` fields, and the human-readable tables don't carry ids.
+**Report the hit-rate from `seedResults`** — `status` is the seed's follow-count, or `-1` (blocked/unreadable list) or `-2` (handle didn't resolve). Say it plainly: "3 of 8 seeds had readable following lists; 5 were blocked." This is how you distinguish a thin-but-working graph from one the relay simply refused.
 
-## Quota semantics — "top N" means N videos that FIT
+**CAVEAT — the graph is usually thin, and that's expected.** tikwm's following endpoint is private/blocked for ~60% of creators, and seeds from different sub-niches share few followings, so a typical run returns many creators all at `seedsFollowing: 1` — or nearly nothing, with most seeds `status: -1`. **Do not treat the follow-graph as a ranker.** It's a discovery NET: it surfaces handles the brand might recognize. Real ranking comes from A4 (signature-fit + reach).
 
-**The default quota is 5.** If the user didn't specify an amount, you MUST deliver at least 5 videos that pass every condition. When they say "top N", the goal is **N remixable videos that pass every condition** (language, lane view floor, the 100× outlier proof for lanes 2-3, class rules, honest brand-beat fit) — NOT the first N scanned:
+Multi-seed candidates (`seedsFollowing ≥ 2`) are the gold here — prioritize verifying those — but never *depend* on the graph alone; when the hit-rate is low (it usually is), A3's corpus pass carries the work.
 
-- A scanned candidate that fails any condition is **FLAGGED with its reason and does NOT count** toward N.
-- Keep scanning until you have N fits: continue down the ranked list, transcribe the next wave, pull the next corpus — in that order of cost.
-- Tell the user the running score as you go ("3/5 fits, scanned 11").
-- "Many corpora needed" is NOT a stop reason — keep pulling fresh niche corpora and transcription waves until the quota is met. Stop early ONLY when the next step needs an approval the user must give (e.g. a second deep-search) or the sources are genuinely exhausted — then report the shortfall plainly with the cost of continuing. A shortfall with a reason beats padding the list with unfit entries — but the default expectation is that you fill the quota.
-- Hunt efficiently: before burning account pulls, pre-scan the LOCAL cache for spike-shaped authors (an author with several cached rows where the max dwarfs the rest) — it's free and prioritizes likely 100× outliers. Cache rows are selection-biased, so the account pull remains the verification.
+### A3 · Corpus pass — when the graph is thin (it usually is)
 
-## View thresholds + the 100× outlier proof (fit conditions)
-
-**Minimum views per lane (defaults — the user can override any of them):**
-
-| Lane | Floor | Why |
-|---|---|---|
-| 1 · network-wide trending | **≥ 10,000,000** | 全网 heat is cheap; only true mega-hits are worth riding |
-| 2 · cross-category | **≥ 1,000,000** | a hook formula must be PROVEN viral in its own vertical before porting it |
-| 3 · direct competitors | **≥ 300,000** | niche numbers run smaller; this still filters the noise floor |
-
-Below-floor candidates are FLAGGED ("below lane floor") and never count toward the quota.
-
-**The 100× outlier proof (lanes 2 and 3).** A big number on a big account proves the account, not the script. A candidate counts only if its views are **≥ 100× the creator's PREVIOUS video** (the post immediately before it by date) — that spike is what proves the SCRIPT is amazingly good. Verify cheaply with a single account pull:
+Cast format/style-matched keyword nets to surface CANDIDATE CREATORS, then keep only those whose own body of work matches the seed signature. Two tools, different payloads — use both:
 
 ```bash
-ugcspy search @<creator> --json --days 365     # ~10-20s; sort by posted_at, find the video preceding the candidate
+ugcspy discover "<niche phrase in the seed's format>" --json   # {brands[], creators[]} AGGREGATES — recurring creators, capped (~top 15), one-off authors excluded
+ugcspy search "<niche phrase>" --mode keyword --platform tiktok --limit 60 --json   # the actual CORPUS VIDEOS, each with author_handle + video_url + views
 ```
 
-- Run this check LAST, only on candidates that already pass everything else (it costs one pull per creator).
-- Record the evidence in the entry: `Outlier: 3.9M vs prior 12K = 325×`.
-- Spirit over letter: if the preceding video was itself an outlier, judge against the account's TYPICAL video instead — the question is always "did the script outperform the account?". A consistently-mega account (every video ≥ the floor) proves the account, not the script: FLAG as "account-powered, not script-powered" unless the user wants account-level templates.
-- Lane 1 is exempt (trending is one-off by nature), but note the account baseline when it's easy to see.
+`discover --json` gives you the *recurring* creators in the niche (a good starting handful) but NOTHING per-video and it drops authors who appear once. To get the full author pool with their videos — the candidates you actually rank — use `search --mode keyword`, then group its rows by `author_handle`. Pick niche phrases dense in the seed's FORMAT (a monologue-advice seed → "advice that changed my life", "harsh truths"; a listicle seed → "things to do alone", "glow up tips"). Topic can flex — match how the content is made, not what it's about. Gather candidate handles from both, then verify each one's signature in A4.
 
-## Remixability judgment (applies to every candidate, all lanes)
+### A4 · Rank candidate creators by SIGNATURE FIT (the real ranking)
 
-Two template classes — label every proposal as one or the other:
+For each candidate (from graph and/or corpus), pull a windowed sample of their work — enough to read consistency, not one video:
 
-**[script] — talking videos** (TALKING badge; transcript present). Usable only if:
-- **The hook is product-independent.** The first line would survive with a different product in the video (rule out product demos where the product IS the format — /ugcspy-rebrand's FLAG case).
-- **The brand beat is insertable/swappable** under /ugcspy-rebrand's iron rules: one beat, truthful for the user's brand, and — duration-aware — at or before the midpoint for >30s scripts.
-Route: `/ugcspy-rebrand <video-id> <user-brand>`.
-
-**[overlay] — non-talking videos** whose remixable asset is the ON-SCREEN TEXT sequence + format structure. The transcript tool CANNOT see overlay text (its hook field is caption-derived, not OCR) — so before ranking an overlay candidate, run `/ugcspy-decode <video-id>` to OCR the actual overlay narrative and confirm it's product-independent. If you shortlist one without decoding, label it **"unverified overlay candidate"** and do NOT quote an overlay line you haven't seen.
-Route: `/ugcspy-decode <video-id>` first; remix needs a chosen source creator afterwards (`/ugcspy-remix <target-id> <source-id>` takes TWO videos — don't emit it with one).
-
-**Either class** must also be **shootable** by a normal UGC creator (talking head, listicle voiceover, green-screen, b-roll montage). Be honest that cut-count/visual complexity is only verifiable via decode — flag, don't guess.
-
-### Known false-positive classes (flag on sight — all found in live runs)
-
-These pass the automated filters (English, talking, big views) but are never script templates:
-
-- **Demo-dependent scripts** — narration of physical actions ("slide the paper under the tab", "go to Settings, tap Apps", "hold the baby like this"). The words only mean something with the visuals; the script cannot stand alone. Common in life-hack / how-to niches.
-- **Song lyrics misread as talking** — a lyric bed clears the 8-word gate (Whisper hears words). Tell: repeated lines, rhyme, no addressee, no claim. No script.
-- **Clip accounts** — handles like *clips/*reels reposting third-party speech (podcast moments, expert anecdotes). The words belong to someone else; not a shootable creator script.
-- **AI-celebrity-voiced faceless accounts** — handle names a celebrity (e.g. <name>.motivat). The script may read fine, but check the account before trusting it; usually account-powered anyway.
-- **Photo-mode posts** — image carousels with a music bed. They surface as transcription failures ("no audio stream") or 0-word NON-TALKING. Not an error: route to [overlay]/decode. A meaningful slice of self-improvement niches posts this way.
-- **Story skits / meme punchlines** — narrative sketches and joke formats with no method beat; a punchline ending leaves no room before the final beat (rule 6).
-
-### Picking corpora that actually yield
-
-Niches dense in **single-voice advice monologues and listicles** (psychology explainers, "things to do alone", self-worth lists) yield script templates; niches dense in **physical demos** (life hacks, phone tricks, parenting hacks, cooking) yield demo-dependent flags — scan them last or for [overlay] only. For 100×-outlier hunting, prefer corpora where small accounts go viral on writing (story/advice formats) over celebrity-, clip-, and hack-dominated feeds.
-
-## Ranking rubric (apply in this order)
-
-1. **Hook portability** — survives a product swap cleanly.
-2. **Honest brand-beat fit** — a truthful insert exists under the rebrand rules (incl. the >30s midpoint cap).
-3. **Shootability** for a normal creator.
-4. **Evidence strength** — the 100× outlier ratio (bigger = stronger script proof), campaign codes, a proven UGC program behind it.
-5. **Views and freshness** — tiebreaks only.
-
-## Output format
-
-**1. Ranked template shortlist** (the user's quota of FIT videos, best first). **Every entry carries the SAME fields regardless of lane** — lanes 1 and 2 are not summaries; they get the full lane-3 treatment:
-
-```
-#N [lane 1|2|3] [script|overlay] @account — <views> — <duration>s — <language> — TALKING|NON-TALKING — <video_url>
-   Hook: "<spoken hook verbatim>"           (script — from transcript --json)
-   Overlay: "<opening overlay line>"        (overlay — ONLY after /ugcspy-decode; else "unverified overlay candidate")
-   Outlier: <views> vs prior <views> = <N>×        (lanes 2-3 — the script-not-account proof)
-   Original transcript: <full transcript text>
-   Remix (target brand): <the full remixed script per /ugcspy-rebrand's rules, insert highlighted, with its position %>
-   Why it fits: <one sentence tying format → the user's brand>
-   Next: /ugcspy-rebrand <id> <user-brand>  (script)  |  /ugcspy-decode <id>  (overlay)
+```bash
+ugcspy search @<candidate> --days 90 --limit 100 --json   # windowed sample (≤100 of last 90d, view-sorted)
+ugcspy transcript @<candidate> --top 3 --json             # does their style match the seed signature?
 ```
 
-[script] fits MUST include the executed remix, not just the routing command — the deliverable is scripts the user can shoot, not homework. FLAGGED entries (listed separately, not numbered into the quota) show the same metadata + original transcript + the flag reason instead of a remix.
+(This is a sample, not the literal full catalog — it's view-sorted so it over-represents their hits. Judge consistency as "of the sampled videos, how many clear a real-reach bar," not "every video they ever posted.")
 
-When the deliverable is a dashboard, use one uniform per-video section for ALL lanes — link, views, duration, language, talking badge, hook, original transcript, remix (or flag verdict) — identical to the lane-3 / creator-dashboard format.
+Rank by, in this order, with concrete thresholds so two runs agree:
+1. **Signature match (gate, then rank).** A candidate must match on the HARD axis — talking vs non-talking — or it's out (a non-talking creator can't be a [script] source for a talking seed). Among those, score the soft axes: structure match, length-band overlap (their median duration within ~±50% of the seed band), tone match. Topic is NOT scored. A calm monologue creator matches a calm monologue seed on a different topic.
+2. **Consistency.** Of the sampled videos, what fraction clear a real-reach bar (default ≥500K, or ~the seeds' own median if lower)? **STRONG ≥ 60%, MODERATE 20–60%, one-hit < 20%.** Higher is better — a reliably-performing creator is the goal. (This is the inverse of the old 100× rule — see below.)
+3. **Reach.** Median sampled views in roughly the seeds' band (view floor is a soft signal, not a hard gate).
+4. **Graph adjacency** — `seedsFollowing` as a tiebreak only, never primary.
+5. **Shootability** — the brand's own creator could plausibly make this (talking head, listicle voiceover, green-screen — not a 50-cut edit or a stadium shoot).
 
-**2. Accounts to watch** — recurring creators from `discover.creators[]` worth copying as ACCOUNTS (handle, videos-in-corpus, top views, lane, one-line rationale).
+Language: a candidate counts only if its sampled videos are predominantly in the target language (default English — **≥ ~70% English** by the transcript `language` field). Mixed/other-language creators are flagged, not ranked.
 
-**3. The honest read** — one paragraph: which lane looks strongest for this brand right now, what you scanned and rejected (no silent dropping — if lane 1 was all sports clips today, say so), and any INCONCLUSIVE results: empty corpora may be relay failures not "no content" (a 0-video discover on an active niche is suspect — say so and suggest a retry), transcript scan caps reached, partial-platform search failures, batch transcription errors. Distinguish "scanned and rejected" from "failed to scan" everywhere.
+### The 100× outlier rule is DEMOTED in creator-centric mode
+
+The 100× rule ("a video must beat the creator's prior by 100×") answered "did the SCRIPT outperform the ACCOUNT?" — the right question when hunting a one-off video to remix. It is the **wrong** question for picking a creator to copy long-term: a creator whose videos *consistently* do well — exactly what 100× *rejected* as "account-powered" — is precisely who you want, because consistency means their format reliably works.
+
+So: **100× is NOT a gate here.** Use **consistency + signature-fit + reach** instead. Keep 100× only as an optional ANNOTATION on a sample link ("this one was a breakout: 3.9M vs their typical 12K = 325×") — useful color, never a filter.
+
+---
+
+## Path B — "I don't know who to copy" → build the seed set
+
+List candidate creators for the user to choose from, **grouped by FORMAT/STYLE** (the same axes A1 profiles — so the menu and the matcher speak one language). Then the chosen creators become the seed set and you run Path A.
+
+1. Discover broadly in the brand's space (a few `ugcspy discover "<niche>" --json` over phrases adjacent to what the brand does).
+2. Profile the recurring creators (light: one roster pull + one transcript each to get their signature).
+3. **Present them grouped by style**, each group a format archetype, each creator with 2–3 sample **clickable** video links + their typical reach:
+
+   ```
+   ── Calm faceless monologues (psychology / advice) ──
+     @creator_a — typical 200K, 30–60s talking head
+        https://tiktok.com/@creator_a/video/...   "It has to be perfect, so I'll do it later..."
+        https://tiktok.com/@creator_a/video/...
+     @creator_b — ...
+   ── Listicle voiceovers (self-improvement) ──
+     @creator_c — ...
+   ── Story-driven / green-screen ──
+     ...
+   ```
+
+4. The user picks the creators (and/or whole groups) that fit. Those become the seed set → **run Path A** to expand around them.
+
+If the user is happy with just the menu (doesn't want expansion), the grouped list IS a usable deliverable on its own — but offer Path A expansion.
+
+---
+
+## Output format — RANKED CREATORS (not ranked videos)
+
+**1. Ranked creators to copy** (the user's quota, best first). Each entry:
+
+```
+#N @creator — <typical reach band> — <signature: talking|overlay · structure · length · tone>
+   Why it fits: <one sentence: which seed-signature axes it matches>
+   Source: follow-graph (seedsFollowing N) | corpus "<niche>" | both
+   Sample videos (clickable):
+     <video_url>   "<hook or opening overlay line>"   [breakout: <ratio> if notable]
+     <video_url>   "<hook>"
+     <video_url>   "<hook>"
+   Copy path: /ugcspy-rebrand <video-id> <user-brand>   (per sample, for the talking ones)
+```
+
+EVERY listed video carries its **clickable TikTok link** — fits, samples, wildcards, all of them. (This was the gap in the old output.)
+
+**2. Wildcards — off-archetype but big** (clearly separated, optional inspiration). Creators NOT matching the seed signature but pulling large numbers in an adjacent space. One line each + reason + **link**, so the user can glance and ignore or not. Never mixed into the ranked seed-matches.
+
+```
+~ @offbrand_creator — 6M, but story-skit format (off your monologue signature) — https://tiktok.com/...
+```
+
+**3. The honest read** — one paragraph: how coherent the seed signature was, how the follow-graph did (hit-rate, thin/empty is normal), whether ranking came mostly from graph or corpus, and what you scanned-and-rejected vs failed-to-scan. Distinguish "no similar creators found" from "the follow-graph was blocked" — never report a tooling failure as an empty result. A 0-result `discover` on an active niche is suspect (likely a relay blip) — say so and retry.
+
+## Quota semantics — "top N" means N creators that FIT the signature
+
+Default quota is **5 fitting creators**. A scanned candidate that fails the signature match (wrong format, wrong tone, inconsistent, off-language) is FLAGGED and does NOT count — keep scanning (more graph seeds, more corpora, the next wave of candidate roster-pulls) until you have N. Tell the user the running score ("3/5 fitting creators, scanned 9").
+
+**Hard budget so the hunt can't run away** (the candidate pool can be sparse, and each candidate costs a roster pull + ~3 transcriptions). Default ceilings, all user-overridable:
+- **≤ 8 corpus scans** (`discover` / `search --mode keyword`),
+- **≤ 30 candidate creators verified** (roster pull + transcripts),
+- **≤ 60 transcription calls** total.
+
+When you hit the quota → stop and report. When you hit a budget ceiling before the quota → **STOP and report the shortfall** with what you found, what's left to try, and the cost of continuing — don't silently grind past it. "Sources exhausted" means: the format-matched corpora are returning only already-seen or non-matching creators. A shortfall with a clear reason beats an unbounded loop or a padded list.
 
 ## Cost expectations (tell the user upfront)
 
-- Phase A: ~1-2 min per discover scan (3-4 scans total).
-- Phase C: ONE brand deep-search ~5-8 min (never more without approval); transcripts ~10-40s per uncached video, batched, cached forever; each overlay decode ~30s.
-- Filling a quota of N FIT videos usually takes several transcription waves (unfit candidates don't count) — report the running fits/scanned score between waves.
-- Outlier verification: one ~10-20s account pull per surviving candidate (run last).
+- Seed profiling (A1): one roster pull + one transcript per seed, ~30–60s each.
+- Graph pass (A2): `ugcspy similar` is one fast call (~10–30s); often thin.
+- Corpus pass (A3): ~1–2 min per `discover` scan.
+- Candidate verification (A4): one roster pull + ~3 transcripts per candidate you rank — the dominant cost. Verify candidates in priority order; don't pull every corpus author.
+- A full `ugcspy search` on a very active creator can run several minutes — pull the shortlist, not everyone.
 
 ## What NOT to do
 
-- Don't propose non-talking videos as SCRIPT templates — there are no spoken words for /ugcspy-rebrand to remix. Propose them as [overlay] candidates routed through /ugcspy-decode, or not at all.
-- Don't quote overlay lines you haven't decoded — the transcript tool can't see on-screen text.
-- Don't treat the brand-candidates table as truth — it's structural evidence; you make the brand-vs-topic call.
-- Don't run `ugcspy trending` AND `discover --trending` in the same session — one rotating-feed pull, used for both.
-- Don't deep-search more than one candidate brand without explicit user approval.
+- Don't rank on raw virality or the follow-graph score — rank on **signature fit + consistency + reach**.
+- Don't treat the follow-graph as authoritative — it's a thin net (~60% of following lists are blocked); pair it with corpus matching and report the hit-rate.
+- Don't filter candidates by TOPIC — match FORMAT and STYLE; the brand beat re-aims topic.
+- Don't apply the 100× rule as a gate here — consistency is a virtue for a long-term creator, not a disqualifier. 100× is an optional breakout annotation only.
+- Don't list a video without its clickable link — every video, every section.
+- Don't mix off-archetype wildcards into the ranked seed-matches — separate section, clearly labeled.
+- Don't propose non-talking creators as [script] sources — they're [overlay]/decode creators; label the class.
+- Don't report a relay failure or blocked graph as "no creators found" — distinguish scanned-and-rejected from failed-to-scan.

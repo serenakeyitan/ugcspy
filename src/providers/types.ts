@@ -1,4 +1,4 @@
-import type { Platform, RawVideo, TranscriptDoc } from "../types.ts";
+import type { Platform, RawVideo, SimilarResult, TranscriptDoc } from "../types.ts";
 
 export interface DataProvider {
   readonly name: string;
@@ -17,6 +17,12 @@ export interface DataProvider {
   // material for trend-riding template discovery. Optional — needs a
   // trending-capable source.
   fetchTrendingVideos?(region: string, days: number): Promise<RawVideo[]>;
+  // Follow-graph similarity: given seed creators, return the creators most of
+  // them follow (the creator-centric "find more like these" pass). The result
+  // is often thin or empty — many following lists are private/blocked — so the
+  // caller treats that as a signal to fall back to corpus matching, not a fail.
+  // Optional — needs a following-graph-capable source.
+  fetchSimilarCreators?(seeds: string[]): Promise<SimilarResult>;
   // Download ONE video's audio and transcribe it (hook + spoken narrative +
   // talking/non-talking signal). Expensive (~10-40s/video) — callers cache the
   // result in the videos table. Optional — needs an audio pipeline (whisper).

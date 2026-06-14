@@ -1,7 +1,15 @@
 import { fileURLToPath } from "node:url";
 import { platform } from "node:os";
 import { dirname, resolve } from "node:path";
-import type { Platform, RawVideo, TranscriptDoc, TranscriptSegment } from "../types.ts";
+import type {
+  Platform,
+  RawVideo,
+  SeedResult,
+  SimilarCreator,
+  SimilarResult,
+  TranscriptDoc,
+  TranscriptSegment,
+} from "../types.ts";
 import { type DataProvider, ProviderError } from "./types.ts";
 import { venvExists, venvPython } from "../lib/venv.ts";
 
@@ -72,6 +80,17 @@ export class TikTokOssProvider implements DataProvider {
   // relay's rotating feed, deduped bridge-side. Pure HTTP, no venv extras.
   async fetchTrendingVideos(region: string, days: number): Promise<RawVideo[]> {
     return this.runBridge({ mode: "trending", region, days });
+  }
+
+  // Follow-graph similarity (the creator-centric "find more like these" pass):
+  // walk who the seed creators FOLLOW and rank the result by how many seeds
+  // follow each candidate. Pure HTTP, no venv. NOTE: tikwm's /user/following is
+  // private/blocked for a large fraction of creators (~60% in measurement), so
+  // a thin or empty result is normal, not an error — the caller pairs this with
+  // corpus style-matching and reports the graph hit-rate.
+  async fetchSimilarCreators(seeds: string[]): Promise<SimilarResult> {
+    const raw = await this.spawnBridge({ mode: "snowball", seeds });
+    return parseSimilarOutput(raw.exit, raw.stdout, raw.stderr);
   }
 
   // Transcribe one video's audio via the bridge's transcript mode (whisper +
@@ -150,7 +169,7 @@ export class TikTokOssProvider implements DataProvider {
 // Exported for tests.
 export function resolveBridgePython(hasVenv: boolean, mode: unknown): string {
   if (hasVenv) return venvPython();
-  if (mode === "keyword" || mode === "trending") {
+  if (mode === "keyword" || mode === "trending" || mode === "snowball") {
     return platform() === "win32" ? "python" : "python3"; // stdlib-only paths; resolved on PATH
   }
   throw new ProviderError(
@@ -218,6 +237,54 @@ export function parseBridgeOutput(exit: number, stdout: string, stderr: string):
     if (author) out.author_handle = author;
     return out;
   });
+}
+
+// Parse the snowball bridge's {creators, seedResults} envelope. Same exit/JSON
+// guards as parseBridgeOutput, and every element is hardened across the
+// untrusted JSON boundary: rows missing `handle` or with a non-numeric count are
+// dropped, not crashed on. EMPTY `creators` is a VALID result (most following
+// lists are private/blocked) — never an error; that's exactly why seedResults
+// exists, so the caller can tell a blocked graph from one with no overlap.
+export function parseSimilarOutput(exit: number, stdout: string, stderr: string): SimilarResult {
+  const name = "tiktok-oss";
+  if (exit !== 0) {
+    const errBody =
+      parseErrorBody(stdout) ?? (stderr.trim() || `bridge exited ${exit} with no output`);
+    throw new ProviderError(`tiktok-oss: ${errBody}`, name);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw new ProviderError(
+      `tiktok-oss: bridge returned non-JSON output: ${stdout.slice(0, 300)}`,
+      name,
+    );
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new ProviderError(
+      `tiktok-oss: bridge returned non-envelope: ${stdout.slice(0, 300)}`,
+      name,
+    );
+  }
+  const env = parsed as { creators?: unknown; seedResults?: unknown };
+  const creators: SimilarCreator[] = [];
+  if (Array.isArray(env.creators)) {
+    for (const row of env.creators as Array<{ handle?: unknown; seedsFollowing?: unknown }>) {
+      const handle = typeof row?.handle === "string" ? row.handle.trim() : "";
+      const n = typeof row?.seedsFollowing === "number" ? row.seedsFollowing : NaN;
+      if (handle && Number.isFinite(n)) creators.push({ handle, seedsFollowing: n });
+    }
+  }
+  const seedResults: SeedResult[] = [];
+  if (Array.isArray(env.seedResults)) {
+    for (const row of env.seedResults as Array<{ handle?: unknown; status?: unknown }>) {
+      const handle = typeof row?.handle === "string" ? row.handle.trim() : "";
+      const status = typeof row?.status === "number" ? row.status : NaN;
+      if (handle && Number.isFinite(status)) seedResults.push({ handle, status });
+    }
+  }
+  return { creators, seedResults };
 }
 
 // Extract the @handle from a TikTok video URL. Returns "" when the URL has no

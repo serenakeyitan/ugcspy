@@ -6,6 +6,7 @@ import { runInstallDeps } from "./commands/install-deps.ts";
 import { normalizeSearchOptions, runSearch } from "./commands/search.ts";
 import { runTranscript } from "./commands/transcript.ts";
 import { runDiscover, runTrending } from "./commands/discover.ts";
+import { runSimilar } from "./commands/similar.ts";
 import { runWatchAdd, runWatchList, runWatchRemove } from "./commands/watch.ts";
 import { runDaemon } from "./commands/daemon.ts";
 import { runRender } from "./commands/render.ts";
@@ -108,6 +109,16 @@ program
       json: Boolean(raw.json),
       source: raw.trending ? "trending" : "keyword",
     });
+  });
+
+program
+  .command("similar <seeds...>")
+  .description(
+    "Find creators similar to a seed set by walking the follow graph (the creator-centric 'find more like these' pass). Pass 1+ creator handles or TikTok URLs. Ranks candidates by how many seeds follow them, and reports per-seed readability. NOTE: many TikTok following lists are private/blocked, so the result is often thin — pair with `discover` for full coverage.",
+  )
+  .option("--json", "emit JSON instead of a table")
+  .action(async (seeds: string[], raw) => {
+    await runSimilar(seeds, { json: Boolean(raw.json) });
   });
 
 program
