@@ -68,9 +68,23 @@ export async function runWatchAdd(
   // duplicate watch (which would double every Slack alert forever). A
   // DIFFERENT webhook for the same handle is a legit second channel.
   const existing = db
-    .prepare(`SELECT id FROM watches WHERE competitor_id = ? AND slack_webhook_url = ?`)
-    .get(competitor.id, webhook) as { id: number } | undefined;
+    .prepare(
+      `SELECT id, threshold_multiplier, view_threshold FROM watches WHERE competitor_id = ? AND slack_webhook_url = ?`,
+    )
+    .get(competitor.id, webhook) as
+    | { id: number; threshold_multiplier: number; view_threshold: number | null }
+    | undefined;
   if (existing) {
+    // If the trigger CHANGED (mode flip or a different threshold), clear the
+    // watch's fired-alert claims — otherwise a video that already alerted under
+    // the OLD trigger would be permanently suppressed under the new one, so the
+    // re-tuned watch would never fire on it. Same trigger → keep dedup intact.
+    const triggerChanged =
+      existing.view_threshold !== viewThreshold ||
+      existing.threshold_multiplier !== opts.threshold;
+    if (triggerChanged) {
+      db.prepare(`DELETE FROM alerts_fired WHERE watch_id = ?`).run(existing.id);
+    }
     // Switching an existing watch to absolute mode flips it active immediately
     // (a fixed milestone needs no warmup); switching back to relative re-enters
     // warmup so the cold-start gate re-applies. Same-mode re-adds keep state.

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { BreakoutCandidate } from "../src/lib/breakout.ts";
 import {
+  escapeMrkdwn,
   formatAlert,
   formatThresholdReminder,
   postBreakoutAlert,
@@ -70,23 +71,20 @@ describe("formatThresholdReminder (absolute-threshold reminder with remix CTA)",
     expect(text).toContain("BeFreed");
   });
 
-  test("without a remix brand, the CTA carries a <your-brand> placeholder", () => {
+  test("without a remix brand, the CTA carries a [your-brand] placeholder", () => {
     const text = formatThresholdReminder(competitor, crossing, null);
-    expect(text).toContain("/ugcspy-rebrand 1 <your-brand>");
+    expect(text).toContain("/ugcspy-rebrand 1 [your-brand]");
   });
 
-  test("sanitizes mrkdwn-injection chars in the remix brand (no <!channel>, no backtick break-out)", () => {
-    const text = formatThresholdReminder(competitor, crossing, "<!channel> Be`Freed*");
+  test("escapes mrkdwn in the remix brand so a mention/link can't form (< > & neutralized)", () => {
+    const text = formatThresholdReminder(competitor, crossing, "<!channel> Be`Freed");
+    // The mention syntax requires a real `<` — escaped to &lt; it's inert text.
     expect(text).not.toContain("<!channel>");
+    expect(text).toContain("&lt;!channel&gt;"); // rendered as literal, not a broadcast
     expect(text).not.toContain("`Be"); // backtick can't break out of the inline-code CTA
-    // the cleaned brand still appears
-    expect(text).toContain("/ugcspy-rebrand 1 !channel BeFreed");
   });
 
-  test("the POSTed payload — BOTH the text lead AND the context footer — is sanitized", async () => {
-    // Regression: the context block (blocks[1]) interpolated the brand RAW, so a
-    // malicious brand's <!channel> survived in the footer even though the lead was
-    // clean. Capture the actual POST body and assert the WHOLE payload is inert.
+  test("the POSTed payload — both blocks — is escaped (no live <!channel>)", async () => {
     const orig = globalThis.fetch;
     let captured = "";
     globalThis.fetch = (async (_url: string, init: { body: string }) => {
@@ -94,23 +92,47 @@ describe("formatThresholdReminder (absolute-threshold reminder with remix CTA)",
       return new Response("ok", { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      await postThresholdReminder(
-        "http://example.test/hook",
-        competitor,
-        crossing,
-        "<!channel> Be`Freed",
-      );
+      await postThresholdReminder("http://example.test/hook", competitor, crossing, "<!channel> Be`Freed");
     } finally {
       globalThis.fetch = orig;
     }
     const payload = JSON.parse(captured);
-    const whole = JSON.stringify(payload);
-    // No live channel-broadcast mention anywhere in the payload (lead OR footer).
-    expect(whole).not.toContain("<!channel>");
-    // The context footer specifically carries the cleaned brand.
+    expect(JSON.stringify(payload)).not.toContain("<!channel>"); // nowhere in lead OR footer
     const footer = payload.blocks[1].elements[0].text as string;
-    expect(footer).toContain("remix → *!channel BeFreed*");
-    expect(footer).not.toContain("<!channel>");
+    expect(footer).toContain("&lt;!channel&gt;");
     expect(footer).not.toContain("`");
+  });
+});
+
+describe("escapeMrkdwn — every untrusted field reaching Slack is neutralized", () => {
+  // codex follow-up: not just the brand — a malicious creator HANDLE or video
+  // caption (hook_text) also flows into the mrkdwn. Both alert formatters must
+  // escape them so a handle like "<!channel>" or a caption with <url|text> can't
+  // inject a broadcast/phishing link.
+  const evilVideo: VideoRecord = {
+    ...video,
+    hook_text: "<!channel> click <https://evil.test|here> & win",
+    format_tag: "<!here>",
+    video_url: "https://www.tiktok.com/@x/video/1",
+  };
+  const evilCompetitor: Competitor = { id: 1, handle: "<!channel>", platform: "tiktok", added_at: "" };
+
+  test("escapeMrkdwn replaces & < > with entities", () => {
+    expect(escapeMrkdwn("a & b < c > d")).toBe("a &amp; b &lt; c &gt; d");
+  });
+
+  test("breakout alert escapes a malicious handle, caption, and format tag", () => {
+    const t = formatAlert(evilCompetitor, { video: evilVideo, ratio: 3, threshold: 100 });
+    expect(t).not.toContain("<!channel>");
+    expect(t).not.toContain("<!here>");
+    expect(t).not.toContain("<https://evil.test|here>"); // pipe-link can't form without raw <
+    expect(t).toContain("&lt;!channel&gt;");
+  });
+
+  test("threshold reminder escapes a malicious handle and caption", () => {
+    const t = formatThresholdReminder(evilCompetitor, { video: evilVideo, ratio: 2, threshold: 100 }, "BeFreed");
+    expect(t).not.toContain("<!channel>");
+    expect(t).not.toContain("<https://evil.test|here>");
+    expect(t).toContain("&lt;!channel&gt;");
   });
 });
