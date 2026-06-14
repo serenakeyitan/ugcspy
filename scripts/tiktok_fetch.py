@@ -2171,7 +2171,10 @@ def _transcript_fetch_audio(url: str) -> dict:
 
     if not url.startswith(("http://", "https://")):
         return {"error": "transcript url must be http(s)", "video_url": url}
-    tmpdir = tempfile.mkdtemp(prefix="ugcspy-transcript-")
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="ugcspy-transcript-")
+    except Exception as e:  # noqa: BLE001 — even mkdtemp must not raise out of a pool worker
+        return {"error": f"could not create temp dir: {e}", "video_url": url}
     try:
         audio_path = _transcript_download_audio(url, tmpdir)
         return {"tmpdir": tmpdir, "audio_path": audio_path, "url": url}
@@ -2254,6 +2257,13 @@ def run_transcript(urls: list[str], batch: bool) -> None:
     # single-threaded (only the downloads run concurrently). Download concurrency
     # is deliberately small (default 3): yt-dlp hits www.tiktok.com and an
     # over-parallel pool can trip throttling. Override with UGCSPY_PREFETCH_WORKERS.
+    #
+    # SLIDING WINDOW: we do NOT submit all downloads up front — that would let
+    # every later download finish and hold its tmpdir on disk while early videos
+    # transcribe (O(N) disk, and the over-parallel burst can throttle). Instead we
+    # keep at most `window` downloads in flight (workers + a little slack), pulling
+    # the next submission only as the consumer advances. Disk stays O(window).
+    from collections import deque
     from concurrent.futures import ThreadPoolExecutor
 
     try:
@@ -2261,16 +2271,26 @@ def run_transcript(urls: list[str], batch: bool) -> None:
         prefetch_workers = max(1, min(prefetch_workers, 6))
     except (ValueError, TypeError):
         prefetch_workers = 3
+    window = prefetch_workers + 2  # in-flight cap: workers busy + a small ready buffer
 
     docs = []
     with ThreadPoolExecutor(max_workers=prefetch_workers) as pool:
-        # Submit ALL downloads up front; they run as slots free up. Futures are
-        # ordered to match `urls`, so consuming them in order preserves output order.
-        futures = [pool.submit(_transcript_fetch_audio, url) for url in urls]
-        for i, fut in enumerate(futures):
-            fetched = fut.result()  # blocks for THIS video's download (already racing ahead)
+        pending = deque()  # futures, in input order
+        next_to_submit = 0
+        # Prime the window.
+        while next_to_submit < len(urls) and len(pending) < window:
+            pending.append(pool.submit(_transcript_fetch_audio, urls[next_to_submit]))
+            next_to_submit += 1
+        i = 0
+        while pending:
+            fetched = pending.popleft().result()  # blocks for the NEXT video in order
+            # A consumed slot freed up — submit one more to keep the window full.
+            if next_to_submit < len(urls):
+                pending.append(pool.submit(_transcript_fetch_audio, urls[next_to_submit]))
+                next_to_submit += 1
             docs.append(_transcribe_fetched(fetched, model, model_name, ffmpeg_exe))
-            print(f"transcript {i + 1}/{len(urls)} done", file=sys.stderr, flush=True)
+            i += 1
+            print(f"transcript {i}/{len(urls)} done", file=sys.stderr, flush=True)
 
     if not batch:
         doc = docs[0]
