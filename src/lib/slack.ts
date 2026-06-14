@@ -17,13 +17,14 @@ export async function postBreakoutAlert(
   const blocks = [
     {
       type: "section",
-      text: { type: "mrkdwn", text },
+      text: { type: "mrkdwn", text, verbatim: true },
     },
     {
       type: "context",
       elements: [
         {
           type: "mrkdwn",
+          verbatim: true,
           text: `views: *${video.view_count.toLocaleString()}* · ratio: *${ratio.toFixed(2)}x* · threshold: *${Math.round(threshold).toLocaleString()}*`,
         },
       ],
@@ -45,14 +46,16 @@ export async function postBreakoutAlert(
   }
 }
 
-// Slack mrkdwn escape, per Slack's documented rules: replace &, <, > with their
-// HTML entities. This is the COMPLETE neutralizer — every Slack injection vector
-// (links <url|text>, mentions <@U>, channel broadcasts <!channel>/<!here>, and
-// bare @everyone/@here only fire as mentions when wrapped or auto-linked) loses
-// its meaning once `<` and `&` can't form. Apply to EVERY untrusted string that
-// reaches a Slack payload: the creator's handle, the video's hook/caption, the
-// format tag, and the user-supplied brand — all are attacker-influenceable.
-// https://docs.slack.dev/messaging/formatting-message-text/
+// Slack mrkdwn escape (&, <, > → entities). This neutralizes the EXPLICIT
+// injection forms — links <url|text>, mentions <@U>, channel broadcasts
+// <!channel>/<!here> — which all require a literal `<`. It does NOT by itself
+// stop bare `@here`/`@everyone` or bare-URL auto-linking; those are killed
+// structurally by `verbatim: true` on every mrkdwn text object (the primary
+// defense — see the blocks below). Together they're defense-in-depth: verbatim
+// disables auto-parsing, escapeMrkdwn keeps the explicit forms rendering as
+// clean literal text. Apply to every untrusted string reaching a payload: the
+// creator handle, the video hook/caption, the format tag, the brand.
+// https://docs.slack.dev/reference/block-kit/composition-objects/text-object/
 export function escapeMrkdwn(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -68,7 +71,7 @@ export function formatAlert(competitor: Competitor, candidate: BreakoutCandidate
   const { video, ratio } = candidate;
   const hookSnippet = video.hook_text ? `\n> ${escapeMrkdwn(video.hook_text.slice(0, 140))}` : "";
   const tag = video.format_tag ? ` · _${escapeMrkdwn(video.format_tag)}_` : "";
-  return `🚨 *${escapeMrkdwn(competitor.handle)}* breakout on ${competitor.platform} — *${ratio.toFixed(1)}x* baseline${tag}\n${escapeMrkdwn(video.video_url)}${hookSnippet}`;
+  return `🚨 *${escapeMrkdwn(competitor.handle)}* breakout on ${escapeMrkdwn(competitor.platform)} — *${ratio.toFixed(1)}x* baseline${tag}\n${escapeMrkdwn(video.video_url)}${hookSnippet}`;
 }
 
 // The absolute view-threshold REMINDER: a tracked video crossed the creator's
@@ -107,12 +110,13 @@ export async function postThresholdReminder(
   // clean. (Regression: this path had no test; only the `text` lead was covered.)
   const safeBrand = remixBrand ? sanitizeBrand(remixBrand) : "";
   const blocks = [
-    { type: "section", text: { type: "mrkdwn", text } },
+    { type: "section", text: { type: "mrkdwn", text, verbatim: true } },
     {
       type: "context",
       elements: [
         {
           type: "mrkdwn",
+          verbatim: true,
           text: `views: *${video.view_count.toLocaleString()}* · crossed: *${Math.round(candidate.threshold).toLocaleString()}*${safeBrand ? ` · remix → *${safeBrand}*` : ""}`,
         },
       ],

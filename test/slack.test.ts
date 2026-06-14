@@ -101,6 +101,11 @@ describe("formatThresholdReminder (absolute-threshold reminder with remix CTA)",
     const footer = payload.blocks[1].elements[0].text as string;
     expect(footer).toContain("&lt;!channel&gt;");
     expect(footer).not.toContain("`");
+    // Every mrkdwn object must set verbatim:true — the STRUCTURAL fix that stops
+    // Slack auto-parsing bare @here/@everyone and bare URLs (which escaping alone
+    // doesn't catch). Section + context block both.
+    expect((payload.blocks[0].text as { verbatim: boolean }).verbatim).toBe(true);
+    expect((payload.blocks[1].elements[0] as { verbatim: boolean }).verbatim).toBe(true);
   });
 });
 

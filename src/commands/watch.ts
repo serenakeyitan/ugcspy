@@ -78,11 +78,15 @@ export async function runWatchAdd(
     // If the trigger CHANGED (mode flip or a different threshold), clear the
     // watch's fired-alert claims — otherwise a video that already alerted under
     // the OLD trigger would be permanently suppressed under the new one, so the
-    // re-tuned watch would never fire on it. Same trigger → keep dedup intact.
-    const triggerChanged =
-      existing.view_threshold !== viewThreshold ||
-      existing.threshold_multiplier !== opts.threshold;
-    if (triggerChanged) {
+    // re-tuned watch would never fire on it. Compare only the ACTIVE trigger: a
+    // mode flip always changes it; within absolute mode only view_threshold
+    // matters (the relative multiplier is dormant), and vice-versa — so we don't
+    // needlessly clear dedup (→ duplicate reminders) on an irrelevant change.
+    const modeChanged = existing.view_threshold == null !== (viewThreshold == null);
+    const activeTriggerChanged = absoluteMode
+      ? existing.view_threshold !== viewThreshold
+      : existing.threshold_multiplier !== opts.threshold;
+    if (modeChanged || activeTriggerChanged) {
       db.prepare(`DELETE FROM alerts_fired WHERE watch_id = ?`).run(existing.id);
     }
     // Switching an existing watch to absolute mode flips it active immediately
