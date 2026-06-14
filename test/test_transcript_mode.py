@@ -403,3 +403,49 @@ def test_dispatch_requires_url(capsys, monkeypatch):
     with pytest.raises(SystemExit):
         tf.main()
     assert "missing url" in json.loads(capsys.readouterr().out)["error"]
+
+
+# ── prefetch pipeline: downloads overlap transcription, output stays in order ──
+
+
+def test_prefetch_preserves_input_order_even_when_downloads_finish_out_of_order(
+    capsys, monkeypatch
+):
+    """The batch loop prefetches audio downloads concurrently while transcribing
+    serially in input order. Even if a LATER url's download finishes FIRST, the
+    output array must stay aligned to the input order and each doc paired with
+    its own url — that's what makes the optimization byte-identical to the old
+    serial loop. We force reverse-order download completion to prove it."""
+    import shutil
+    import time
+
+    _install_fake_whisper(monkeypatch)
+    monkeypatch.setattr(shutil, "which", lambda _: "/usr/bin/ffmpeg")
+
+    urls = [f"https://www.tiktok.com/@x/video/{i}" for i in range(5)]
+
+    # Fetch stage: later urls "download" faster, so completion order is reversed
+    # vs submission order. Returns a marker dict carrying its url; no real I/O.
+    def fake_fetch(url):
+        idx = int(url.rsplit("/", 1)[1])
+        time.sleep(0.02 * (len(urls) - idx))  # url 0 slowest, url 4 fastest
+        return {"tmpdir": f"/tmp/fake-{idx}", "audio_path": f"/tmp/fake-{idx}/a.mp3", "url": url}
+
+    # Transcribe stage: echo the url into the doc so we can check pairing; the
+    # real cleanup is skipped (fake tmpdir).
+    def fake_transcribe(fetched, _model, _name, _ffmpeg):
+        if "error" in fetched:
+            return {"error": fetched["error"], "video_url": fetched.get("video_url", "")}
+        return {"video_url": fetched["url"], "transcript": f"tx for {fetched['url']}"}
+
+    monkeypatch.setattr(tf, "_transcript_fetch_audio", fake_fetch)
+    monkeypatch.setattr(tf, "_transcribe_fetched", fake_transcribe)
+
+    tf.run_transcript(urls, batch=True)
+    out = json.loads(capsys.readouterr().out)
+
+    # Output order matches INPUT order (not download-completion order)...
+    assert [d["video_url"] for d in out] == urls
+    # ...and each doc carries ITS OWN url's transcript (no cross-pairing).
+    for d in out:
+        assert d["transcript"] == f"tx for {d['video_url']}"

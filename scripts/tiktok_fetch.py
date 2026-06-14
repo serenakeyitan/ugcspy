@@ -2162,10 +2162,11 @@ def _load_audio_pcm(path: str, ffmpeg_exe: str):
     return np.frombuffer(proc.stdout, np.int16).flatten().astype(np.float32) / 32768.0
 
 
-def _transcribe_one(url: str, model, model_name: str, ffmpeg_exe: str) -> dict:
-    """Download + transcribe ONE url; returns a doc dict, or an {"error": ...}
-    envelope (never raises) so one bad video can't sink a batch."""
-    import shutil
+def _transcript_fetch_audio(url: str) -> dict:
+    """Download stage (I/O-bound, safe to run in a thread pool): fetch one url's
+    audio into its own tmpdir. Returns {"tmpdir","audio_path","url"} on success
+    or {"error","video_url":url} — NEVER raises, so a bad video can't sink the
+    prefetch pool. The caller owns cleanup of tmpdir."""
     import tempfile
 
     if not url.startswith(("http://", "https://")):
@@ -2173,7 +2174,30 @@ def _transcribe_one(url: str, model, model_name: str, ffmpeg_exe: str) -> dict:
     tmpdir = tempfile.mkdtemp(prefix="ugcspy-transcript-")
     try:
         audio_path = _transcript_download_audio(url, tmpdir)
-        audio = _load_audio_pcm(audio_path, ffmpeg_exe)
+        return {"tmpdir": tmpdir, "audio_path": audio_path, "url": url}
+    except RuntimeError as e:
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return {"error": str(e), "video_url": url}
+    except Exception as e:  # noqa: BLE001 — surface as data, not a traceback
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return {"error": f"transcription failed: {type(e).__name__}: {e}", "video_url": url}
+
+
+def _transcribe_fetched(fetched: dict, model, model_name: str, ffmpeg_exe: str) -> dict:
+    """Transcribe stage (CPU-bound, runs SERIALLY on the main thread so whisper
+    is never touched concurrently and output stays deterministic). Takes the
+    pre-fetched audio from _transcript_fetch_audio; cleans up its tmpdir."""
+    import shutil
+
+    if "error" in fetched:
+        return {"error": fetched["error"], "video_url": fetched.get("video_url", "")}
+    url = fetched["url"]
+    try:
+        audio = _load_audio_pcm(fetched["audio_path"], ffmpeg_exe)
         # fp16 warnings on CPU are harmless; whisper falls back to fp32 itself.
         result = model.transcribe(audio)
         doc = _transcript_normalize(result if isinstance(result, dict) else {})
@@ -2185,7 +2209,16 @@ def _transcribe_one(url: str, model, model_name: str, ffmpeg_exe: str) -> dict:
     except Exception as e:  # noqa: BLE001 — one video's failure must surface as data, not a traceback
         return {"error": f"transcription failed: {type(e).__name__}: {e}", "video_url": url}
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        shutil.rmtree(fetched["tmpdir"], ignore_errors=True)
+
+
+def _transcribe_one(url: str, model, model_name: str, ffmpeg_exe: str) -> dict:
+    """Download + transcribe ONE url (no prefetch). Kept for the single-url path
+    and any direct caller; the batch loop uses the split fetch/transcribe stages
+    to overlap downloads with transcription. Returns a doc or {"error": ...}."""
+    return _transcribe_fetched(
+        _transcript_fetch_audio(url), model, model_name, ffmpeg_exe
+    )
 
 
 def run_transcript(urls: list[str], batch: bool) -> None:
@@ -2213,10 +2246,31 @@ def run_transcript(urls: list[str], batch: bool) -> None:
     except Exception as e:  # noqa: BLE001
         fail(f"whisper model '{model_name}' failed to load: {type(e).__name__}: {e}")
 
+    # Pipeline: prefetch audio downloads (I/O-bound) in a small thread pool while
+    # the main thread transcribes (CPU-bound) STRICTLY IN INPUT ORDER. The output
+    # array is byte-identical to the old serial loop — same urls, same order, same
+    # whisper output — it just overlaps each download with the previous video's
+    # transcription instead of waiting for both back-to-back. Whisper itself stays
+    # single-threaded (only the downloads run concurrently). Download concurrency
+    # is deliberately small (default 3): yt-dlp hits www.tiktok.com and an
+    # over-parallel pool can trip throttling. Override with UGCSPY_PREFETCH_WORKERS.
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        prefetch_workers = int(os.environ.get("UGCSPY_PREFETCH_WORKERS", "") or 3)
+        prefetch_workers = max(1, min(prefetch_workers, 6))
+    except (ValueError, TypeError):
+        prefetch_workers = 3
+
     docs = []
-    for i, url in enumerate(urls):
-        docs.append(_transcribe_one(url, model, model_name, ffmpeg_exe))
-        print(f"transcript {i + 1}/{len(urls)} done", file=sys.stderr, flush=True)
+    with ThreadPoolExecutor(max_workers=prefetch_workers) as pool:
+        # Submit ALL downloads up front; they run as slots free up. Futures are
+        # ordered to match `urls`, so consuming them in order preserves output order.
+        futures = [pool.submit(_transcript_fetch_audio, url) for url in urls]
+        for i, fut in enumerate(futures):
+            fetched = fut.result()  # blocks for THIS video's download (already racing ahead)
+            docs.append(_transcribe_fetched(fetched, model, model_name, ffmpeg_exe))
+            print(f"transcript {i + 1}/{len(urls)} done", file=sys.stderr, flush=True)
 
     if not batch:
         doc = docs[0]

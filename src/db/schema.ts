@@ -43,6 +43,12 @@ export function migrate(db: Database): void {
 
     CREATE INDEX IF NOT EXISTS idx_videos_competitor ON videos(competitor_id);
     CREATE INDEX IF NOT EXISTS idx_videos_posted_at ON videos(posted_at);
+    -- saveTranscript() looks up by (platform, external_id) on every transcribed
+    -- video — the index changes the access path only, never the result set.
+    -- (platform/external_id always exist; safe in this fresh block. The
+    -- author_handle index is created AFTER the ALTER loop below — on a legacy DB
+    -- author_handle doesn't exist yet here.)
+    CREATE INDEX IF NOT EXISTS idx_videos_platform_external_id ON videos(platform, external_id);
 
     CREATE TABLE IF NOT EXISTS watches (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +92,13 @@ export function migrate(db: Database): void {
       if (!/duplicate column name/i.test((err as Error).message)) throw err;
     }
   }
+
+  // author_handle index — created HERE (after the ALTER loop guarantees the
+  // column exists), not in the step-1 CREATE block: on a legacy DB the column
+  // is ADDed above, so a step-1 index would hit "no such column". Speeds
+  // cachedMaxViews() (ugcspy similar); access-path only, never the result set.
+  // The rebuild block below re-creates it (DROP TABLE there discards it).
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_videos_author_handle ON videos(author_handle);`);
 
   // 3. Migrate the videos unique constraint from the old global
   // UNIQUE(platform, external_id) to per-competitor UNIQUE(competitor_id,
@@ -145,6 +158,10 @@ export function migrate(db: Database): void {
         ALTER TABLE videos_new RENAME TO videos;
         CREATE INDEX IF NOT EXISTS idx_videos_competitor ON videos(competitor_id);
         CREATE INDEX IF NOT EXISTS idx_videos_posted_at ON videos(posted_at);
+        -- mirror of the fresh-block hot-path indexes (see above) — the DROP
+        -- TABLE above discards the originals, so a legacy upgrade must recreate them.
+        CREATE INDEX IF NOT EXISTS idx_videos_platform_external_id ON videos(platform, external_id);
+        CREATE INDEX IF NOT EXISTS idx_videos_author_handle ON videos(author_handle);
       `);
     });
     tx();
