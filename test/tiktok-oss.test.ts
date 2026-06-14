@@ -6,9 +6,11 @@ import {
   authorFromUrl,
   bridgeTimeoutMs,
   parseBridgeOutput,
+  parseSimilarOutput,
   resolveBridgePython,
 } from "../src/providers/tiktok-oss.ts";
 import { venvPython } from "../src/lib/venv.ts";
+import { seedToHandle } from "../src/commands/similar.ts";
 
 describe("authorFromUrl (free author recovery from video_url)", () => {
   // The bridge's _author can be blank (tikwm feed item with no author.unique_id),
@@ -166,14 +168,103 @@ describe("resolveBridgePython (venv gating)", () => {
 });
 
 describe("resolveBridgePython stdlib-only fallbacks", () => {
-  test("keyword AND trending run on system python without the venv", () => {
+  test("keyword, trending AND snowball run on system python without the venv", () => {
     expect(() => resolveBridgePython(false, "keyword")).not.toThrow();
     expect(() => resolveBridgePython(false, "trending")).not.toThrow();
+    // snowball is pure HTTP (the follow-graph walk via tikwm) — must NOT need the venv.
+    expect(() => resolveBridgePython(false, "snowball")).not.toThrow();
   });
   test("hashtag/user/transcript still require the venv", () => {
     for (const mode of ["hashtag", "user", "transcript"]) {
       expect(() => resolveBridgePython(false, mode)).toThrow(/install-deps/);
     }
+  });
+});
+
+describe("parseSimilarOutput (snowball follow-graph envelope)", () => {
+  test("empty creators is a VALID result, not an error", () => {
+    // Most following lists are private/blocked — empty is the common case.
+    expect(parseSimilarOutput(0, JSON.stringify({ creators: [], seedResults: [] }), "")).toEqual({
+      creators: [],
+      seedResults: [],
+    });
+  });
+
+  test("parses creators and seedResults from the envelope", () => {
+    const out = parseSimilarOutput(
+      0,
+      JSON.stringify({
+        creators: [
+          { handle: "alice", seedsFollowing: 3 },
+          { handle: "bob", seedsFollowing: 1 },
+        ],
+        seedResults: [
+          { handle: "seed1", status: 40 },
+          { handle: "seed2", status: -1 },
+        ],
+      }),
+      "",
+    );
+    expect(out.creators).toEqual([
+      { handle: "alice", seedsFollowing: 3 },
+      { handle: "bob", seedsFollowing: 1 },
+    ]);
+    expect(out.seedResults).toEqual([
+      { handle: "seed1", status: 40 },
+      { handle: "seed2", status: -1 },
+    ]);
+  });
+
+  test("drops creator rows missing a handle or with a non-numeric score (untrusted JSON)", () => {
+    const out = parseSimilarOutput(
+      0,
+      JSON.stringify({
+        creators: [
+          { handle: "good", seedsFollowing: 2 },
+          { handle: "", seedsFollowing: 5 }, // blank handle → dropped
+          { seedsFollowing: 4 }, // no handle → dropped
+          { handle: "nan", seedsFollowing: "lots" }, // non-numeric → dropped
+          { handle: "alsogood", seedsFollowing: 1 },
+        ],
+        seedResults: [],
+      }),
+      "",
+    );
+    expect(out.creators).toEqual([
+      { handle: "good", seedsFollowing: 2 },
+      { handle: "alsogood", seedsFollowing: 1 },
+    ]);
+  });
+
+  test("missing seedResults degrades to an empty array, not a crash", () => {
+    const out = parseSimilarOutput(0, JSON.stringify({ creators: [] }), "");
+    expect(out).toEqual({ creators: [], seedResults: [] });
+  });
+
+  test("a nonzero exit surfaces the bridge error envelope", () => {
+    expect(() =>
+      parseSimilarOutput(1, JSON.stringify({ error: "no valid seed handles" }), ""),
+    ).toThrow(/no valid seed handles/);
+  });
+
+  test("a bare array (old shape) is rejected as a non-envelope", () => {
+    expect(() => parseSimilarOutput(0, "[]", "")).toThrow(/non-envelope/);
+  });
+});
+
+describe("seedToHandle (URL → handle normalization)", () => {
+  test("strips a leading @ and lowercases a plain handle", () => {
+    expect(seedToHandle("@Kathryn.Tatess")).toBe("kathryn.tatess");
+    expect(seedToHandle("bresvibes")).toBe("bresvibes");
+  });
+
+  test("extracts the creator from a profile or video URL", () => {
+    expect(seedToHandle("https://www.tiktok.com/@logandowntalks")).toBe("logandowntalks");
+    expect(seedToHandle("https://tiktok.com/@cadyebs/video/7644237775092370702")).toBe("cadyebs");
+  });
+
+  test("trims surrounding whitespace", () => {
+    expect(seedToHandle("  @abefromanx  ")).toBe("abefromanx");
   });
 });
 

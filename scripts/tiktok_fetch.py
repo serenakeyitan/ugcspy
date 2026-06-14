@@ -85,6 +85,18 @@ def main() -> None:
         run_trending(str(payload.get("region") or "US"), days)
         return
 
+    # Snowball mode exposes the follow-graph discovery (the same
+    # _tikwm_snowball_creators that powers hashtag discovery's source 2) as a
+    # standalone call seeded by USER-supplied creators rather than brand-hashtag
+    # finds — "find more creators like these". PURE HTTP via the relay (no
+    # TikTokApi/Chromium), so dispatch before that import.
+    if mode == "snowball":
+        seeds = payload.get("seeds")
+        if not isinstance(seeds, list) or not any(str(s).strip() for s in seeds):
+            fail("missing seeds")
+        run_snowball([str(s) for s in seeds])
+        return
+
     # Transcript mode needs whisper + yt-dlp (+ the bundled static ffmpeg),
     # NOT TikTokApi/Chromium — dispatch it before the TikTokApi import so it
     # works on a core install that added --with-audio but never touched the
@@ -1134,7 +1146,11 @@ def _snowball_pages() -> int:
     return 1
 
 
-def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> dict[str, int]:
+def _tikwm_snowball_creators(
+    seed_handles: list[str],
+    max_seeds: int = 60,
+    seed_diag: Optional[dict] = None,
+) -> dict[str, int]:
     """Following-graph snowball discovery (depth-1). Brand-UGC creators form a
     tight mutually-following collective, so walking who the known seeds FOLLOW
     surfaces long-tail creators that keyword/hashtag search never ranks high
@@ -1145,7 +1161,15 @@ def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> di
     handle — a creator followed by MANY known brand creators is very likely a
     brand creator too. Discovery stays WIDE: no caption filter here; the yt-dlp
     coverage pass applies per-video brand precision. Bounded by max_seeds (don't
-    resolve+walk thousands of seeds) and _snowball_pages() (depth, default 1)."""
+    resolve+walk thousands of seeds) and _snowball_pages() (depth, default 1).
+
+    If `seed_diag` is passed, it's populated with {seed: status} where status is
+    the follow-count on success, or a negative sentinel on failure: -1 = the
+    following list was blocked/unreadable (tikwm code != 0 — common, ~60% of
+    creators), -2 = the handle didn't resolve to a user id. This lets the caller
+    report an honest hit-rate ("3 of 8 seeds had readable following lists")
+    instead of conflating a blocked seed with one that simply follows no one.
+    The hashtag-discovery caller passes nothing and is unaffected."""
     import time
     import urllib.parse
     import urllib.request
@@ -1158,12 +1182,20 @@ def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> di
     def _followings_for(seed: str) -> list[str]:
         """Resolve one seed -> its followed handles. Pure-HTTP, no shared state,
         so it's safe to run many of these in a thread pool. Retries once on a
-        transient throttle so a Cloudflare blip doesn't silently zero the seed."""
+        transient throttle so a Cloudflare blip doesn't silently zero the seed.
+
+        Records the seed's outcome in seed_diag (when provided) so the caller can
+        report an honest hit-rate: a follow-count on success, -2 if the handle
+        never resolved, -1 if EVERY page came back blocked/unreadable. A readable
+        list that simply has no followings stays 0 — distinct from blocked."""
         uid = _tikwm_user_id(seed)
         if not uid:
+            if seed_diag is not None:
+                seed_diag[seed] = -2  # handle didn't resolve to a user id
             return []
         out: list[str] = []
         cursor = 0
+        any_readable = False  # did at least one page return code == 0?
         for _ in range(pages):
             qs = urllib.parse.urlencode({"user_id": uid, "count": 50, "cursor": cursor})
             url = f"https://www.tikwm.com/api/user/following?{qs}"
@@ -1180,6 +1212,7 @@ def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> di
                 time.sleep(1.5 * (attempt + 1))
             if not isinstance(doc, dict) or doc.get("code") != 0:
                 break
+            any_readable = True
             data = doc.get("data") or {}
             flist = data.get("followings") or data.get("following") or []
             if not flist:
@@ -1197,6 +1230,10 @@ def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> di
                 cursor = int(nxt)
             except (ValueError, TypeError):
                 break
+        if seed_diag is not None:
+            # -1 = blocked/unreadable (no page ever returned code 0); else the
+            # follow-count (0 is a readable-but-empty list, NOT a failure).
+            seed_diag[seed] = len(out) if any_readable else -1
         return out
 
     # Resolve seeds with BOUNDED concurrency. Each seed is ~2 HTTP round-trips
@@ -1219,6 +1256,56 @@ def _tikwm_snowball_creators(seed_handles: list[str], max_seeds: int = 60) -> di
             for h in handles:
                 scores[h] = scores.get(h, 0) + 1
     return scores
+
+
+def run_snowball(seed_handles: list[str]) -> None:
+    """Standalone follow-graph discovery: given USER-supplied seed creators,
+    return the creators most of them follow — "find more creators like these".
+
+    This is the same depth-1 follow-graph walk hashtag discovery uses for its
+    source 2, but seeded by the user's chosen creators instead of brand-hashtag
+    finds. A candidate followed by MANY of the seeds is stylistically close to
+    the cluster (creators in a niche mutually follow each other), so the score
+    (how many seeds follow it) IS the similarity signal.
+
+    Emits a JSON ENVELOPE:
+      {"creators": [{"handle","seedsFollowing"}, ...sorted by score desc],
+       "seedResults": [{"handle","status"}, ...]}
+    where status is the seed's follow-count, or -1 (blocked/unreadable list) or
+    -2 (handle didn't resolve). The envelope lets the caller report an honest
+    hit-rate — most following lists are private/blocked (~60%), so an empty
+    `creators` is the NORMAL case and must be distinguishable from a relay
+    failure. The seeds themselves are excluded from `creators` (a creator can't
+    be its own recommendation). Fail-soft throughout — never a crash."""
+    # Normalize: strip @, lowercase, dedupe while preserving order. The score
+    # is seed-COUNT, so a duplicated seed must not double-count its followings.
+    seen: set[str] = set()
+    seeds: list[str] = []
+    for raw in seed_handles:
+        h = str(raw).strip().lstrip("@").lower()
+        if h and h not in seen:
+            seen.add(h)
+            seeds.append(h)
+    if not seeds:
+        fail("no valid seed handles")
+
+    seed_diag: dict[str, int] = {}
+    scores = _tikwm_snowball_creators(seeds, seed_diag=seed_diag)
+    # Drop the seeds themselves — they're inputs, not recommendations.
+    creators = [
+        {"handle": h, "seedsFollowing": n}
+        for h, n in scores.items()
+        if h not in seen
+    ]
+    creators.sort(key=lambda r: (-r["seedsFollowing"], r["handle"]))
+    # Seeds capped by max_seeds may never have been walked — only report those
+    # that were (present in seed_diag); the rest are simply unknown.
+    seed_results = [
+        {"handle": h, "status": seed_diag.get(h)}
+        for h in seeds
+        if h in seed_diag
+    ]
+    print(json.dumps({"creators": creators, "seedResults": seed_results}))
 
 
 def _creator_walk_concurrency() -> int:

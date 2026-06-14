@@ -26,6 +26,32 @@ export interface RawVideo {
   author_handle?: string | null;
 }
 
+// One creator surfaced by the follow-graph similarity pass (`ugcspy similar`).
+// `seedsFollowing` is how many of the seed creators follow this handle — the
+// similarity signal (more seeds → closer to the cluster). Seeds themselves are
+// excluded by the bridge before this reaches the caller.
+export interface SimilarCreator {
+  handle: string;
+  seedsFollowing: number;
+}
+
+// One seed's follow-graph readability. `status` is the seed's follow-count on
+// success, or a negative sentinel: -1 = the following list was blocked/
+// unreadable (tikwm refused it — the common case, ~60%), -2 = the handle didn't
+// resolve. Lets the caller report an honest hit-rate instead of conflating a
+// blocked seed with one that genuinely follows no one.
+export interface SeedResult {
+  handle: string;
+  status: number;
+}
+
+// The full follow-graph result: the ranked similar creators plus per-seed
+// readability so callers can report the hit-rate (how thin/blocked the graph was).
+export interface SimilarResult {
+  creators: SimilarCreator[];
+  seedResults: SeedResult[];
+}
+
 export interface VideoRecord extends RawVideo {
   id: number;
   competitor_id: number;
