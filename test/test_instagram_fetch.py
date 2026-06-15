@@ -117,6 +117,49 @@ def test_unsupported_mode_is_rejected(monkeypatch, capsys):
     assert "trending" in out["error"]
 
 
+def test_is_throttle_recognizes_ig_rate_limit_signatures():
+    # The markers IG actually returns on the authenticated GraphQL endpoint.
+    for msg in (
+        "403 Forbidden when accessing https://www.instagram.com/graphql/query",
+        "401 Unauthorized - Please wait a few minutes before you try again",
+        "429 Too Many Requests",
+        "redirected to login",
+    ):
+        assert ig._is_throttle(Exception(msg)), msg
+    # A normal per-post failure (a deleted/private post) is NOT a throttle.
+    assert not ig._is_throttle(Exception("Post ABC123 does not exist"))
+    assert not ig._is_throttle(Exception("JSON decode error"))
+
+
+def test_enrich_views_backs_off_on_throttle(monkeypatch):
+    # On the FIRST throttle, enrich_views must stop the whole run and report
+    # throttled=True, leaving remaining posts un-enriched (no views_enriched flag)
+    # so the caller reuses last-known view counts. No real network: stub the
+    # instaloader factory + Post.from_shortcode to raise a 403 immediately.
+    monkeypatch.setattr(ig, "ENRICH_SLEEP_S", 0)  # no real sleeping in the test
+
+    class _FakePost:
+        @staticmethod
+        def from_shortcode(ctx, sc):
+            raise Exception("403 Forbidden when accessing graphql/query")
+
+    fake_instaloader = type("M", (), {"Post": _FakePost})()
+    # L needs a .context attr (the code calls Post.from_shortcode(L.context, sc)).
+    fake_L = type("L", (), {"context": object()})()
+    monkeypatch.setattr(ig, "_make_instaloader", lambda cp: (fake_instaloader, fake_L))
+
+    posts = [
+        {"shortcode": "A", "is_video": True},
+        {"shortcode": "B", "is_video": True},
+        {"shortcode": "C", "is_video": True},
+    ]
+    out, enriched, throttled = ig.enrich_views(posts, "cookies.txt", max_enrich=10)
+    assert throttled is True
+    assert enriched == 0
+    # None got a real view → none flagged views_enriched (caller keeps last-known)
+    assert all(not p.get("views_enriched") for p in out)
+
+
 class _FakeStdin:
     def __init__(self, data):
         self._data = data

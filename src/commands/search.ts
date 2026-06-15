@@ -264,7 +264,23 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
         spinner?.succeed(`${platform}: ${chalk.cyan(videos.length)} videos${suffix}`);
       } catch (err) {
         failedPlatforms.push(platform);
-        spinner?.fail(`${platform}: ${(err as Error).message}`);
+        const msg = (err as Error).message;
+        spinner?.fail(`${platform}: ${msg}`);
+        // First-run / expired-session guidance for the Instagram path: turn the
+        // raw "no logged-in session" error into clear, actionable next steps.
+        if (
+          !opts.json &&
+          platform === "instagram" &&
+          /session|sessionid|log ?in|logged|cookie/i.test(msg)
+        ) {
+          console.error(
+            chalk.yellow("\nInstagram needs a logged-in browser session:") +
+              `\n  1. Log into ${chalk.cyan("instagram.com")} in your browser.` +
+              `\n  2. Run ${chalk.cyan("ugcspy ig-session")} to verify it's detected.` +
+              `\n  ${chalk.dim("(default reads Safari; set UGCSPY_IG_COOKIE_BROWSER=chrome|firefox to pick another.)")}` +
+              `\n  ${chalk.dim("Tip: use a dedicated/burner IG account for scraping — heavy use can get an account rate-limited.")}`,
+          );
+        }
         if (opts.json) {
           // --json consumers parse stdout; surface provider failures as a
           // structured line on STDERR so a partial result isn't silently

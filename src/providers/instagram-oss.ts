@@ -77,7 +77,21 @@ export class InstagramOssProvider implements DataProvider {
 
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
     const raw = await this.spawnBridge(payload);
-    return parseIgVideosResponse(raw.stdout, raw.stderr);
+    const { videos, throttled } = parseIgVideosResponse(raw.stdout, raw.stderr);
+    if (throttled) {
+      // IG rate-limited the view-enrichment mid-run. The roster (likes/caption)
+      // is still fresh and un-enriched videos keep their last-known view counts
+      // (the upsert preserves a stored positive view_count against a 0). Warn the
+      // operator to ease off — sustained pushing deepens the throttle and risks
+      // an account flag. stderr, not a throw: the partial result is still useful.
+      process.stderr.write(
+        "⚠ instagram-oss: Instagram rate-limited view enrichment this run — " +
+          "view counts may be stale for some videos (likes/captions are current). " +
+          "Ease off (fewer creators / a lower --enrich tier / longer poll interval); " +
+          "the limit is per-account and recovers in minutes-to-hours.\n",
+      );
+    }
+    return videos;
   }
 
   private async spawnBridge(
@@ -173,10 +187,17 @@ export function parseIgJson(stdout: string, stderr: string): Record<string, unkn
   }
 }
 
-// Parse a {videos} / {error,code} response into RawVideo[]. The bridge reports
-// errors in-band as {error, code}; `re_login_required` is the one the operator
-// must act on, so it gets an actionable hint.
-export function parseIgVideosResponse(stdout: string, stderr: string): RawVideo[] {
+export interface IgVideosResult {
+  videos: RawVideo[];
+  // True → IG rate-limited the view-enrichment mid-run (the caller warns + keeps
+  // last-known view counts). The video list is still valid (likes/caption fresh).
+  throttled: boolean;
+}
+
+// Parse a {videos, throttled} / {error,code} response. The bridge reports errors
+// in-band as {error, code}; `re_login_required` is the one the operator must act
+// on, so it gets an actionable hint.
+export function parseIgVideosResponse(stdout: string, stderr: string): IgVideosResult {
   const parsed = parseIgJson(stdout, stderr);
   if (parsed.error) {
     const code = String(parsed.code ?? "error");
@@ -201,7 +222,7 @@ export function parseIgVideosResponse(stdout: string, stderr: string): RawVideo[
   for (const v of videos) {
     if (isValidIgRawVideo(v)) valid.push(v);
   }
-  return valid.map(coerceIgRawVideo);
+  return { videos: valid.map(coerceIgRawVideo), throttled: parsed.throttled === true };
 }
 
 // A posted_at is "real" only if it parses AND is meaningfully after the epoch.

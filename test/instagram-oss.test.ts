@@ -46,11 +46,22 @@ describe("parseIgVideosResponse — the bridge {videos}/{error} contract", () =>
       ],
       enriched_views: 1,
     });
-    const out = parseIgVideosResponse(body, "");
+    const { videos: out, throttled } = parseIgVideosResponse(body, "");
     expect(out).toHaveLength(1);
     expect(out[0]!.external_id).toBe("DZjR_dosb9x");
     expect(out[0]!.view_count).toBe(12_700_000);
     expect(out[0]!.platform).toBe("instagram");
+    expect(throttled).toBe(false); // no throttle flag in this response
+  });
+
+  test("surfaces throttled:true from the bridge response", () => {
+    const body = JSON.stringify({
+      videos: [{ platform: "instagram", external_id: "X", posted_at: "2026-06-10T00:00:00.000Z" }],
+      throttled: true,
+    });
+    const { videos, throttled } = parseIgVideosResponse(body, "");
+    expect(throttled).toBe(true);
+    expect(videos).toHaveLength(1); // partial result still returned
   });
 
   test("re_login_required error → actionable ProviderError with the cookie-browser hint", () => {
@@ -100,7 +111,7 @@ describe("parseIgVideosResponse — the bridge {videos}/{error} contract", () =>
         },
       ],
     });
-    const out = parseIgVideosResponse(body, "");
+    const { videos: out } = parseIgVideosResponse(body, "");
     expect(out.map((v) => v.external_id)).toEqual(["OK1", "OK2"]);
     // partial row coerced to safe defaults (no null caption that crashes the DB)
     expect(out[0]!.caption).toBe("");
@@ -128,12 +139,12 @@ describe("parseIgVideosResponse — the bridge {videos}/{error} contract", () =>
         { platform: "instagram", external_id: "GOOD", posted_at: DATE }, // real date — keep
       ],
     });
-    const out = parseIgVideosResponse(body, "");
+    const { videos: out } = parseIgVideosResponse(body, "");
     expect(out.map((v) => v.external_id)).toEqual(["GOOD"]);
   });
 
   test("a videos array of entirely malformed rows yields an empty array, not a throw", () => {
     const body = JSON.stringify({ videos: [null, { platform: "tiktok" }, 42, "nope"] });
-    expect(parseIgVideosResponse(body, "")).toEqual([]);
+    expect(parseIgVideosResponse(body, "").videos).toEqual([]);
   });
 });

@@ -151,28 +151,42 @@ def _make_instaloader(cookies_path):
     return instaloader, L
 
 
+# IG throttle signatures on the authenticated GraphQL endpoint. instaloader
+# raises these as ConnectionException/QueryReturned* with the code in the text.
+# Measured: a sustained enrich run trips 403 (and 401 "Please wait a few
+# minutes"). When we see one, the session is rate-limited NOW — stop hammering.
+_THROTTLE_MARKERS = ("403", "429", "401", "please wait", "rate limit", "too many", "redirect")
+
+
+def _is_throttle(err):
+    m = str(err).lower()
+    return any(t in m for t in _THROTTLE_MARKERS)
+
+
 def enrich_views(posts, cookies_path, max_enrich=None):
     """Add view_count/play_count to each video post via instaloader single-post
-    GraphQL (the call that returns counts; profile pagination is blocked, but we
-    don't need it — gallery-dl gave us the shortcodes).
+    GraphQL. Returns (posts, enriched_count, throttled).
 
-    max_enrich caps how many posts to enrich (each is a ~4s GraphQL call). The
-    caller (TS layer) sets this from the user's depth tier; None → env default.
+    Each enriched post gets p["views_enriched"]=True ONLY on a real view fetch.
+    Posts left WITHOUT that flag must NOT have their stored view_count
+    overwritten by the caller (it would clobber a good value with 0). On an IG
+    throttle (403/429) we BACK OFF: stop the loop immediately, mark throttled,
+    and leave the remaining posts un-enriched (likes/caption still fresh from the
+    roster walk). The watch keeps working on last-known views instead of erroring.
+
+    max_enrich caps enrichment ATTEMPTS (one ~4s GraphQL call each) — the user's
+    depth tier; None → env default.
     """
     cap = max_enrich if isinstance(max_enrich, int) and max_enrich > 0 else MAX_ENRICH
     try:
         instaloader, L = _make_instaloader(cookies_path)
     except Exception:
-        # Enrichment is best-effort: if instaloader can't init, return the posts
-        # without views (likes still present) rather than failing the whole walk.
-        return posts, 0
+        # instaloader unavailable: best-effort, return posts without views.
+        return posts, 0, False
 
-    # The cap counts ATTEMPTS (one ~4s GraphQL call each), not successes — that's
-    # what bounds the run's cost/time/rate-limit exposure for an explicit tier
-    # (codex P2 round 3). Counting only successes let failures/zero-view posts
-    # slip past the cap, so a quick-tier search could attempt the whole roster.
     attempted = 0
     enriched = 0
+    throttled = False
     for p in posts:
         if not p.get("is_video"):
             continue
@@ -186,18 +200,24 @@ def enrich_views(posts, cookies_path, max_enrich=None):
                 vp = post._field("video_play_count") if post.is_video else None
             except Exception:
                 vp = None
-            # Prefer play_count (the headline IG "plays" metric); fall back to
-            # view_count, then to 0.
-            p["view_count"] = int(vp or vv or 0)
+            metric = vp or vv
+            if metric:
+                # Prefer play_count (the headline IG "plays" metric).
+                p["view_count"] = int(metric)
+                p["views_enriched"] = True  # safe to persist this view_count
+                enriched += 1
             if not p.get("date"):
                 p["date"] = post.date_utc.isoformat()
-            if vv or vp:
-                enriched += 1
-        except Exception:
-            # leave this post un-enriched (view_count stays whatever roster had / 0)
-            pass
+        except Exception as e:
+            # On a THROTTLE, stop the whole run — continuing only deepens the
+            # rate-limit (and risks escalating to an account flag). The rest stay
+            # un-enriched; the caller reuses their last-known views.
+            if _is_throttle(e):
+                throttled = True
+                break
+            # A non-throttle error (a single dead/private post) → skip just it.
         time.sleep(ENRICH_SLEEP_S)
-    return posts, enriched
+    return posts, enriched, throttled
 
 
 # When a post's date is missing/unparseable, fall back to the UNIX EPOCH, NOT
@@ -224,7 +244,11 @@ def _iso(dateval):
 
 
 def to_raw_video(p):
-    """Map an enriched post dict to the RawVideo contract (matches tiktok_fetch)."""
+    """Map an enriched post dict to the RawVideo contract (matches tiktok_fetch).
+
+    views_enriched signals whether view_count came from a REAL enrichment this
+    run. False (un-enriched or throttled) → the TS layer must NOT overwrite a
+    stored view_count with this row's 0 (reuse last-known instead)."""
     return {
         "platform": "instagram",
         "external_id": p["shortcode"],
@@ -237,6 +261,7 @@ def to_raw_video(p):
         "comment_count": int(p.get("comments", 0)),
         "share_count": 0,  # IG does not expose shares to scraping
         "author_handle": (p.get("username") or "").lstrip("@") or None,
+        "views_enriched": bool(p.get("views_enriched", False)),
     }
 
 
@@ -285,9 +310,18 @@ def run_user(req):
                 f"session may have expired — re-login in {COOKIE_BROWSER}.",
                 "empty_or_blocked",
             )
-        roster, enriched = enrich_views(roster, cookies_path, max_enrich)
+        roster, enriched, throttled = enrich_views(roster, cookies_path, max_enrich)
         videos = [to_raw_video(p) for p in roster if p.get("is_video")]
-        _emit({"videos": videos, "enriched_views": enriched, "roster_size": len(roster)})
+        _emit(
+            {
+                "videos": videos,
+                "enriched_views": enriched,
+                "roster_size": len(roster),
+                # True → IG rate-limited this run; the caller should keep
+                # last-known view counts and warn the user to ease off.
+                "throttled": throttled,
+            }
+        )
 
 
 def run_session_check(_req):
