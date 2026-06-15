@@ -78,6 +78,23 @@ def test_author_handle_strips_leading_at():
     assert rv["author_handle"] == "nike"
 
 
+def test_resolve_walk_limits_daemon_enriches_full_roster_tier_caps():
+    # codex P2 (round 2): with NO explicit tier (the daemon poll), the enrich cap
+    # must equal the walked roster — otherwise videos past the cap refresh likes
+    # but NOT views, leaving a view-threshold watch on stale counts. An explicit
+    # tier still caps for the interactive speed/depth tradeoff. Tests the REAL
+    # resolve_walk_limits used by run_user (not a mirror).
+    # daemon: no tier (None) → enrich == roster, so every tracked video's views refresh
+    assert ig.resolve_walk_limits(None, None, 60) == (60, 60)
+    # quick tier (15): roster still floored at 60, but enrich capped at 15
+    assert ig.resolve_walk_limits(None, 15, 60) == (60, 15)
+    # deep tier (100): roster grows to cover it, enrich 100
+    assert ig.resolve_walk_limits(None, 100, 60) == (100, 100)
+    # a non-positive/garbage tier is ignored (treated as no tier)
+    assert ig.resolve_walk_limits(None, 0, 60) == (60, 60)
+    assert ig.resolve_walk_limits(None, -5, 60) == (60, 60)
+
+
 def test_fail_emits_inband_error_and_exits_zero(capsys):
     # The bridge reports errors as in-band JSON {error,code} and exits 0 so the
     # TS layer parses them (never a nonzero crash the parser can't read).

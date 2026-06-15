@@ -234,23 +234,31 @@ def to_raw_video(p):
     }
 
 
+def resolve_walk_limits(req_limit, req_max_enrich, roster_min):
+    """Derive (roster_limit, max_enrich) from the request. Pure + testable.
+
+    Roster walk: gallery-dl walks newest-first with no date filter, so we pull a
+    generous window (floor roster_min) to keep RECENT videos refreshing each tick.
+    Very old videos beyond this depth keep last-seen counts (same as the TikTok
+    free path); a regularly-polling daemon re-walks the top each tick.
+
+    Enrich cap: an EXPLICIT tier (interactive search quick/standard/deep) caps how
+    many posts get VIEW enrichment, for the speed/depth tradeoff. With NO tier
+    (the daemon poll), enrich the WHOLE walked roster — otherwise videos past the
+    cap refresh likes but NOT views, leaving a view-threshold watch firing on
+    stale counts (codex P2 round 2)."""
+    explicit = req_max_enrich if (isinstance(req_max_enrich, int) and req_max_enrich > 0) else None
+    limit = max(int(req_limit or 0), explicit or 0, roster_min)
+    max_enrich = explicit if explicit is not None else limit
+    return limit, max_enrich
+
+
 def run_user(req):
     handle = (req.get("handle") or "").strip()
     if not handle:
         _fail("instagram user mode requires a handle", "bad_request")
-    # How many posts to enrich with views (the user's depth tier). The roster
-    # walk must cover at least that many, so the enrich step has candidates.
-    max_enrich = req.get("max_enrich")
-    if not (isinstance(max_enrich, int) and max_enrich > 0):
-        max_enrich = MAX_ENRICH
-    # Roster walk depth. gallery-dl walks newest-first and has no date filter, so
-    # we pull a generous window (>= the enrich count, floor ROSTER_MIN) to keep
-    # RECENT videos refreshing each tick. Like the TikTok free path, very old
-    # videos beyond this depth keep their last-seen counts — a daemon that polls
-    # regularly re-walks the top of the roster every tick, so any video still in
-    # that window stays current. Tune with UGCSPY_IG_ROSTER_LIMIT.
     roster_min = int(os.environ.get("UGCSPY_IG_ROSTER_LIMIT", "60"))
-    limit = max(int(req.get("limit") or 0), max_enrich, roster_min)
+    limit, max_enrich = resolve_walk_limits(req.get("limit"), req.get("max_enrich"), roster_min)
 
     with tempfile.TemporaryDirectory() as tmp:
         cookies_path = os.path.join(tmp, "ig_cookies.txt")

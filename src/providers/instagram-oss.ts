@@ -204,9 +204,14 @@ export function parseIgVideosResponse(stdout: string, stderr: string): RawVideo[
   return valid.map(coerceIgRawVideo);
 }
 
+// The epoch ISO the bridge emits for a missing/unparseable date. A row carrying
+// it has NO real date, so we drop it (see isValidIgRawVideo) rather than persist
+// a fabricated date that would overwrite a previously-good one on upsert.
+const EPOCH_ISO = new Date(0).toISOString();
+
 // A bridge row is usable only if it has the keys the DB layer dereferences. We
-// require the identity fields; numeric/text fields are coerced to safe defaults
-// in coerceIgRawVideo so a partial row degrades instead of crashing.
+// require the identity fields AND a real posted_at; other fields are coerced to
+// safe defaults in coerceIgRawVideo so a partial row degrades instead of crashing.
 function isValidIgRawVideo(v: unknown): v is Record<string, unknown> {
   if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
   const r = v as Record<string, unknown>;
@@ -214,6 +219,14 @@ function isValidIgRawVideo(v: unknown): v is Record<string, unknown> {
   // row claiming another platform from the IG bridge).
   if (typeof r.external_id !== "string" || r.external_id.length === 0) return false;
   if (r.platform !== "instagram") return false;
+  // DROP rows with no real date (codex P2 round 2): the bridge stamps a missing
+  // date as the epoch. Persisting that would make the row look ancient AND, on a
+  // re-fetch where the row came back partial, the upsert would OVERWRITE a
+  // previously-correct date with epoch — silently yanking the video out of
+  // relative-breakout windows. A dateless row is unusable for windowing anyway.
+  if (typeof r.posted_at !== "string" || r.posted_at === EPOCH_ISO || r.posted_at === "") {
+    return false;
+  }
   return true;
 }
 
@@ -226,7 +239,8 @@ function coerceIgRawVideo(v: Record<string, unknown>): RawVideo {
   return {
     platform: "instagram",
     external_id: String(v.external_id),
-    posted_at: str(v.posted_at) || new Date(0).toISOString(),
+    // Guaranteed a real (non-epoch) date — isValidIgRawVideo dropped dateless rows.
+    posted_at: str(v.posted_at),
     caption: str(v.caption),
     thumbnail_url: str(v.thumbnail_url),
     video_url: str(v.video_url),
