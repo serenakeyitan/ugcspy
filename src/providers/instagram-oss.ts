@@ -29,6 +29,11 @@ import { venvExists, venvPython } from "../lib/venv.ts";
 export class InstagramOssProvider implements DataProvider {
   readonly name = "instagram-oss";
 
+  // How many roster posts to enrich with view/play counts (the per-post GraphQL
+  // step that costs ~4s each). Resolved from the user's depth choice (tier) by
+  // the caller; the bridge caps at this. undefined → the bridge's own default.
+  constructor(private enrichCount?: number) {}
+
   async fetchRecentVideos(handle: string, platform: Platform, days: number): Promise<RawVideo[]> {
     if (platform !== "instagram") {
       throw new ProviderError(
@@ -36,7 +41,7 @@ export class InstagramOssProvider implements DataProvider {
         this.name,
       );
     }
-    return this.runBridge({ mode: "user", handle, days });
+    return this.runBridge({ mode: "user", handle, days, max_enrich: this.enrichCount });
   }
 
   // Is the configured browser logged into Instagram? Surfaces the session

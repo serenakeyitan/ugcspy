@@ -13,13 +13,21 @@ import type { DataProvider } from "./types.ts";
 // config picks an OSS source, we route by `platform` to the matching OSS
 // provider. Paid/cross-platform providers (scrapecreators) ignore platform here
 // because they take it per-call. `mock` is platform-agnostic by design.
-export function getProvider(config: Config, platform: Platform): DataProvider {
+export function getProvider(
+  config: Config,
+  platform: Platform,
+  // For instagram: how many roster posts to enrich with view counts (the user's
+  // depth tier). Ignored for other platforms/providers.
+  igEnrichCount?: number,
+): DataProvider {
   switch (config.scraper_provider) {
     case "mock":
       return new MockProvider();
     case "tiktok-oss":
       // The OSS default: each platform has its own browser-free bridge.
-      return platform === "instagram" ? new InstagramOssProvider() : new TikTokOssProvider();
+      return platform === "instagram"
+        ? new InstagramOssProvider(igEnrichCount)
+        : new TikTokOssProvider();
     case "scrapecreators":
       return new ScrapeCreatorsProvider(effectiveScraperKey(config) ?? "");
     case "apify":

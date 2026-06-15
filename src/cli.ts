@@ -70,6 +70,10 @@ program
     "--prune",
     "with --refresh: treat the fetch as complete — delete in-window cached videos it didn't return (providers can return partial results, so this is opt-in)",
   )
+  .option(
+    "--enrich <tier>",
+    "instagram view-count depth: quick (~15, ~70s) | standard (~40, ~3min) | deep (~100, ~8min) | a raw count. Prompted if omitted in a terminal.",
+  )
   .option("--json", "emit JSON instead of a table")
   .action(async (query: string, raw) => {
     // normalizeSearchOptions handles the legacy "engagement" sort alias and

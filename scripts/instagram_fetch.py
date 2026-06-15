@@ -151,10 +151,15 @@ def _make_instaloader(cookies_path):
     return instaloader, L
 
 
-def enrich_views(posts, cookies_path):
+def enrich_views(posts, cookies_path, max_enrich=None):
     """Add view_count/play_count to each video post via instaloader single-post
     GraphQL (the call that returns counts; profile pagination is blocked, but we
-    don't need it — gallery-dl gave us the shortcodes)."""
+    don't need it — gallery-dl gave us the shortcodes).
+
+    max_enrich caps how many posts to enrich (each is a ~4s GraphQL call). The
+    caller (TS layer) sets this from the user's depth tier; None → env default.
+    """
+    cap = max_enrich if isinstance(max_enrich, int) and max_enrich > 0 else MAX_ENRICH
     try:
         instaloader, L = _make_instaloader(cookies_path)
     except Exception:
@@ -166,7 +171,7 @@ def enrich_views(posts, cookies_path):
     for p in posts:
         if not p.get("is_video"):
             continue
-        if enriched >= MAX_ENRICH:
+        if enriched >= cap:
             break
         try:
             post = instaloader.Post.from_shortcode(L.context, p["shortcode"])
@@ -224,7 +229,12 @@ def run_user(req):
     handle = (req.get("handle") or "").strip()
     if not handle:
         _fail("instagram user mode requires a handle", "bad_request")
-    limit = int(req.get("limit") or 30)
+    # How many posts to enrich with views (the user's depth tier). The roster
+    # walk must cover at least that many, so the enrich step has candidates.
+    max_enrich = req.get("max_enrich")
+    if not (isinstance(max_enrich, int) and max_enrich > 0):
+        max_enrich = MAX_ENRICH
+    limit = max(int(req.get("limit") or 30), max_enrich)
 
     with tempfile.TemporaryDirectory() as tmp:
         cookies_path = os.path.join(tmp, "ig_cookies.txt")
@@ -245,7 +255,7 @@ def run_user(req):
                 f"session may have expired — re-login in {COOKIE_BROWSER}.",
                 "empty_or_blocked",
             )
-        roster, enriched = enrich_views(roster, cookies_path)
+        roster, enriched = enrich_views(roster, cookies_path, max_enrich)
         videos = [to_raw_video(p) for p in roster if p.get("is_video")]
         _emit({"videos": videos, "enriched_views": enriched, "roster_size": len(roster)})
 

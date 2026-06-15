@@ -1,11 +1,18 @@
 import chalk from "chalk";
 import Table from "cli-table3";
 import ora from "ora";
+import prompts from "prompts";
 import { openDb } from "../db/index.ts";
 import { reconcileVideosWindow, upsertVideos } from "../db/videos.ts";
 import { loadConfig } from "../lib/config.ts";
 import { getProvider } from "../providers/index.ts";
 import type { DataProvider } from "../providers/index.ts";
+import {
+  DEFAULT_IG_ENRICH_TIER,
+  IG_ENRICH_TIERS,
+  isIgEnrichTier,
+  resolveEnrichCount,
+} from "../lib/ig-enrich-tier.ts";
 import type { Platform, RawVideo, VideoRecord } from "../types.ts";
 
 export type SearchSort = "views" | "recency";
@@ -27,6 +34,9 @@ export interface SearchOptions {
   prune: boolean; // with --refresh: treat the fetch as complete and drop in-window rows it didn't return
   days: number;
   mode?: SearchMode; // explicit override; otherwise auto-detected from query
+  // Instagram view-count enrichment depth: a tier name (quick|standard|deep) or
+  // a raw count. Undefined → prompt in a terminal, else the default tier.
+  enrich?: string;
 }
 
 // Raw commander option object → typed SearchOptions. Exported (and pure) so
@@ -42,6 +52,7 @@ export function normalizeSearchOptions(raw: {
   prune?: unknown;
   days: number;
   mode?: string;
+  enrich?: string;
 }): SearchOptions {
   const sort: SearchSort = raw.sort === "engagement" ? "views" : (raw.sort as SearchSort);
   const mode: SearchMode | undefined =
@@ -57,6 +68,7 @@ export function normalizeSearchOptions(raw: {
     prune: Boolean(raw.prune),
     days: raw.days,
     mode,
+    enrich: raw.enrich,
   };
 }
 
@@ -200,13 +212,19 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
   const platforms: Platform[] =
     !opts.platform || opts.platform === "all" ? ["tiktok", "instagram"] : [opts.platform];
 
+  // Resolve the Instagram view-enrichment depth ONCE up front (it may prompt).
+  // Only relevant when IG is in scope and we'll actually fetch (not cached-only).
+  const igWillFetch = platforms.includes("instagram") && (opts.refresh || true);
+  const igEnrichCount = igWillFetch ? await resolveIgEnrichCount(opts) : undefined;
+
   const allVideos: VideoRecord[] = [];
   const failedPlatforms: Platform[] = [];
 
   for (const platform of platforms) {
     // Provider is platform-specific (tiktok-oss vs instagram-oss): resolve it
-    // per platform so a single `--platform all` run routes each correctly.
-    const provider = getProvider(config, platform);
+    // per platform so a single `--platform all` run routes each correctly. The
+    // enrich count only affects the IG provider.
+    const provider = getProvider(config, platform, igEnrichCount);
     const competitorId = upsertCompetitor(db, query.key, platform);
     const cached = readCachedVideos(db, competitorId, platform, opts.days);
     let videos = cached;
@@ -286,6 +304,36 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
     return;
   }
   printTable(query, rows);
+}
+
+// Decide how many Instagram posts to enrich with view counts. Precedence:
+//   1. explicit --enrich (a tier name OR a raw count) — never prompts
+//   2. interactive terminal (TTY, not --json) — prompt with the 3 tiers
+//   3. otherwise (piped/scripted/--json) — the default tier, no prompt
+// Exported for tests.
+export async function resolveIgEnrichCount(
+  opts: Pick<SearchOptions, "enrich" | "json">,
+  // injectable for tests: whether we're attached to an interactive terminal
+  interactive: boolean = process.stdin.isTTY === true && !opts.json,
+): Promise<number> {
+  if (opts.enrich !== undefined && opts.enrich !== "") {
+    return resolveEnrichCount(opts.enrich);
+  }
+  if (!interactive) {
+    return resolveEnrichCount(DEFAULT_IG_ENRICH_TIER);
+  }
+  const { tier } = await prompts({
+    type: "select",
+    name: "tier",
+    message: "Instagram: how many posts to enrich with view counts?",
+    initial: 1, // standard
+    choices: (["quick", "standard", "deep"] as const).map((t) => ({
+      title: `${IG_ENRICH_TIERS[t].label} — ~${IG_ENRICH_TIERS[t].count} posts (${IG_ENRICH_TIERS[t].estimate})`,
+      value: t,
+    })),
+  });
+  // prompts returns undefined if the user ctrl-C's the select; fall back to default.
+  return resolveEnrichCount(isIgEnrichTier(tier) ? tier : DEFAULT_IG_ENRICH_TIER);
 }
 
 // Exported for tests: keyword mode must fail with an actionable error on
