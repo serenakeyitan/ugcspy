@@ -124,6 +124,10 @@ def test_is_throttle_recognizes_ig_rate_limit_signatures():
         "401 Unauthorized - Please wait a few minutes before you try again",
         "429 Too Many Requests",
         "HTTP 403: rate limit reached, try again later",
+        # phrase-only, NO status digit — must still throttle (codex round-2):
+        "Please wait a few minutes before you try again.",
+        "You are temporarily blocked from doing this.",
+        "rate limit exceeded",
     ):
         assert ig._is_throttle(Exception(msg)), msg
 

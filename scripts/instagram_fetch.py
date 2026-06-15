@@ -158,25 +158,25 @@ import re as _re
 # (codex P2): "Post ABC401 does not exist" contains "401" but is just a dead
 # post, and a bare "401 Unauthorized" is an EXPIRED SESSION (re-login), not a
 # rate-limit. So:
-#   - 429 / "too many requests" / "please wait" / "rate limit" → always throttle
-#   - 403 / 401 → throttle ONLY when it appears as an HTTP status (word boundary)
-#     AND carries rate-limit context (wait/limit/throttle/temporarily). A bare
-#     401 without that context is treated as a session problem, not a throttle.
-_RATE_PHRASES = ("please wait", "rate limit", "too many", "try again later", "temporarily")
+#   - 429 / "too many requests" / explicit rate-limit PHRASES (please wait /
+#     rate limit / try again later / temporarily) → ALWAYS throttle, with or
+#     without a status code (these phrases are unambiguously rate-limit).
+#   - bare 403 / 401 (no rate phrase) → NOT a throttle: a dead-post "...401..."
+#     or a plain expired-session 401 is a different problem. EXCEPTION: a
+#     graphql/query 403 is IG's measured enrich-endpoint rate-limit response.
+_RATE_PHRASES = ("please wait", "rate limit", "try again later", "temporarily")
 _HARD_THROTTLE = _re.compile(r"\b429\b|too many requests", _re.I)
-_STATUS_403_401 = _re.compile(r"\b(403|401)\b", _re.I)
 
 
 def _is_throttle(err):
     m = str(err).lower()
+    # 429 / "too many requests" — unconditional.
     if _HARD_THROTTLE.search(m):
         return True
-    # 403/401 count as throttle only with explicit rate-limit context — keeps a
-    # dead-post "...401..." or a plain expired-session 401 from aborting the run.
-    if _STATUS_403_401.search(m) and any(p in m for p in _RATE_PHRASES):
+    # Explicit rate-limit phrases — unconditional (no status digit required).
+    if any(p in m for p in _RATE_PHRASES):
         return True
-    # graphql/query 403 is IG's standard rate-limit response on the enrich
-    # endpoint specifically (measured) — treat that exact pairing as throttle.
+    # graphql/query 403 is IG's standard rate-limit on the enrich endpoint.
     if "graphql/query" in m and _re.search(r"\b403\b", m):
         return True
     return False
