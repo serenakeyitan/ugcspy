@@ -364,6 +364,7 @@ export async function fetchByMode(
   if (query.mode === "user") {
     return provider.fetchRecentVideos(query.value, platform, days);
   }
+  let discovered: RawVideo[];
   if (query.mode === "keyword") {
     if (!provider.fetchKeywordVideos) {
       throw new Error(
@@ -371,14 +372,84 @@ export async function fetchByMode(
           `Keyword discovery needs the 'tiktok-oss' provider (free, via the tikwm relay).`,
       );
     }
-    return provider.fetchKeywordVideos(query.value, platform, days);
+    discovered = await provider.fetchKeywordVideos(query.value, platform, days);
+  } else {
+    if (!provider.fetchHashtagVideos) {
+      throw new Error(
+        `Provider '${provider.name}' does not support hashtag search. Use a handle search like @${query.value} instead.`,
+      );
+    }
+    discovered = await provider.fetchHashtagVideos(query.value, platform, days);
   }
-  if (!provider.fetchHashtagVideos) {
-    throw new Error(
-      `Provider '${provider.name}' does not support hashtag search. Use a handle search like @${query.value} instead.`,
-    );
+  // Creator fan-out — keyword mode on Instagram only. Keyword/caption discovery
+  // returns at most a thin top-slice per creator (the free trial caps
+  // ScrapeCreators search at ~10 reels TOTAL, not per-creator). A creator
+  // surfaced by ONE caption mention almost always has more — and often
+  // higher-engagement — reels in the same window that the search never
+  // returned. So for every distinct creator we found, pull their full
+  // recent-reels roster and merge it in, deduped by external_id. This is what
+  // makes the board list ALL of a creator's videos, ranked by the individual
+  // video, instead of just the single mention that surfaced them.
+  //
+  // Scoped to keyword mode deliberately: hashtag mode's results pass through
+  // applyHashtagPrecision (the brand-tag filter) downstream, which would strip
+  // a creator's OTHER reels (they don't tag the brand) — fanning out there just
+  // burns credits on rows the filter then drops. Keyword mode has no such
+  // filter, and caption-mention discovery is exactly the "creator has more
+  // videos" gap the fan-out closes.
+  if (platform === "instagram" && query.mode === "keyword") {
+    return expandCreators(provider, discovered, platform, days);
   }
-  return provider.fetchHashtagVideos(query.value, platform, days);
+  return discovered;
+}
+
+// Fan out from a discovery result to each distinct creator's full reels.
+// Best-effort: a creator whose roster fetch fails (private/throttled/deleted)
+// keeps their originally-discovered videos rather than vanishing. Deduped by
+// external_id, with the richer (roster) row winning on conflict. Exported for
+// tests.
+export async function expandCreators(
+  provider: DataProvider,
+  discovered: RawVideo[],
+  platform: Platform,
+  days: number,
+): Promise<RawVideo[]> {
+  const cutoff = Date.now() - days * 86_400_000;
+  // One window predicate for BOTH discovered and roster rows: keyword discovery
+  // uses ScrapeCreators' coarse `last-month` window (~31d), which can exceed a
+  // `--days 30` request, and a malformed/missing date must NOT slip through
+  // (`NaN < cutoff` is false, so a plain `<` comparison would admit it). Parse
+  // once and require a finite, in-window timestamp.
+  const inWindow = (v: RawVideo): boolean => {
+    const t = Date.parse(v.posted_at);
+    return Number.isFinite(t) && t >= cutoff;
+  };
+
+  // Index in-window discovered videos by id; roster rows overwrite them (they
+  // carry the canonical play_count/caption straight from the creator's feed).
+  const byId = new Map<string, RawVideo>();
+  for (const v of discovered) if (inWindow(v)) byId.set(v.external_id, v);
+
+  const handles = new Set<string>();
+  for (const v of discovered) {
+    const h = (v.author_handle ?? "").replace(/^@/, "").toLowerCase();
+    if (h) handles.add(h);
+  }
+  for (const handle of handles) {
+    let roster: RawVideo[];
+    try {
+      roster = await provider.fetchRecentVideos(handle, platform, days);
+    } catch {
+      // Private/throttled/deleted creator: keep what discovery already gave us.
+      continue;
+    }
+    for (const v of roster) {
+      // Respect the trailing window — a creator's roster spans all-time.
+      if (!inWindow(v)) continue;
+      byId.set(v.external_id, v);
+    }
+  }
+  return [...byId.values()];
 }
 
 function upsertCompetitor(
