@@ -28,17 +28,50 @@ export type TranscriptTarget =
   | { kind: "external"; externalId: string }
   | { kind: "query"; raw: string };
 
-// Canonical TikTok video id from any pasted URL form (share links carry query
-// params, m.tiktok.com hosts, trailing junk — but all keep /video/<id>).
+// Canonical video id from any pasted URL form, across platforms:
+//   - TikTok:    /video/<digits>   (share links carry query params, m.tiktok.com
+//     hosts, trailing junk — all keep /video/<id>)
+//   - Instagram: /(reel|reels|p)/<shortcode>  (alphanumeric + - and _, NOT
+//     numeric like TikTok). reel = the modern Reel path; p = legacy post; reels
+//     = the profile reels tab share form.
 export function externalIdFromUrl(url: string): string | null {
-  const m = url.match(/\/video\/(\d+)/);
-  return m ? m[1]! : null;
+  const tt = url.match(/\/video\/(\d+)/);
+  if (tt) return tt[1]!;
+  const ig = url.match(/\/(?:reel|reels|p)\/([A-Za-z0-9_-]+)/);
+  return ig ? ig[1]! : null;
+}
+
+// Author handle parsed from an Instagram URL: instagram.com/<handle>/(reel|p)/...
+// IG handles allow letters, digits, dots, underscores. Returns null when the URL
+// has no leading /<handle>/ (e.g. a bare /reel/<code>/ share link).
+export function igAuthorFromUrl(url: string | null | undefined): string {
+  if (!url) return "";
+  const m = url.match(/instagram\.com\/([A-Za-z0-9._]+)\/(?:reel|reels|p)\//i);
+  // Exclude the path keywords themselves (a bare /reel/<code>/ link has no handle).
+  if (!m || ["reel", "reels", "p", "explore"].includes(m[1]!.toLowerCase())) return "";
+  return m[1]!.toLowerCase();
+}
+
+// Infer the platform from a pasted URL's host (null when the arg isn't a URL or
+// the host is unrecognized — caller falls back to the --platform flag).
+export function platformFromArg(arg: string): Platform | null {
+  const t = arg.trim();
+  if (!/^https?:\/\//i.test(t)) return null;
+  if (/instagram\.com/i.test(t)) return "instagram";
+  if (/tiktok\.com/i.test(t)) return "tiktok";
+  return null;
 }
 
 // Display handle: the row's author when known, else parsed from the video URL
-// (user-mode catalog rows can carry a NULL author_handle).
+// (user-mode catalog rows can carry a NULL author_handle). Tries both the TikTok
+// and Instagram URL shapes so an IG row without an author_handle still resolves.
 export function displayHandle(video: Pick<VideoRecord, "author_handle" | "video_url">): string {
-  return video.author_handle || authorFromUrl(video.video_url) || "?";
+  return (
+    video.author_handle ||
+    authorFromUrl(video.video_url) ||
+    igAuthorFromUrl(video.video_url) ||
+    "?"
+  );
 }
 
 export function classifyTranscriptTarget(arg: string): TranscriptTarget {
@@ -221,8 +254,11 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
   const db = openDb();
   const config = loadConfig();
   // Route to the platform's provider so an instagram.com URL transcribes via the
-  // IG bridge and a tiktok URL via tiktok-oss.
-  const provider = getProvider(config, opts.platform);
+  // IG bridge and a tiktok URL via tiktok-oss. A pasted URL's host wins over the
+  // --platform flag (so `transcript https://instagram.com/reel/...` just works
+  // without remembering -p instagram).
+  const platform = platformFromArg(arg) ?? opts.platform;
+  const provider = getProvider(config, platform);
   // No up-front provider gate: cached transcripts must stay readable even when
   // the configured search provider can't transcribe (e.g. the user switched to
   // scrapecreators after building the cache with tiktok-oss). The check fires

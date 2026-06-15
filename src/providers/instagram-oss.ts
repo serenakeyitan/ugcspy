@@ -1,7 +1,8 @@
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import type { Platform, RawVideo } from "../types.ts";
+import type { Platform, RawVideo, TranscriptDoc } from "../types.ts";
 import { type DataProvider, ProviderError } from "./types.ts";
+import { TikTokOssProvider } from "./tiktok-oss.ts";
 import { venvExists, venvPython } from "../lib/venv.ts";
 
 // Browser-free Instagram bridge — the IG sibling of tiktok-oss. Free/OSS, built
@@ -54,6 +55,24 @@ export class InstagramOssProvider implements DataProvider {
       igCookieCount: Number(parsed.ig_cookie_count ?? 0),
       browser: String(parsed.browser ?? ""),
     };
+  }
+
+  // Transcription is platform-NEUTRAL: the transcript bridge mode just downloads
+  // a video's audio (yt-dlp on the http(s) URL — proven to work on Instagram
+  // Reels with NO cookies) and runs Whisper. So IG delegates to the same proven
+  // transcript path as TikTok rather than duplicating the Whisper pipeline. The
+  // IG video_url comes from fetchRecentVideos (a real cdninstagram .mp4) or a
+  // pasted instagram.com/reel/<shortcode> URL.
+  private transcriber = new TikTokOssProvider();
+
+  async fetchTranscript(videoUrl: string): Promise<TranscriptDoc> {
+    return this.transcriber.fetchTranscript(videoUrl);
+  }
+
+  async fetchTranscriptBatch(
+    videoUrls: string[],
+  ): Promise<Array<TranscriptDoc | { error: string }>> {
+    return this.transcriber.fetchTranscriptBatch(videoUrls);
   }
 
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {

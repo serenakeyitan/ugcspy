@@ -14,8 +14,10 @@ import {
   collectTranscripts,
   docFromCache,
   externalIdFromUrl,
+  igAuthorFromUrl,
   MAX_WAVE_SIZE,
   hookFor,
+  platformFromArg,
   transcribeScanCap,
 } from "../src/commands/transcript.ts";
 import { parseTranscriptBatchOutput, parseTranscriptOutput } from "../src/providers/tiktok-oss.ts";
@@ -526,6 +528,38 @@ describe("externalIdFromUrl (share-link cache matching)", () => {
   });
   test("short-links without /video/<id> yield null (fall back to exact match)", () => {
     expect(externalIdFromUrl("https://vm.tiktok.com/ZMabc123/")).toBeNull();
+  });
+  // Instagram: shortcode (alphanumeric + - _), not numeric. /reel/, /p/, /reels/.
+  test("Instagram reel/post/reels URLs yield the shortcode", () => {
+    expect(externalIdFromUrl("https://www.instagram.com/reel/DZjR_dosb9x/")).toBe("DZjR_dosb9x");
+    expect(externalIdFromUrl("https://www.instagram.com/nike/reel/DZjR_dosb9x/")).toBe("DZjR_dosb9x");
+    expect(externalIdFromUrl("https://instagram.com/p/C-aB_3xyz12/?igsh=abc")).toBe("C-aB_3xyz12");
+    expect(externalIdFromUrl("https://www.instagram.com/nike/reels/AbC-1_x/")).toBe("AbC-1_x");
+  });
+});
+
+describe("platformFromArg (pasted URL host wins over --platform flag)", () => {
+  test("instagram.com → instagram", () => {
+    expect(platformFromArg("https://www.instagram.com/reel/DZjR_dosb9x/")).toBe("instagram");
+  });
+  test("tiktok.com → tiktok", () => {
+    expect(platformFromArg("https://www.tiktok.com/@x/video/123")).toBe("tiktok");
+  });
+  test("non-URL args and unknown hosts → null (fall back to flag)", () => {
+    expect(platformFromArg("befreed")).toBeNull();
+    expect(platformFromArg("42")).toBeNull();
+    expect(platformFromArg("https://example.com/x")).toBeNull();
+  });
+});
+
+describe("igAuthorFromUrl (author recovery from an IG URL)", () => {
+  test("extracts the handle from instagram.com/<handle>/(reel|p)/...", () => {
+    expect(igAuthorFromUrl("https://www.instagram.com/nike/reel/DZjR_dosb9x/")).toBe("nike");
+    expect(igAuthorFromUrl("https://instagram.com/Some.Brand_1/p/AbC123/")).toBe("some.brand_1");
+  });
+  test("a bare /reel/<code>/ share link has no handle → empty", () => {
+    expect(igAuthorFromUrl("https://www.instagram.com/reel/DZjR_dosb9x/")).toBe("");
+    expect(igAuthorFromUrl(null)).toBe("");
   });
 });
 

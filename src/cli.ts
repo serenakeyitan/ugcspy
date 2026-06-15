@@ -128,13 +128,13 @@ program
 program
   .command("transcript <query>")
   .description(
-    "Hook + spoken transcript for videos. <query> = a cached brand/#tag/@handle (top N by views), a video id from `search --json`, or a TikTok URL. Classifies talking vs non-talking from the audio (music-bed lyrics don't count). Needs `install-deps --with-audio` (self-contained — bundles ffmpeg); ~10-40s per uncached video, batched into one model load.",
+    "Hook + spoken transcript for videos. <query> = a cached brand/#tag/@handle (top N by views), a video id from `search --json`, or a TikTok/Instagram video URL. Classifies talking vs non-talking from the audio (music-bed lyrics don't count). Needs `install-deps --with-audio` (self-contained — bundles ffmpeg); ~10-40s per uncached video, batched into one model load.",
   )
   .option("-t, --top <n>", "how many videos (brand/handle queries)", positiveInt, 3)
   .option("--talking", "only videos with real speech (scans down the ranked list)")
   .option("--non-talking", "only music/ambience videos with no real speech")
   .option("-d, --days <n>", "trailing window in days", positiveInt, 30)
-  .option("-p, --platform <name>", "tiktok", "tiktok")
+  .option("-p, --platform <name>", "tiktok | instagram", "tiktok")
   .option("--json", "emit JSON instead of formatted sections")
   .action(async (query: string, raw) => {
     await runTranscript(query, {
