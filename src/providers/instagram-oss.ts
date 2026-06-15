@@ -30,6 +30,11 @@ import { venvExists, venvPython } from "../lib/venv.ts";
 export class InstagramOssProvider implements DataProvider {
   readonly name = "instagram-oss";
 
+  // True if the most recent fetch hit an IG throttle. The daemon reads this to
+  // skip remaining IG watches for the tick (a cooldown) rather than launching
+  // fresh enrich loops against an already-rate-limited account (codex P2).
+  lastRunThrottled = false;
+
   // How many roster posts to enrich with view/play counts (the per-post GraphQL
   // step that costs ~4s each). Resolved from the user's depth choice (tier) by
   // the caller; the bridge caps at this. undefined → the bridge's own default.
@@ -78,6 +83,7 @@ export class InstagramOssProvider implements DataProvider {
   private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
     const raw = await this.spawnBridge(payload);
     const { videos, throttled } = parseIgVideosResponse(raw.stdout, raw.stderr);
+    this.lastRunThrottled = throttled;
     if (throttled) {
       // IG rate-limited the view-enrichment mid-run. The roster (likes/caption)
       // is still fresh and un-enriched videos keep their last-known view counts
@@ -205,7 +211,8 @@ export function parseIgVideosResponse(stdout: string, stderr: string): IgVideosR
       code === "re_login_required"
         ? " (set UGCSPY_IG_COOKIE_BROWSER to a browser logged into Instagram, or log in again)"
         : "";
-    throw new ProviderError(`${PROVIDER}: ${parsed.error}${hint}`, PROVIDER);
+    // Carry the structured code so callers branch on it (not message text).
+    throw new ProviderError(`${PROVIDER}: ${parsed.error}${hint}`, PROVIDER, undefined, code);
   }
   const videos = parsed.videos;
   if (!Array.isArray(videos)) {

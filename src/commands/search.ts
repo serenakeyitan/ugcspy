@@ -266,13 +266,14 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
         failedPlatforms.push(platform);
         const msg = (err as Error).message;
         spinner?.fail(`${platform}: ${msg}`);
-        // First-run / expired-session guidance for the Instagram path: turn the
-        // raw "no logged-in session" error into clear, actionable next steps.
-        if (
-          !opts.json &&
-          platform === "instagram" &&
-          /session|sessionid|log ?in|logged|cookie/i.test(msg)
-        ) {
+        // First-run / expired-session guidance for the Instagram path. Branch on
+        // the STRUCTURED error code, not message text (codex P2): only an actual
+        // session problem (re_login_required, or empty_or_blocked which is often a
+        // dead session) should show login steps — a deps_missing or cookie-DB-read
+        // failure is NOT a login issue and must not give login advice.
+        const code = (err as { code?: string }).code;
+        const isSessionIssue = code === "re_login_required" || code === "empty_or_blocked";
+        if (!opts.json && platform === "instagram" && isSessionIssue) {
           console.error(
             chalk.yellow("\nInstagram needs a logged-in browser session:") +
               `\n  1. Log into ${chalk.cyan("instagram.com")} in your browser.` +

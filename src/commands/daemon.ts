@@ -11,6 +11,7 @@ import {
 } from "../lib/breakout.ts";
 import { postBreakoutAlert, postThresholdReminder } from "../lib/slack.ts";
 import { getProvider } from "../providers/index.ts";
+import { InstagramOssProvider } from "../providers/instagram-oss.ts";
 import type { Competitor, Platform, VideoRecord, Watch } from "../types.ts";
 
 export interface DaemonOptions {
@@ -36,13 +37,32 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       return;
     }
 
+    // Once Instagram throttles us this tick, stop polling further IG watches —
+    // hammering an already-rate-limited account only deepens the limit and risks
+    // an account flag (codex P2). TikTok watches are unaffected and keep going.
+    let igThrottledThisTick = false;
+
     for (const w of watches) {
+      if (w.platform === "instagram" && igThrottledThisTick) {
+        ora().info(
+          `Skipping ${w.handle} (instagram) — rate-limited earlier this tick; will retry next run.`,
+        );
+        continue;
+      }
       const spinner = ora(`Polling ${w.handle} (${w.platform})...`).start();
       try {
         // Per-watch provider: a TikTok watch and an Instagram watch in the same
         // daemon use different OSS bridges.
         const provider = getProvider(config, w.platform as Platform);
         const fresh = await provider.fetchRecentVideos(w.handle, w.platform as Platform, opts.windowDays);
+        // If the IG provider got throttled, cool down the rest of the IG watches.
+        if (
+          w.platform === "instagram" &&
+          provider instanceof InstagramOssProvider &&
+          provider.lastRunThrottled
+        ) {
+          igThrottledThisTick = true;
+        }
         upsertVideos(db, w.competitor_id, fresh);
 
         // ABSOLUTE view-threshold mode: fire the moment any tracked video crosses

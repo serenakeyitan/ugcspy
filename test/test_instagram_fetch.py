@@ -118,17 +118,26 @@ def test_unsupported_mode_is_rejected(monkeypatch, capsys):
 
 
 def test_is_throttle_recognizes_ig_rate_limit_signatures():
-    # The markers IG actually returns on the authenticated GraphQL endpoint.
+    # Real throttle signatures on the authenticated GraphQL endpoint.
     for msg in (
         "403 Forbidden when accessing https://www.instagram.com/graphql/query",
         "401 Unauthorized - Please wait a few minutes before you try again",
         "429 Too Many Requests",
-        "redirected to login",
+        "HTTP 403: rate limit reached, try again later",
     ):
         assert ig._is_throttle(Exception(msg)), msg
-    # A normal per-post failure (a deleted/private post) is NOT a throttle.
-    assert not ig._is_throttle(Exception("Post ABC123 does not exist"))
+
+
+def test_is_throttle_does_not_false_positive(monkeypatch):
+    # codex P2: precise matching — these must NOT be treated as throttle:
+    #  - a dead post whose shortcode merely CONTAINS '401'
+    #  - a bare expired-session 401 (that's a re-login problem, not a rate-limit)
+    #  - unrelated errors
+    assert not ig._is_throttle(Exception("Post ABC401xyz does not exist"))
+    assert not ig._is_throttle(Exception("401 Unauthorized"))  # bare 401 = session, not throttle
+    assert not ig._is_throttle(Exception("403 Forbidden"))  # bare 403 w/o context or graphql/query
     assert not ig._is_throttle(Exception("JSON decode error"))
+    assert not ig._is_throttle(Exception("Profile nike does not exist"))
 
 
 def test_enrich_views_backs_off_on_throttle(monkeypatch):

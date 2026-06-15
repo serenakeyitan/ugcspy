@@ -33,7 +33,15 @@ export interface DataProvider {
 }
 
 export class ProviderError extends Error {
-  constructor(message: string, public provider: string, public override cause?: unknown) {
+  // Optional structured error code (e.g. the IG bridge's "re_login_required").
+  // Callers should branch on this, not on message text (codex P2: message
+  // matching mis-fires — a "cookie export" deps error is not a login problem).
+  constructor(
+    message: string,
+    public provider: string,
+    public override cause?: unknown,
+    public code?: string,
+  ) {
     super(message);
     this.name = "ProviderError";
   }
