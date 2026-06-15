@@ -193,5 +193,47 @@ export function parseIgVideosResponse(stdout: string, stderr: string): RawVideo[
       PROVIDER,
     );
   }
-  return videos as RawVideo[];
+  // VALIDATE + drop malformed rows rather than blindly casting (codex P2): a
+  // null/wrong-platform/missing-field row would otherwise crash ingestion
+  // (e.g. a null caption rolls back the whole upsert transaction) or persist
+  // bad cross-platform data. Mirrors the TikTok parser's per-row guard.
+  const valid: Record<string, unknown>[] = [];
+  for (const v of videos) {
+    if (isValidIgRawVideo(v)) valid.push(v);
+  }
+  return valid.map(coerceIgRawVideo);
+}
+
+// A bridge row is usable only if it has the keys the DB layer dereferences. We
+// require the identity fields; numeric/text fields are coerced to safe defaults
+// in coerceIgRawVideo so a partial row degrades instead of crashing.
+function isValidIgRawVideo(v: unknown): v is Record<string, unknown> {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const r = v as Record<string, unknown>;
+  // external_id is the unique key; platform must be instagram (never accept a
+  // row claiming another platform from the IG bridge).
+  if (typeof r.external_id !== "string" || r.external_id.length === 0) return false;
+  if (r.platform !== "instagram") return false;
+  return true;
+}
+
+// Coerce a validated row into a complete RawVideo, defaulting the fields the DB
+// upsert binds (a null caption/url is what crashes videos.ts). Defensive: the
+// bridge already emits these, but a partial gallery-dl row might omit some.
+function coerceIgRawVideo(v: Record<string, unknown>): RawVideo {
+  const num = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+  const str = (x: unknown): string => (typeof x === "string" ? x : "");
+  return {
+    platform: "instagram",
+    external_id: String(v.external_id),
+    posted_at: str(v.posted_at) || new Date(0).toISOString(),
+    caption: str(v.caption),
+    thumbnail_url: str(v.thumbnail_url),
+    video_url: str(v.video_url),
+    view_count: num(v.view_count),
+    like_count: num(v.like_count),
+    comment_count: num(v.comment_count),
+    share_count: num(v.share_count),
+    author_handle: typeof v.author_handle === "string" ? v.author_handle : null,
+  };
 }

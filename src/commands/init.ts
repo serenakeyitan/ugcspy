@@ -123,6 +123,11 @@ function printNextStep(config: Config): void {
       ),
     );
     console.log(`Then: ${chalk.cyan("ugcspy search liquiddeath --platform tiktok")}`);
+    console.log(
+      chalk.dim(
+        `  For Instagram, log into instagram.com in your browser, then ${chalk.cyan("ugcspy ig-session")} to verify (TikTok needs no login).`,
+      ),
+    );
   } else {
     console.log(`Run ${chalk.cyan("ugcspy search liquiddeath")} to try a search.`);
   }

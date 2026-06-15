@@ -9,6 +9,7 @@ import { runDiscover, runTrending } from "./commands/discover.ts";
 import { runSimilar } from "./commands/similar.ts";
 import { runWatchAdd, runWatchList, runWatchRemove } from "./commands/watch.ts";
 import { runDaemon } from "./commands/daemon.ts";
+import { runIgSession } from "./commands/ig-session.ts";
 import { runRender } from "./commands/render.ts";
 import { positiveFloat, positiveInt } from "./lib/cli-args.ts";
 import type { Platform } from "./types.ts";
@@ -180,6 +181,13 @@ watch.command("list").description("List configured watches").action(async () => 
 watch.command("remove <id>").description("Remove a watch by id").action(async (id: string) => {
   await runWatchRemove(id);
 });
+
+program
+  .command("ig-session")
+  .description("Check whether your browser is logged into Instagram (the IG path needs it)")
+  .action(async () => {
+    await runIgSession();
+  });
 
 program
   .command("daemon")

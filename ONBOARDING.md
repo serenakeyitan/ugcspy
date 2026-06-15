@@ -202,7 +202,7 @@ The most common flow for "I found a great video, I want to make something like i
 ## Honest limits to mention if asked
 
 - First search per brand takes a few minutes (~5-8 min for an active UGC brand with ~150 discovered creators — Stage 2 walks every discovered creator's catalog); cached after.
-- Free path covers TikTok only; Instagram needs paid ScrapeCreators.
+- Free path covers TikTok fully, plus Instagram for creator-roster tracking, transcript, and view-threshold alerts (a free gallery-dl + instaloader hybrid that needs a logged-in IG browser session — `ugcspy ig-session` to check). IG keyword/hashtag discovery and trending/snowball are TikTok-only on the free path; use paid ScrapeCreators for IG discovery.
 - Creator coverage is ~89% of the brand's UGC roster (51/57 for the mid-size brand we benchmarked); the unreachable few are very-low-view creators whose videos never enter any challenge feed, so the hashtag + follow-graph snowball never sees them.
 - Stage 2 coverage walks each creator's full public catalog from www.tiktok.com — that path is not rate-limited, so the 16-way default (`UGCSPY_WALK_CONCURRENCY=16`) is safe. Lower it if a host is CPU-bound.
 - video-recipe step 4 (vision reading) needs Claude Code or another harness with file + vision tools.

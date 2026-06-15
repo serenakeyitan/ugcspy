@@ -8,7 +8,6 @@ session: the gallery-dl / instaloader / cookie boundaries are not exercised here
 """
 import json
 import sys
-from datetime import datetime
 from pathlib import Path
 
 # scripts/ is not a package; load by path (same as the tiktok bridge tests).
@@ -61,9 +60,17 @@ def test_iso_normalizes_gallery_dl_datetime():
 def test_iso_handles_epoch_and_missing():
     epoch = ig._iso(1700000000)
     assert epoch.startswith("2023-")  # a real date, not a crash
-    # missing date → a valid current ISO timestamp
-    now = ig._iso(None)
-    datetime.fromisoformat(now.replace("Z", "+00:00"))  # parses without raising
+
+
+def test_iso_missing_or_unparseable_date_maps_to_epoch_not_now():
+    # codex P2: a missing/unparseable date must NOT default to now() — that makes
+    # an old partial row look freshly posted and can trip the 24h breakout filter.
+    # It must map to the UNIX epoch (1970), which can never look fresh.
+    for bad in (None, "", "not-a-date", "2026/06/15 weird"):
+        out = ig._iso(bad)
+        assert out.startswith("1970-01-01"), f"{bad!r} -> {out} (expected epoch)"
+    # a real parseable date still works
+    assert ig._iso("2026-06-14 03:31:05").startswith("2026-06-14T03:31:05")
 
 
 def test_author_handle_strips_leading_at():

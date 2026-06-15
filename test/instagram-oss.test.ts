@@ -76,4 +76,39 @@ describe("parseIgVideosResponse — the bridge {videos}/{error} contract", () =>
   test("missing videos array → clear error (no silent empty)", () => {
     expect(() => parseIgVideosResponse('{"unexpected":1}', "")).toThrow(/no videos array/);
   });
+
+  // codex P2: malformed rows must be dropped, not blindly cast — a null row,
+  // wrong-platform row, or missing-field row would otherwise crash ingestion
+  // (null caption rolls back the upsert) or persist bad cross-platform data.
+  test("drops null / wrong-platform / no-external-id rows; keeps + coerces valid ones", () => {
+    const body = JSON.stringify({
+      videos: [
+        null, // JSON null — must not TypeError
+        { platform: "tiktok", external_id: "x" }, // wrong platform — drop
+        { platform: "instagram" }, // no external_id — drop
+        { platform: "instagram", external_id: "OK1" }, // valid but partial — keep+coerce
+        {
+          platform: "instagram",
+          external_id: "OK2",
+          caption: "hi",
+          view_count: 100,
+          like_count: 5,
+        },
+      ],
+    });
+    const out = parseIgVideosResponse(body, "");
+    expect(out.map((v) => v.external_id)).toEqual(["OK1", "OK2"]);
+    // partial row coerced to safe defaults (no null caption that crashes the DB)
+    expect(out[0]!.caption).toBe("");
+    expect(out[0]!.view_count).toBe(0);
+    expect(out[0]!.platform).toBe("instagram");
+    // full row preserved
+    expect(out[1]!.view_count).toBe(100);
+    expect(out[1]!.caption).toBe("hi");
+  });
+
+  test("a videos array of entirely malformed rows yields an empty array, not a throw", () => {
+    const body = JSON.stringify({ videos: [null, { platform: "tiktok" }, 42, "nope"] });
+    expect(parseIgVideosResponse(body, "")).toEqual([]);
+  });
 });

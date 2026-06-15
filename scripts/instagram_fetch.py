@@ -194,9 +194,17 @@ def enrich_views(posts, cookies_path, max_enrich=None):
     return posts, enriched
 
 
+# When a post's date is missing/unparseable, fall back to the UNIX EPOCH, NOT
+# now(). A partial gallery-dl row mapped to now() looks "freshly posted" and can
+# falsely trip the daemon's 24h relative-breakout filter (codex P2). Epoch can
+# never look fresh; the absolute view-threshold path scans all-history and
+# ignores the date, so this is the safe default for both alert modes.
+_EPOCH_ISO = datetime.fromtimestamp(0, tz=timezone.utc).isoformat()
+
+
 def _iso(dateval):
     if not dateval:
-        return datetime.now(timezone.utc).isoformat()
+        return _EPOCH_ISO
     if isinstance(dateval, (int, float)):
         return datetime.fromtimestamp(dateval, tz=timezone.utc).isoformat()
     # gallery-dl emits "YYYY-MM-DD HH:MM:SS"
@@ -205,7 +213,8 @@ def _iso(dateval):
             return datetime.strptime(str(dateval), fmt).replace(tzinfo=timezone.utc).isoformat()
         except ValueError:
             continue
-    return str(dateval)
+    # Unparseable, non-empty → epoch too (don't persist a bogus string as a date).
+    return _EPOCH_ISO
 
 
 def to_raw_video(p):
@@ -234,7 +243,14 @@ def run_user(req):
     max_enrich = req.get("max_enrich")
     if not (isinstance(max_enrich, int) and max_enrich > 0):
         max_enrich = MAX_ENRICH
-    limit = max(int(req.get("limit") or 30), max_enrich)
+    # Roster walk depth. gallery-dl walks newest-first and has no date filter, so
+    # we pull a generous window (>= the enrich count, floor ROSTER_MIN) to keep
+    # RECENT videos refreshing each tick. Like the TikTok free path, very old
+    # videos beyond this depth keep their last-seen counts — a daemon that polls
+    # regularly re-walks the top of the roster every tick, so any video still in
+    # that window stays current. Tune with UGCSPY_IG_ROSTER_LIMIT.
+    roster_min = int(os.environ.get("UGCSPY_IG_ROSTER_LIMIT", "60"))
+    limit = max(int(req.get("limit") or 0), max_enrich, roster_min)
 
     with tempfile.TemporaryDirectory() as tmp:
         cookies_path = os.path.join(tmp, "ig_cookies.txt")

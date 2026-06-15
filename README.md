@@ -235,17 +235,19 @@ bun run src/cli.ts watch remove 1
 
 | Provider | Cost | Coverage | Setup |
 |---|---|---|---|
-| `tiktok-oss` | **Free** | TikTok only | `ugcspy install-deps` (one-time) |
-| `scrapecreators` | Paid | TikTok + Instagram Reels | API key from scrapecreators.com |
+| `tiktok-oss` | **Free** | TikTok (full) **+ Instagram** (user roster, transcript, view-threshold alerts) | `ugcspy install-deps` (one-time) + a logged-in IG browser session for IG |
+| `scrapecreators` | Paid | TikTok + Instagram Reels (incl. IG keyword/hashtag search) | API key from scrapecreators.com |
 | `mock` | Free | Synthetic | None — useful for trying the CLI shape |
 | `apify`, `bright_data` | — | — | Stubs for future drop-in providers |
 
 **Recommended path:**
 - Try `mock` first to see how the CLI works.
-- For real data: `tiktok-oss` is free and covers TikTok competitor tracking. The default path runs on the tikwm relay (discovery) + yt-dlp (coverage); [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) (6.3k stars, v7.3.3 shipped April 2026) is kept for the optional `UGCSPY_USE_CHROMIUM=1` fallbacks (user-mode rescue + extra discovery) — all via a Python subprocess.
-- Add `scrapecreators` if you need Instagram Reels coverage or hit rate limits on the OSS path.
+- For real data: `tiktok-oss` is free and covers both platforms. TikTok runs on the tikwm relay (discovery) + yt-dlp (coverage), browser-free. **Instagram** runs on a free hybrid — `gallery-dl` walks a creator's roster (caption, likes, downloadable video URL) and `instaloader` enriches each post with view/play counts — driven by a logged-in IG browser session (`ugcspy ig-session` to check; default reads Safari, override with `UGCSPY_IG_COOKIE_BROWSER`). [davidteather/TikTok-Api](https://github.com/davidteather/TikTok-Api) is kept for the optional `UGCSPY_USE_CHROMIUM=1` TikTok fallbacks.
+- Add `scrapecreators` if you want IG keyword/hashtag discovery (the free IG path can't do those) or no-session-required IG access.
 
-**Why no free Instagram option?** No production-grade free Instagram Reels scraper is currently maintained. Meta is more aggressive than TikTok about killing scrapers, and the leading repos either require login (ban risk for the user's account) or have been abandoned. ScrapeCreators is the honest answer for IG until that changes.
+**Instagram coverage (free path).** Works: `search @creator --platform instagram` (roster with view counts), `transcript <reel-url>` (Whisper), and `watch add @creator --platform instagram --view-threshold N` (Slack reminders on view milestones). **TikTok-only** — no honest free Instagram source exists for these: `trending`, `similar`/snowball (IG's follow graph is private), and keyword/hashtag discovery (no free IG search relay; tikwm is TikTok-only). For IG keyword/hashtag, use the paid `scrapecreators` provider.
+
+**A note on the IG session.** The free IG path needs you logged into Instagram in a browser (the session is read locally; nothing is uploaded). Sessions expire — if IG watches stop firing, run `ugcspy ig-session` and re-login. Scraping carries some account risk; a dedicated/burner IG account is the safe choice for heavy use.
 
 ## Why
 
