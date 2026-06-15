@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ScrapeCreatorsProvider, mapItems } from "../src/providers/scrapecreators.ts";
 import { getProvider } from "../src/providers/index.ts";
 import { effectiveScraperKey } from "../src/lib/config.ts";
@@ -81,10 +84,20 @@ describe("getProvider IG routing: ScrapeCreators when key present, free fallback
   });
 
   test("tiktok-oss + instagram + NO key → free instagram-oss fallback", () => {
-    const cfg = { scraper_provider: "tiktok-oss" } as Config;
-    // Note: this reads no env key and (in CI) no key file → free path.
-    const name = getProvider(cfg, "instagram").name;
-    expect(["instagram-oss", "scrapecreators"]).toContain(name); // scrapecreators only if a local key file exists
+    // Isolate HOME so a real ~/.ugcspy/scrapecreators.key on the dev machine
+    // can't leak in — assert the genuine keyless fallback deterministically.
+    const savedHome = process.env.UGCSPY_HOME;
+    const savedKey = process.env.UGCSPY_SCRAPER_API_KEY;
+    process.env.UGCSPY_HOME = mkdtempSync(join(tmpdir(), "ugcspy-sc-nokey-"));
+    delete process.env.UGCSPY_SCRAPER_API_KEY;
+    try {
+      const cfg = { scraper_provider: "tiktok-oss" } as Config;
+      expect(getProvider(cfg, "instagram").name).toBe("instagram-oss");
+    } finally {
+      if (savedHome === undefined) delete process.env.UGCSPY_HOME;
+      else process.env.UGCSPY_HOME = savedHome;
+      if (savedKey !== undefined) process.env.UGCSPY_SCRAPER_API_KEY = savedKey;
+    }
   });
 
   test("tiktok-oss + tiktok → tiktok-oss regardless of key", () => {

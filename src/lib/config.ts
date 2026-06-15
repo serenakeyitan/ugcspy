@@ -56,7 +56,10 @@ export function effectiveScraperKey(config: Config): string | undefined {
   const fromEnvOrConfig = (process.env.UGCSPY_SCRAPER_API_KEY ?? config.scraper_api_key)?.trim();
   if (fromEnvOrConfig) return fromEnvOrConfig;
   try {
-    const keyPath = join(homedir(), ".ugcspy", "scrapecreators.key");
+    // UGCSPY_HOME overrides the ~/.ugcspy base (lets users relocate state, and
+    // lets tests point at an empty dir so an ambient key file can't leak in).
+    const base = process.env.UGCSPY_HOME ?? join(homedir(), ".ugcspy");
+    const keyPath = join(base, "scrapecreators.key");
     if (existsSync(keyPath)) {
       const k = readFileSync(keyPath, "utf8").trim();
       if (k) return k;
