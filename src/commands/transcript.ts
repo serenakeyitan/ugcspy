@@ -220,7 +220,9 @@ export async function runTranscript(arg: string, opts: TranscriptOptions): Promi
   }
   const db = openDb();
   const config = loadConfig();
-  const provider = getProvider(config);
+  // Route to the platform's provider so an instagram.com URL transcribes via the
+  // IG bridge and a tiktok URL via tiktok-oss.
+  const provider = getProvider(config, opts.platform);
   // No up-front provider gate: cached transcripts must stay readable even when
   // the configured search provider can't transcribe (e.g. the user switched to
   // scrapecreators after building the cache with tiktok-oss). The check fires

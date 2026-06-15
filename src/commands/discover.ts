@@ -182,7 +182,9 @@ export interface DiscoverOptions {
 export async function runDiscover(query: string, opts: DiscoverOptions): Promise<void> {
   const db = openDb();
   const config = loadConfig();
-  const provider = getProvider(config);
+  // Keyword/trending discovery is TikTok-only (no free IG search/trending relay —
+  // tikwm is TikTok-only); route to the TikTok provider explicitly.
+  const provider = getProvider(config, "tiktok");
 
   const spinner = opts.json ? null : ora();
   let corpus: RawVideo[];
@@ -276,7 +278,8 @@ export async function runTrending(
 ): Promise<void> {
   const db = openDb();
   const config = loadConfig();
-  const provider = getProvider(config);
+  // Trending is TikTok-only (no public IG trending feed); route to TikTok.
+  const provider = getProvider(config, "tiktok");
   if (!provider.fetchTrendingVideos) {
     console.error(chalk.red(`Provider '${provider.name}' has no trending support.`));
     process.exit(1);

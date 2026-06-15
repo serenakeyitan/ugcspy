@@ -21,7 +21,6 @@ export interface DaemonOptions {
 
 export async function runDaemon(opts: DaemonOptions): Promise<void> {
   const config = loadConfig();
-  const provider = getProvider(config);
   const db = openDb();
 
   const tick = async () => {
@@ -40,6 +39,9 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     for (const w of watches) {
       const spinner = ora(`Polling ${w.handle} (${w.platform})...`).start();
       try {
+        // Per-watch provider: a TikTok watch and an Instagram watch in the same
+        // daemon use different OSS bridges.
+        const provider = getProvider(config, w.platform as Platform);
         const fresh = await provider.fetchRecentVideos(w.handle, w.platform as Platform, opts.windowDays);
         upsertVideos(db, w.competitor_id, fresh);
 

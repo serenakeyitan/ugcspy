@@ -199,12 +199,14 @@ export async function runSearch(queryRaw: string, opts: SearchOptions): Promise<
 
   const platforms: Platform[] =
     !opts.platform || opts.platform === "all" ? ["tiktok", "instagram"] : [opts.platform];
-  const provider = getProvider(config);
 
   const allVideos: VideoRecord[] = [];
   const failedPlatforms: Platform[] = [];
 
   for (const platform of platforms) {
+    // Provider is platform-specific (tiktok-oss vs instagram-oss): resolve it
+    // per platform so a single `--platform all` run routes each correctly.
+    const provider = getProvider(config, platform);
     const competitorId = upsertCompetitor(db, query.key, platform);
     const cached = readCachedVideos(db, competitorId, platform, opts.days);
     let videos = cached;

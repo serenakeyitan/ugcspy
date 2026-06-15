@@ -78,7 +78,9 @@ export async function runSimilar(seedsRaw: string[], opts: SimilarOptions): Prom
   }
 
   const config = loadConfig();
-  const provider = getProvider(config);
+  // Follow-graph similarity is TikTok-only (Instagram's follow graph is private —
+  // no honest free source); route to the TikTok provider explicitly.
+  const provider = getProvider(config, "tiktok");
   if (!provider.fetchSimilarCreators) {
     throw new ProviderError(
       `provider '${provider.name}' has no follow-graph similarity source`,
