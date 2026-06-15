@@ -171,6 +171,20 @@ def test_enrich_views_backs_off_on_throttle(monkeypatch):
     assert all(not p.get("views_enriched") for p in out)
 
 
+def test_enrich_views_cookie_load_failure_returns_4tuple(monkeypatch):
+    # codex P2 r2: the cookie-load-failure early return must be a 4-tuple too, or
+    # the callers' (posts, enriched, throttled, session) unpack raises ValueError.
+    def _boom(cp):
+        raise RuntimeError("no cookies")
+
+    monkeypatch.setattr(ig, "_load_cookie_dict", _boom)
+    posts = [{"shortcode": "A", "is_video": True}]
+    result = ig.enrich_views(posts, "cookies.txt", max_enrich=5)
+    assert len(result) == 4  # must unpack cleanly in run_user/run_hashtag
+    out, enriched, throttled, session_expired = result
+    assert enriched == 0 and throttled is False and session_expired is False
+
+
 def test_enrich_views_401_is_session_expired_not_throttle(monkeypatch):
     # codex P2 round-2: a bare 401 is an EXPIRED SESSION (re-login), NOT a
     # throttle. enrich_views must flag session_expired (so the caller says

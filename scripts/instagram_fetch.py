@@ -232,7 +232,9 @@ def enrich_views(posts, cookies_path, max_enrich=None):
     try:
         cookies = _load_cookie_dict(cookies_path)
     except Exception:
-        return posts, 0, False
+        # 4-tuple to match the success path (codex P2 r2): a 3-tuple here would
+        # ValueError when the callers unpack (posts, enriched, throttled, session).
+        return posts, 0, False, False
 
     attempted = 0
     enriched = 0
