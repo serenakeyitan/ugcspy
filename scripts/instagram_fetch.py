@@ -237,6 +237,7 @@ def enrich_views(posts, cookies_path, max_enrich=None):
     attempted = 0
     enriched = 0
     throttled = False
+    session_expired = False
     for p in posts:
         if not p.get("is_video"):
             continue
@@ -248,6 +249,13 @@ def enrich_views(posts, cookies_path, max_enrich=None):
             if media is None:
                 continue
             p["is_video"] = bool(media.get("is_video"))
+            # video_confirmed = the direct POST authoritatively said this is a
+            # video. Hashtag rows start is_video=True OPTIMISTICALLY (the listing
+            # omits media type); only rows that reach here AND confirm are real
+            # videos. run_hashtag emits on video_confirmed, NOT the optimistic
+            # is_video, so un-attempted/throttled/image rows never leak as fake
+            # videos (codex P2).
+            p["video_confirmed"] = p["is_video"]
             if not p["is_video"]:
                 continue  # image post discovered under the tag — caller drops it
             metric = media.get("video_play_count") or media.get("video_view_count")
@@ -262,8 +270,13 @@ def enrich_views(posts, cookies_path, max_enrich=None):
             if not p.get("username") and owner.get("username"):
                 p["username"] = owner["username"]
         except urllib.error.HTTPError as e:
-            # 403/429 = throttle → stop the whole run (continuing deepens it).
-            if e.code in (403, 429, 401) or _is_throttle(e):
+            # 403/429 = rate-limit throttle → stop (continuing deepens it).
+            # 401 = EXPIRED SESSION, not a throttle (codex P2): stop too, but flag
+            # session_expired so the caller says 're-login', not 'ease off'.
+            if e.code == 401:
+                session_expired = True
+                break
+            if e.code in (403, 429) or _is_throttle(e):
                 throttled = True
                 break
             # other HTTP error on one post → skip just it
@@ -273,7 +286,7 @@ def enrich_views(posts, cookies_path, max_enrich=None):
                 break
             # non-throttle (dead/private post) → skip just it
         time.sleep(ENRICH_SLEEP_S)
-    return posts, enriched, throttled
+    return posts, enriched, throttled, session_expired
 
 
 # When a post's date is missing/unparseable, fall back to the UNIX EPOCH, NOT
@@ -366,7 +379,13 @@ def run_user(req):
                 f"session may have expired — re-login in {COOKIE_BROWSER}.",
                 "empty_or_blocked",
             )
-        roster, enriched, throttled = enrich_views(roster, cookies_path, max_enrich)
+        roster, enriched, throttled, session_expired = enrich_views(roster, cookies_path, max_enrich)
+        if session_expired:
+            _fail(
+                f"Instagram session expired (401) mid-fetch. Re-login to "
+                f"instagram.com in {COOKIE_BROWSER} and retry.",
+                "re_login_required",
+            )
         videos = [to_raw_video(p) for p in roster if p.get("is_video")]
         _emit(
             {
@@ -475,8 +494,19 @@ def run_hashtag(req):
                 f"{COOKIE_BROWSER} and retry.",
                 "empty_or_blocked",
             )
-        posts, enriched, throttled = enrich_views(posts, cookies_path, max_enrich)
-        videos = [to_raw_video(p) for p in posts if p.get("is_video")]
+        posts, enriched, throttled, session_expired = enrich_views(posts, cookies_path, max_enrich)
+        if session_expired:
+            _fail(
+                f"Instagram session expired (401) mid-fetch. Re-login to "
+                f"instagram.com in {COOKIE_BROWSER} and retry.",
+                "re_login_required",
+            )
+        # Emit ONLY rows the enrich POST positively CONFIRMED as video (codex P2):
+        # hashtag rows are optimistically is_video=True since the listing omits the
+        # media type, so un-attempted/throttled/image rows would otherwise leak as
+        # fake videos with fabricated /reel/ URLs. video_confirmed is set only on a
+        # confirmed-video POST.
+        videos = [to_raw_video(p) for p in posts if p.get("video_confirmed")]
         # Apply the trailing-window cutoff (the hashtag listing is NOT date-sorted
         # or date-filtered by IG, so it mixes in old posts). Keep videos with a
         # real posted_at within `days`; drop epoch-dated (unknown-date) rows from a

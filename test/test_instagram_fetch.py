@@ -164,15 +164,37 @@ def test_enrich_views_backs_off_on_throttle(monkeypatch):
         {"shortcode": "B", "is_video": True},
         {"shortcode": "C", "is_video": True},
     ]
-    out, enriched, throttled = ig.enrich_views(posts, "cookies.txt", max_enrich=10)
+    out, enriched, throttled, session_expired = ig.enrich_views(posts, "cookies.txt", max_enrich=10)
     assert throttled is True
+    assert session_expired is False  # 403 = throttle, not session-expired
     assert enriched == 0
     assert all(not p.get("views_enriched") for p in out)
 
 
+def test_enrich_views_401_is_session_expired_not_throttle(monkeypatch):
+    # codex P2 round-2: a bare 401 is an EXPIRED SESSION (re-login), NOT a
+    # throttle. enrich_views must flag session_expired (so the caller says
+    # 're-login'), and must NOT set throttled (which says 'ease off').
+    import urllib.error
+
+    monkeypatch.setattr(ig, "ENRICH_SLEEP_S", 0)
+    monkeypatch.setattr(ig, "_load_cookie_dict", lambda cp: {"csrftoken": "x"})
+
+    def _raise_401(shortcode, cookies):
+        raise urllib.error.HTTPError("https://www.instagram.com/graphql/query", 401, "Unauthorized", {}, None)
+
+    monkeypatch.setattr(ig, "_fetch_post_media", _raise_401)
+    out, enriched, throttled, session_expired = ig.enrich_views(
+        [{"shortcode": "A", "is_video": True}], "cookies.txt", max_enrich=10
+    )
+    assert session_expired is True
+    assert throttled is False
+
+
 def test_enrich_views_direct_post_sets_views_and_drops_images(monkeypatch):
     # The direct-POST fetcher is authoritative on is_video: a Reel gets a real
-    # view_count + views_enriched; an image post gets is_video=False (caller drops).
+    # view_count + views_enriched + video_confirmed; an image gets is_video=False
+    # and NO video_confirmed (so run_hashtag drops it).
     monkeypatch.setattr(ig, "ENRICH_SLEEP_S", 0)
     monkeypatch.setattr(ig, "_load_cookie_dict", lambda cp: {"csrftoken": "x"})
 
@@ -187,13 +209,28 @@ def test_enrich_views_direct_post_sets_views_and_drops_images(monkeypatch):
         {"shortcode": "REEL", "is_video": True},
         {"shortcode": "IMG", "is_video": True},  # optimistic flag from hashtag listing
     ]
-    out, enriched, throttled = ig.enrich_views(posts, "cookies.txt", max_enrich=10)
-    assert throttled is False
+    out, enriched, throttled, session_expired = ig.enrich_views(posts, "cookies.txt", max_enrich=10)
+    assert throttled is False and session_expired is False
     assert enriched == 1
     reel = next(p for p in out if p["shortcode"] == "REEL")
     img = next(p for p in out if p["shortcode"] == "IMG")
     assert reel["view_count"] == 12345 and reel["views_enriched"] is True
-    assert img["is_video"] is False  # corrected → caller drops it
+    assert reel["video_confirmed"] is True  # run_hashtag emits this
+    assert img["is_video"] is False and img.get("video_confirmed") is False  # dropped
+
+
+def test_unattempted_hashtag_rows_are_not_video_confirmed(monkeypatch):
+    # codex P2: rows past the enrich cap keep optimistic is_video=True but get NO
+    # video_confirmed flag → run_hashtag must NOT emit them as fake videos.
+    monkeypatch.setattr(ig, "ENRICH_SLEEP_S", 0)
+    monkeypatch.setattr(ig, "_load_cookie_dict", lambda cp: {"csrftoken": "x"})
+    monkeypatch.setattr(ig, "_fetch_post_media", lambda sc, ck: {"is_video": True, "video_play_count": 9})
+
+    posts = [{"shortcode": s, "is_video": True} for s in ("A", "B", "C")]
+    out, enriched, throttled, _ = ig.enrich_views(posts, "cookies.txt", max_enrich=1)  # cap=1
+    confirmed = [p for p in out if p.get("video_confirmed")]
+    assert len(confirmed) == 1  # only the 1 attempted row is confirmed
+    assert not out[2].get("video_confirmed")  # the unattempted row is NOT confirmed
 
 
 class _FakeStdin:
