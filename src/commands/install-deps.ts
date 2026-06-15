@@ -98,7 +98,7 @@ export async function runInstallDeps(opts: InstallDepsOptions = {}): Promise<voi
   const smoke = ora("Verifying bridge imports").start();
   const smokeResult = await run(py, [
     "-c",
-    "import asyncio, json, yt_dlp; from TikTokApi import TikTokApi; print('ok')",
+    "import asyncio, json, yt_dlp, gallery_dl, instaloader; from TikTokApi import TikTokApi; print('ok')",
   ]);
   if (!smokeResult.ok || !smokeResult.stdout.includes("ok")) {
     smoke.fail("Bridge import check failed");

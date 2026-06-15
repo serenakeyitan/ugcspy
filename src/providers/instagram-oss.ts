@@ -1,5 +1,8 @@
-import type { Platform, RawVideo, TranscriptDoc } from "../types.ts";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import type { Platform, RawVideo } from "../types.ts";
 import { type DataProvider, ProviderError } from "./types.ts";
+import { venvExists, venvPython } from "../lib/venv.ts";
 
 // Browser-free Instagram bridge — the IG sibling of tiktok-oss. Free/OSS, built
 // on a HYBRID of two tools driven off a logged-in IG browser session:
@@ -16,36 +19,155 @@ import { type DataProvider, ProviderError } from "./types.ts";
 // snowball/similar (follow-graph is private), keyword search (no free IG search
 // relay; tikwm is TikTok-only).
 //
-// AUTH: needs a live logged-in IG session (cookies exported from a browser).
-// Sessions expire — a missing/expired sessionid surfaces as a clear
-// "re-login required" ProviderError rather than a silent empty result.
+// AUTH: needs a live logged-in IG session (cookies exported from a browser,
+// default safari — override with UGCSPY_IG_COOKIE_BROWSER). Sessions expire — a
+// missing/expired sessionid surfaces as a clear "re-login required"
+// ProviderError rather than a silent empty result.
 //
-// NOTE: the gallery-dl + instaloader bridge implementation lands in Phase 2.
-// This stub establishes the platform-routing seam (getProvider routes
-// platform='instagram' here) and fails loudly until then, exactly like the
-// scrapecreators stub did before its Day-0 spike.
+// All real work happens in scripts/instagram_fetch.py (managed venv); this class
+// is the spawn + parse seam, mirroring tiktok-oss.ts.
 export class InstagramOssProvider implements DataProvider {
   readonly name = "instagram-oss";
 
-  async fetchRecentVideos(_handle: string, platform: Platform, _days: number): Promise<RawVideo[]> {
+  async fetchRecentVideos(handle: string, platform: Platform, days: number): Promise<RawVideo[]> {
     if (platform !== "instagram") {
       throw new ProviderError(
         `Provider 'instagram-oss' only supports instagram (got '${platform}'). Use 'tiktok-oss' for TikTok.`,
         this.name,
       );
     }
-    throw new ProviderError(
-      "Instagram fetch bridge (gallery-dl roster + instaloader view enrichment) is not yet wired — Phase 2. Use --provider mock to exercise the IG code path meanwhile.",
-      this.name,
-    );
+    return this.runBridge({ mode: "user", handle, days });
   }
 
-  // Transcript reuses the existing audio-download + Whisper path; the IG
-  // video_url comes from the Phase-2 bridge. Implemented in Phase 3.
-  async fetchTranscript(_videoUrl: string): Promise<TranscriptDoc> {
+  // Is the configured browser logged into Instagram? Surfaces the session
+  // health the IG path depends on (the daemon/init can warn before a walk).
+  async sessionCheck(): Promise<{ loggedIn: boolean; igCookieCount: number; browser: string }> {
+    const raw = await this.spawnBridge({ mode: "session_check" });
+    const parsed = parseIgJson(raw.stdout, raw.stderr);
+    return {
+      loggedIn: !!parsed.logged_in,
+      igCookieCount: Number(parsed.ig_cookie_count ?? 0),
+      browser: String(parsed.browser ?? ""),
+    };
+  }
+
+  private async runBridge(payload: Record<string, unknown>): Promise<RawVideo[]> {
+    const raw = await this.spawnBridge(payload);
+    return parseIgVideosResponse(raw.stdout, raw.stderr);
+  }
+
+  private async spawnBridge(
+    payload: Record<string, unknown>,
+  ): Promise<{ exit: number; stdout: string; stderr: string }> {
+    if (!venvExists()) {
+      throw new ProviderError(
+        `instagram-oss venv not found at ${venvPython()}. Run \`ugcspy install-deps\` to set it up (installs gallery-dl + instaloader).`,
+        this.name,
+      );
+    }
+    const scriptPath = resolveIgScript();
+    const proc = Bun.spawn([venvPython(), scriptPath], {
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: { ...process.env },
+    });
+    proc.stdin.write(JSON.stringify(payload));
+    await proc.stdin.end();
+
+    // Deadline so a hung walk (rate-limit loop, stuck enrich) can't wedge a
+    // daemon tick forever. The per-post enrich sleep makes IG slower than
+    // TikTok, so the default is generous; tune via UGCSPY_BRIDGE_TIMEOUT_MS.
+    const timeoutMs = Number(process.env.UGCSPY_BRIDGE_TIMEOUT_MS ?? 30 * 60 * 1000);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      proc.kill();
+    }, timeoutMs);
+
+    let exit: number;
+    let stdout: string;
+    let stderr: string;
+    try {
+      [stdout, stderr] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ]);
+      exit = await proc.exited;
+    } finally {
+      clearTimeout(timer);
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+    }
+
+    if (timedOut) {
+      throw new ProviderError(
+        `instagram-oss: bridge timed out after ${timeoutMs}ms — raise UGCSPY_BRIDGE_TIMEOUT_MS if a large roster walk legitimately needs longer.`,
+        this.name,
+      );
+    }
+    return { exit, stdout, stderr };
+  }
+}
+
+function resolveIgScript(): string {
+  // scripts/instagram_fetch.py at the repo root. Same dev/dist/npm walk as the
+  // TikTok bridge resolver.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(here, "..", "..", "scripts", "instagram_fetch.py"),
+    resolve(here, "..", "scripts", "instagram_fetch.py"),
+  ];
+  for (const path of candidates) {
+    try {
+      if (Bun.file(path).size > 0) return path;
+    } catch {
+      // try next
+    }
+  }
+  return candidates[0]!;
+}
+
+const PROVIDER = "instagram-oss";
+
+// Parse the bridge's JSON stdout (exported so it can be unit-tested without a
+// live spawn). Throws a clear ProviderError on empty/non-JSON output.
+export function parseIgJson(stdout: string, stderr: string): Record<string, unknown> {
+  const trimmed = (stdout ?? "").trim();
+  if (!trimmed) {
     throw new ProviderError(
-      "Instagram transcript is not yet wired — Phase 3.",
-      this.name,
+      `${PROVIDER}: bridge produced no output. stderr: ${(stderr ?? "").slice(0, 300)}`,
+      PROVIDER,
     );
   }
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    throw new ProviderError(
+      `${PROVIDER}: bridge output was not JSON: ${trimmed.slice(0, 300)}`,
+      PROVIDER,
+    );
+  }
+}
+
+// Parse a {videos} / {error,code} response into RawVideo[]. The bridge reports
+// errors in-band as {error, code}; `re_login_required` is the one the operator
+// must act on, so it gets an actionable hint.
+export function parseIgVideosResponse(stdout: string, stderr: string): RawVideo[] {
+  const parsed = parseIgJson(stdout, stderr);
+  if (parsed.error) {
+    const code = String(parsed.code ?? "error");
+    const hint =
+      code === "re_login_required"
+        ? " (set UGCSPY_IG_COOKIE_BROWSER to a browser logged into Instagram, or log in again)"
+        : "";
+    throw new ProviderError(`${PROVIDER}: ${parsed.error}${hint}`, PROVIDER);
+  }
+  const videos = parsed.videos;
+  if (!Array.isArray(videos)) {
+    throw new ProviderError(
+      `${PROVIDER}: bridge returned no videos array: ${(stdout ?? "").slice(0, 300)}`,
+      PROVIDER,
+    );
+  }
+  return videos as RawVideo[];
 }
