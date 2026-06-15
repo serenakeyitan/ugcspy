@@ -204,10 +204,19 @@ export function parseIgVideosResponse(stdout: string, stderr: string): RawVideo[
   return valid.map(coerceIgRawVideo);
 }
 
-// The epoch ISO the bridge emits for a missing/unparseable date. A row carrying
-// it has NO real date, so we drop it (see isValidIgRawVideo) rather than persist
-// a fabricated date that would overwrite a previously-good one on upsert.
-const EPOCH_ISO = new Date(0).toISOString();
+// A posted_at is "real" only if it parses AND is meaningfully after the epoch.
+// IMPORTANT (codex P2 round 3): the Python bridge stamps a missing date as the
+// epoch in OFFSET form ("1970-01-01T00:00:00+00:00"), which does NOT
+// string-equal JS's `new Date(0).toISOString()` ("…00.000Z"). So we compare by
+// PARSED TIMESTAMP, not string — robust to any epoch representation. We allow a
+// 1-day grace so a legitimately-1970 post (none exist on IG) isn't the cutoff;
+// anything at/below ~epoch is treated as "no real date".
+const EPOCH_GRACE_MS = 24 * 60 * 60 * 1000;
+function hasRealDate(posted_at: unknown): boolean {
+  if (typeof posted_at !== "string" || posted_at === "") return false;
+  const t = Date.parse(posted_at);
+  return Number.isFinite(t) && t > EPOCH_GRACE_MS;
+}
 
 // A bridge row is usable only if it has the keys the DB layer dereferences. We
 // require the identity fields AND a real posted_at; other fields are coerced to
@@ -219,14 +228,12 @@ function isValidIgRawVideo(v: unknown): v is Record<string, unknown> {
   // row claiming another platform from the IG bridge).
   if (typeof r.external_id !== "string" || r.external_id.length === 0) return false;
   if (r.platform !== "instagram") return false;
-  // DROP rows with no real date (codex P2 round 2): the bridge stamps a missing
-  // date as the epoch. Persisting that would make the row look ancient AND, on a
-  // re-fetch where the row came back partial, the upsert would OVERWRITE a
-  // previously-correct date with epoch — silently yanking the video out of
-  // relative-breakout windows. A dateless row is unusable for windowing anyway.
-  if (typeof r.posted_at !== "string" || r.posted_at === EPOCH_ISO || r.posted_at === "") {
-    return false;
-  }
+  // DROP rows with no real date: the bridge stamps a missing date as the epoch.
+  // Persisting that would make the row look ancient AND, on a re-fetch where the
+  // row came back partial, the upsert would OVERWRITE a previously-correct date
+  // with epoch — silently yanking the video out of relative-breakout windows. A
+  // dateless row is unusable for windowing anyway.
+  if (!hasRealDate(r.posted_at)) return false;
   return true;
 }
 

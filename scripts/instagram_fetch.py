@@ -167,12 +167,18 @@ def enrich_views(posts, cookies_path, max_enrich=None):
         # without views (likes still present) rather than failing the whole walk.
         return posts, 0
 
+    # The cap counts ATTEMPTS (one ~4s GraphQL call each), not successes — that's
+    # what bounds the run's cost/time/rate-limit exposure for an explicit tier
+    # (codex P2 round 3). Counting only successes let failures/zero-view posts
+    # slip past the cap, so a quick-tier search could attempt the whole roster.
+    attempted = 0
     enriched = 0
     for p in posts:
         if not p.get("is_video"):
             continue
-        if enriched >= cap:
+        if attempted >= cap:
             break
+        attempted += 1
         try:
             post = instaloader.Post.from_shortcode(L.context, p["shortcode"])
             vv = getattr(post, "video_view_count", None) if post.is_video else None

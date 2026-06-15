@@ -116,12 +116,15 @@ describe("parseIgVideosResponse — the bridge {videos}/{error} contract", () =>
   // upsert overwrites a previously-good date with epoch, yanking the video out of
   // relative-breakout windows.
   test("drops rows with a missing or epoch posted_at (no date-corruption on upsert)", () => {
-    const epoch = new Date(0).toISOString();
     const body = JSON.stringify({
       videos: [
         { platform: "instagram", external_id: "NODATE" }, // missing posted_at — drop
-        { platform: "instagram", external_id: "EPOCH", posted_at: epoch }, // epoch — drop
+        // The PYTHON bridge stamps a missing date as the epoch in OFFSET form,
+        // NOT JS's ".000Z" form — the parser must drop BOTH (codex P2 round 3).
+        { platform: "instagram", external_id: "EPOCHZ", posted_at: new Date(0).toISOString() },
+        { platform: "instagram", external_id: "EPOCHOFF", posted_at: "1970-01-01T00:00:00+00:00" },
         { platform: "instagram", external_id: "EMPTY", posted_at: "" }, // empty — drop
+        { platform: "instagram", external_id: "GARBAGE", posted_at: "not-a-date" }, // unparseable — drop
         { platform: "instagram", external_id: "GOOD", posted_at: DATE }, // real date — keep
       ],
     });
