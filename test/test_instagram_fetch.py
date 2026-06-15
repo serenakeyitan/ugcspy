@@ -145,21 +145,19 @@ def test_is_throttle_does_not_false_positive(monkeypatch):
 
 
 def test_enrich_views_backs_off_on_throttle(monkeypatch):
-    # On the FIRST throttle, enrich_views must stop the whole run and report
+    # On the FIRST throttle (403), enrich_views must stop the whole run and report
     # throttled=True, leaving remaining posts un-enriched (no views_enriched flag)
     # so the caller reuses last-known view counts. No real network: stub the
-    # instaloader factory + Post.from_shortcode to raise a 403 immediately.
-    monkeypatch.setattr(ig, "ENRICH_SLEEP_S", 0)  # no real sleeping in the test
+    # direct-POST fetcher to raise a 403 HTTPError immediately.
+    import urllib.error
 
-    class _FakePost:
-        @staticmethod
-        def from_shortcode(ctx, sc):
-            raise Exception("403 Forbidden when accessing graphql/query")
+    monkeypatch.setattr(ig, "ENRICH_SLEEP_S", 0)
+    monkeypatch.setattr(ig, "_load_cookie_dict", lambda cp: {"csrftoken": "x"})
 
-    fake_instaloader = type("M", (), {"Post": _FakePost})()
-    # L needs a .context attr (the code calls Post.from_shortcode(L.context, sc)).
-    fake_L = type("L", (), {"context": object()})()
-    monkeypatch.setattr(ig, "_make_instaloader", lambda cp: (fake_instaloader, fake_L))
+    def _raise_403(shortcode, cookies):
+        raise urllib.error.HTTPError("https://www.instagram.com/graphql/query", 403, "Forbidden", {}, None)
+
+    monkeypatch.setattr(ig, "_fetch_post_media", _raise_403)
 
     posts = [
         {"shortcode": "A", "is_video": True},
@@ -169,8 +167,33 @@ def test_enrich_views_backs_off_on_throttle(monkeypatch):
     out, enriched, throttled = ig.enrich_views(posts, "cookies.txt", max_enrich=10)
     assert throttled is True
     assert enriched == 0
-    # None got a real view → none flagged views_enriched (caller keeps last-known)
     assert all(not p.get("views_enriched") for p in out)
+
+
+def test_enrich_views_direct_post_sets_views_and_drops_images(monkeypatch):
+    # The direct-POST fetcher is authoritative on is_video: a Reel gets a real
+    # view_count + views_enriched; an image post gets is_video=False (caller drops).
+    monkeypatch.setattr(ig, "ENRICH_SLEEP_S", 0)
+    monkeypatch.setattr(ig, "_load_cookie_dict", lambda cp: {"csrftoken": "x"})
+
+    def _media(shortcode, cookies):
+        if shortcode == "REEL":
+            return {"is_video": True, "video_play_count": 12345, "owner": {"username": "creator1"}}
+        return {"is_video": False}  # image
+
+    monkeypatch.setattr(ig, "_fetch_post_media", _media)
+
+    posts = [
+        {"shortcode": "REEL", "is_video": True},
+        {"shortcode": "IMG", "is_video": True},  # optimistic flag from hashtag listing
+    ]
+    out, enriched, throttled = ig.enrich_views(posts, "cookies.txt", max_enrich=10)
+    assert throttled is False
+    assert enriched == 1
+    reel = next(p for p in out if p["shortcode"] == "REEL")
+    img = next(p for p in out if p["shortcode"] == "IMG")
+    assert reel["view_count"] == 12345 and reel["views_enriched"] is True
+    assert img["is_video"] is False  # corrected → caller drops it
 
 
 class _FakeStdin:

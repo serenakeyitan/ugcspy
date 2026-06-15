@@ -35,7 +35,7 @@ import sys
 import tempfile
 import time
 import http.cookiejar
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # Which browser holds the logged-in IG session. Override with UGCSPY_IG_COOKIE_BROWSER.
 COOKIE_BROWSER = os.environ.get("UGCSPY_IG_COOKIE_BROWSER", "safari")
@@ -138,17 +138,49 @@ def galler_dl_roster(handle, cookies_path, limit):
     return list(posts.values())
 
 
-def _make_instaloader(cookies_path):
-    import instaloader
-    L = instaloader.Instaloader(
-        download_pictures=False, download_videos=False,
-        download_comments=False, save_metadata=False, quiet=True,
-    )
+# Web GraphQL doc_id for IG's PolarisPostActionLoadPostQueryQuery — returns one
+# post's full media (incl. view/play counts) in a SINGLE POST. Far lighter than
+# instaloader's Post.from_shortcode (multiple requests/post + a rate-controller
+# that re-inits each run and double-counts against gallery-dl in the same
+# session). Tunable if IG rotates it.
+_IG_POST_DOC_ID = os.environ.get("UGCSPY_IG_POST_DOC_ID", "8845758582119845")
+_IG_WEB_APP_ID = "936619743392459"
+_IG_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
+
+
+def _load_cookie_dict(cookies_path):
     cj = http.cookiejar.MozillaCookieJar(cookies_path)
     cj.load(ignore_discard=True, ignore_expires=True)
-    for c in cj:
-        L.context._session.cookies.set(c.name, c.value, domain="instagram.com")
-    return instaloader, L
+    return {c.name: c.value for c in cj if "instagram" in (c.domain or "")}
+
+
+def _fetch_post_media(shortcode, cookies):
+    """ONE GraphQL POST → the post's media node (or None). Raises on HTTP error so
+    the caller can detect a throttle (403/429)."""
+    import urllib.request
+    import urllib.parse
+
+    body = urllib.parse.urlencode({
+        "variables": json.dumps({
+            "shortcode": shortcode,
+            "fetch_tagged_user_count": None,
+            "hoisted_comment_id": None,
+            "hoisted_reply_id": None,
+        }),
+        "doc_id": _IG_POST_DOC_ID,
+    }).encode()
+    req = urllib.request.Request("https://www.instagram.com/graphql/query", data=body, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    req.add_header("X-CSRFToken", cookies.get("csrftoken", ""))
+    req.add_header("X-IG-App-ID", _IG_WEB_APP_ID)
+    req.add_header("User-Agent", _IG_UA)
+    req.add_header("Cookie", "; ".join(f"{k}={v}" for k, v in cookies.items()))
+    with urllib.request.urlopen(req, timeout=30) as r:
+        d = json.load(r)
+    return ((d.get("data") or {}).get("xdt_shortcode_media")) or None
 
 
 import re as _re
@@ -183,24 +215,23 @@ def _is_throttle(err):
 
 
 def enrich_views(posts, cookies_path, max_enrich=None):
-    """Add view_count/play_count to each video post via instaloader single-post
-    GraphQL. Returns (posts, enriched_count, throttled).
+    """Add view_count/play_count to each video post via a single direct GraphQL
+    POST per shortcode (_fetch_post_media). Returns (posts, enriched_count,
+    throttled).
 
-    Each enriched post gets p["views_enriched"]=True ONLY on a real view fetch.
-    Posts left WITHOUT that flag must NOT have their stored view_count
-    overwritten by the caller (it would clobber a good value with 0). On an IG
-    throttle (403/429) we BACK OFF: stop the loop immediately, mark throttled,
-    and leave the remaining posts un-enriched (likes/caption still fresh from the
-    roster walk). The watch keeps working on last-known views instead of erroring.
-
-    max_enrich caps enrichment ATTEMPTS (one ~4s GraphQL call each) — the user's
-    depth tier; None → env default.
+    Each enriched post gets p["views_enriched"]=True ONLY on a real view fetch;
+    posts WITHOUT it must not have their stored view_count overwritten with 0.
+    The POST is authoritative on is_video (the hashtag listing isn't), so images
+    discovered under a tag get is_video=False here and the caller drops them. On
+    an IG throttle (403/429) we BACK OFF: stop immediately, mark throttled, leave
+    the rest un-enriched (likes/caption stay fresh). max_enrich caps ATTEMPTS.
     """
+    import urllib.error
+
     cap = max_enrich if isinstance(max_enrich, int) and max_enrich > 0 else MAX_ENRICH
     try:
-        instaloader, L = _make_instaloader(cookies_path)
+        cookies = _load_cookie_dict(cookies_path)
     except Exception:
-        # instaloader unavailable: best-effort, return posts without views.
         return posts, 0, False
 
     attempted = 0
@@ -213,28 +244,34 @@ def enrich_views(posts, cookies_path, max_enrich=None):
             break
         attempted += 1
         try:
-            post = instaloader.Post.from_shortcode(L.context, p["shortcode"])
-            vv = getattr(post, "video_view_count", None) if post.is_video else None
-            try:
-                vp = post._field("video_play_count") if post.is_video else None
-            except Exception:
-                vp = None
-            metric = vp or vv
+            media = _fetch_post_media(p["shortcode"], cookies)
+            if media is None:
+                continue
+            p["is_video"] = bool(media.get("is_video"))
+            if not p["is_video"]:
+                continue  # image post discovered under the tag — caller drops it
+            metric = media.get("video_play_count") or media.get("video_view_count")
             if metric:
-                # Prefer play_count (the headline IG "plays" metric).
                 p["view_count"] = int(metric)
-                p["views_enriched"] = True  # safe to persist this view_count
+                p["views_enriched"] = True
                 enriched += 1
-            if not p.get("date"):
-                p["date"] = post.date_utc.isoformat()
+            # backfill fields the listing may have omitted
+            if not p.get("video_url"):
+                p["video_url"] = f"https://www.instagram.com/reel/{p['shortcode']}/"
+            owner = media.get("owner") or {}
+            if not p.get("username") and owner.get("username"):
+                p["username"] = owner["username"]
+        except urllib.error.HTTPError as e:
+            # 403/429 = throttle → stop the whole run (continuing deepens it).
+            if e.code in (403, 429, 401) or _is_throttle(e):
+                throttled = True
+                break
+            # other HTTP error on one post → skip just it
         except Exception as e:
-            # On a THROTTLE, stop the whole run — continuing only deepens the
-            # rate-limit (and risks escalating to an account flag). The rest stay
-            # un-enriched; the caller reuses their last-known views.
             if _is_throttle(e):
                 throttled = True
                 break
-            # A non-throttle error (a single dead/private post) → skip just it.
+            # non-throttle (dead/private post) → skip just it
         time.sleep(ENRICH_SLEEP_S)
     return posts, enriched, throttled
 
@@ -343,6 +380,132 @@ def run_user(req):
         )
 
 
+def _extract_post_md(row):
+    """Pull the post metadata dict out of a gallery-dl -j row, tolerant of both
+    shapes: [type, url, meta] (user/roster) and [type, meta] (hashtag/tag). A row
+    is a post only if its dict carries a shortcode."""
+    for el in row if isinstance(row, list) else ():
+        if isinstance(el, dict) and el.get("shortcode"):
+            return el
+    return None
+
+
+def gallerydl_hashtag(tag, cookies_path, limit):
+    """DISCOVER creators who posted under #tag via gallery-dl's instagram:tag
+    extractor (explore/tags/<tag>/). Returns post dicts keyed by shortcode, each
+    carrying its OWN creator (username) — that's how 'rank all UGC creators for a
+    brand' works. No views yet (enrich_views adds them)."""
+    tag = tag.lstrip("#").strip()
+    url = f"https://www.instagram.com/explore/tags/{tag}/"
+    cmd = [
+        sys.executable, "-m", "gallery_dl",
+        "--cookies", cookies_path,
+        "--no-download",
+        "--range", f"1-{limit}",
+        "-j", url,
+    ]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    except subprocess.TimeoutExpired:
+        return []
+    try:
+        data = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    posts = {}
+    for row in data:
+        md = _extract_post_md(row)
+        if not md:
+            continue
+        # Carousel posts emit ONE row per slide, each with its own `shortcode` but
+        # a shared `post_shortcode` (the parent). Dedup on the PARENT so a 10-image
+        # carousel counts as one post, not ten (would inflate a creator's volume).
+        sc = md.get("post_shortcode") or md["shortcode"]
+        if sc in posts:
+            continue
+        owner = md.get("owner") if isinstance(md.get("owner"), dict) else {}
+        username = (
+            md.get("username")
+            or (owner.get("username") if isinstance(owner, dict) else None)
+            or md.get("owner_username")
+            or ""
+        )
+        posts[sc] = {
+            "shortcode": sc,
+            "likes": md.get("likes") if isinstance(md.get("likes"), int) else 0,
+            "comments": md.get("comments") if isinstance(md.get("comments"), int) else 0,
+            "caption": md.get("description") or "",
+            "video_url": md.get("video_url") or "",
+            "thumbnail_url": md.get("display_url") or "",
+            "username": username,
+            "date": md.get("date") or md.get("post_date"),
+            # The tag listing omits the media TYPE, so we can't tell reel-vs-image
+            # here. Flag optimistically so the post enters enrich_views, which is
+            # AUTHORITATIVE on is_video (and corrects images to False). Posts the
+            # enrich cap doesn't reach keep this optimistic flag — acceptable: a
+            # hashtag is reel-dominated and the fallback URL still resolves.
+            "is_video": True,
+        }
+    return list(posts.values())
+
+
+def run_hashtag(req):
+    tag = (req.get("tag") or req.get("handle") or "").strip()
+    if not tag:
+        _fail("instagram hashtag mode requires a tag", "bad_request")
+    roster_min = int(os.environ.get("UGCSPY_IG_ROSTER_LIMIT", "60"))
+    limit, max_enrich = resolve_walk_limits(req.get("limit"), req.get("max_enrich"), roster_min)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cookies_path = os.path.join(tmp, "ig_cookies.txt")
+        _, has_session, n = export_ig_cookies(cookies_path)
+        if not has_session:
+            _fail(
+                f"No logged-in Instagram session in {COOKIE_BROWSER} "
+                f"(found {n} IG cookies but no sessionid). Log into Instagram in "
+                f"{COOKIE_BROWSER}, or set UGCSPY_IG_COOKIE_BROWSER to a browser "
+                f"that is logged in.",
+                "re_login_required",
+            )
+        posts = gallerydl_hashtag(tag, cookies_path, limit)
+        if not posts:
+            _fail(
+                f"Instagram returned no posts for #{tag} (the session may have "
+                f"expired, or the tag has no recent public posts). Re-login in "
+                f"{COOKIE_BROWSER} and retry.",
+                "empty_or_blocked",
+            )
+        posts, enriched, throttled = enrich_views(posts, cookies_path, max_enrich)
+        videos = [to_raw_video(p) for p in posts if p.get("is_video")]
+        # Apply the trailing-window cutoff (the hashtag listing is NOT date-sorted
+        # or date-filtered by IG, so it mixes in old posts). Keep videos with a
+        # real posted_at within `days`; drop epoch-dated (unknown-date) rows from a
+        # windowed query rather than guess.
+        days = req.get("days")
+        if isinstance(days, int) and days > 0:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            kept = []
+            for v in videos:
+                try:
+                    ts = datetime.fromisoformat(v["posted_at"])
+                except (ValueError, KeyError):
+                    continue
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= cutoff and ts > datetime.fromtimestamp(86400, tz=timezone.utc):
+                    kept.append(v)
+            videos = kept
+        _emit(
+            {
+                "videos": videos,
+                "enriched_views": enriched,
+                "roster_size": len(posts),
+                "distinct_creators": len({v.get("author_handle") for v in videos if v.get("author_handle")}),
+                "throttled": throttled,
+            }
+        )
+
+
 def run_session_check(_req):
     with tempfile.TemporaryDirectory() as tmp:
         cookies_path = os.path.join(tmp, "ig_cookies.txt")
@@ -359,10 +522,15 @@ def main():
     mode = req.get("mode")
     if mode == "user":
         run_user(req)
+    elif mode == "hashtag":
+        run_hashtag(req)
     elif mode == "session_check":
         run_session_check(req)
     else:
-        _fail(f"unsupported instagram mode: {mode!r} (supported: user, session_check)", "bad_request")
+        _fail(
+            f"unsupported instagram mode: {mode!r} (supported: user, hashtag, session_check)",
+            "bad_request",
+        )
 
 
 if __name__ == "__main__":

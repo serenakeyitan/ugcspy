@@ -50,6 +50,21 @@ export class InstagramOssProvider implements DataProvider {
     return this.runBridge({ mode: "user", handle, days, max_enrich: this.enrichCount });
   }
 
+  // DISCOVER all creators who posted under a brand hashtag (the IG analog of the
+  // TikTok hashtag scout). gallery-dl's explore/tags/<tag>/ extractor + the
+  // logged-in session returns posts each carrying their OWN creator, so the
+  // caller can rank every UGC creator for the brand. Then enrich_views adds the
+  // view counts. Third-party UGC discovery — full parity with TikTok.
+  async fetchHashtagVideos(tag: string, platform: Platform, days: number): Promise<RawVideo[]> {
+    if (platform !== "instagram") {
+      throw new ProviderError(
+        `Provider 'instagram-oss' only supports instagram (got '${platform}').`,
+        this.name,
+      );
+    }
+    return this.runBridge({ mode: "hashtag", tag, days, max_enrich: this.enrichCount });
+  }
+
   // Is the configured browser logged into Instagram? Surfaces the session
   // health the IG path depends on (the daemon/init can warn before a walk).
   async sessionCheck(): Promise<{ loggedIn: boolean; igCookieCount: number; browser: string }> {
