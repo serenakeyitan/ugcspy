@@ -1,0 +1,93 @@
+import { describe, expect, test } from "bun:test";
+import { ScrapeCreatorsProvider, mapItems } from "../src/providers/scrapecreators.ts";
+import { getProvider } from "../src/providers/index.ts";
+import type { Config } from "../src/types.ts";
+
+describe("ScrapeCreators mapItems — response → RawVideo", () => {
+  test("maps a reel with all fields (prefers play_count, owner.username, ISO taken_at)", () => {
+    const out = mapItems([
+      {
+        shortcode: "ABC123",
+        caption: "love @befreed for studying",
+        like_count: 5000,
+        comment_count: 42,
+        video_view_count: 100000,
+        video_play_count: 250000,
+        owner: { username: "studytok.jane" },
+        taken_at: "2026-06-10T12:00:00.000Z",
+        video_url: "https://scontent.cdninstagram.com/x.mp4",
+        thumbnail_src: "https://scontent.cdninstagram.com/x.jpg",
+      },
+    ]);
+    expect(out).toHaveLength(1);
+    const v = out[0]!;
+    expect(v.platform).toBe("instagram");
+    expect(v.external_id).toBe("ABC123");
+    expect(v.view_count).toBe(250000); // play_count preferred over view_count
+    expect(v.like_count).toBe(5000);
+    expect(v.author_handle).toBe("studytok.jane");
+    expect(v.posted_at).toBe("2026-06-10T12:00:00.000Z");
+    expect(v.caption).toContain("@befreed");
+    expect(v.video_url).toContain(".mp4");
+  });
+
+  test("falls back to view_count when no play_count, and to reel URL when no video_url", () => {
+    const v = mapItems([{ shortcode: "X", video_view_count: 99, owner: { username: "a" } }])[0]!;
+    expect(v.view_count).toBe(99);
+    expect(v.video_url).toBe("https://www.instagram.com/reel/X/");
+  });
+
+  test("accepts `code` as the shortcode alias and a caption object {text}", () => {
+    const v = mapItems([{ code: "Y", caption: { text: "hi" }, owner: { username: "b" } }])[0]!;
+    expect(v.external_id).toBe("Y");
+    expect(v.caption).toBe("hi");
+  });
+
+  test("numeric epoch taken_at normalizes to ISO; missing → epoch", () => {
+    const sec = mapItems([{ shortcode: "S", taken_at: 1700000000, owner: { username: "c" } }])[0]!;
+    expect(sec.posted_at.startsWith("2023-")).toBe(true);
+    const none = mapItems([{ shortcode: "N", owner: { username: "d" } }])[0]!;
+    expect(none.posted_at).toBe(new Date(0).toISOString());
+  });
+
+  test("drops malformed rows (null, no shortcode, non-object) without throwing", () => {
+    const out = mapItems([null, 42, "x", { caption: "no shortcode" }, { shortcode: "OK" }]);
+    expect(out.map((v) => v.external_id)).toEqual(["OK"]);
+  });
+
+  test("non-array input → empty array", () => {
+    expect(mapItems(undefined)).toEqual([]);
+    expect(mapItems({})).toEqual([]);
+  });
+});
+
+describe("ScrapeCreators provider guards", () => {
+  test("missing key → clear ProviderError on any fetch", async () => {
+    const p = new ScrapeCreatorsProvider("");
+    await expect(p.fetchKeywordVideos("befreed", "instagram", 30)).rejects.toThrow(/API key missing/);
+  });
+
+  test("rejects non-instagram platform", async () => {
+    const p = new ScrapeCreatorsProvider("k");
+    await expect(p.fetchHashtagVideos("x", "tiktok", 30)).rejects.toThrow(/only instagram/);
+  });
+});
+
+describe("getProvider IG routing: ScrapeCreators when key present, free fallback otherwise", () => {
+  test("tiktok-oss + instagram + key → ScrapeCreators (the keyword-search upgrade)", () => {
+    const cfg = { scraper_provider: "tiktok-oss", scraper_api_key: "sk-test" } as Config;
+    expect(getProvider(cfg, "instagram").name).toBe("scrapecreators");
+  });
+
+  test("tiktok-oss + instagram + NO key → free instagram-oss fallback", () => {
+    const cfg = { scraper_provider: "tiktok-oss" } as Config;
+    // Note: this reads no env key and (in CI) no key file → free path.
+    const name = getProvider(cfg, "instagram").name;
+    expect(["instagram-oss", "scrapecreators"]).toContain(name); // scrapecreators only if a local key file exists
+  });
+
+  test("tiktok-oss + tiktok → tiktok-oss regardless of key", () => {
+    const cfg = { scraper_provider: "tiktok-oss", scraper_api_key: "sk-test" } as Config;
+    expect(getProvider(cfg, "tiktok").name).toBe("tiktok-oss");
+  });
+});

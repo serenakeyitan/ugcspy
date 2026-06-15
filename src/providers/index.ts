@@ -23,11 +23,17 @@ export function getProvider(
   switch (config.scraper_provider) {
     case "mock":
       return new MockProvider();
-    case "tiktok-oss":
-      // The OSS default: each platform has its own browser-free bridge.
-      return platform === "instagram"
-        ? new InstagramOssProvider(igEnrichCount)
-        : new TikTokOssProvider();
+    case "tiktok-oss": {
+      // The OSS default: each platform has its own browser-free bridge. For
+      // Instagram, auto-UPGRADE to ScrapeCreators when a key is configured —
+      // its keyword/caption search catches untagged brand mentions the free
+      // gallery-dl hashtag path can't reach. No key → free gallery-dl fallback.
+      if (platform === "instagram") {
+        const scKey = effectiveScraperKey(config);
+        return scKey ? new ScrapeCreatorsProvider(scKey) : new InstagramOssProvider(igEnrichCount);
+      }
+      return new TikTokOssProvider();
+    }
     case "scrapecreators":
       return new ScrapeCreatorsProvider(effectiveScraperKey(config) ?? "");
     case "apify":
