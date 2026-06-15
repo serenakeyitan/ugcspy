@@ -50,7 +50,10 @@ export function saveConfig(config: Config, path: string = CONFIG_PATH): void {
 export function effectiveScraperKey(config: Config): string | undefined {
   // Precedence: env > config > ~/.ugcspy/scrapecreators.key (a gitignored file,
   // the simplest place to drop a free-trial key without editing config/env).
-  const fromEnvOrConfig = process.env.UGCSPY_SCRAPER_API_KEY ?? config.scraper_api_key;
+  // TRIM every source before the truthiness check (codex P2): a whitespace-only
+  // key must be treated as ABSENT so IG falls back to the free path instead of
+  // sending a blank x-api-key.
+  const fromEnvOrConfig = (process.env.UGCSPY_SCRAPER_API_KEY ?? config.scraper_api_key)?.trim();
   if (fromEnvOrConfig) return fromEnvOrConfig;
   try {
     const keyPath = join(homedir(), ".ugcspy", "scrapecreators.key");

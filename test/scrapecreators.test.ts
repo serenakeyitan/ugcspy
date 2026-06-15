@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ScrapeCreatorsProvider, mapItems } from "../src/providers/scrapecreators.ts";
 import { getProvider } from "../src/providers/index.ts";
+import { effectiveScraperKey } from "../src/lib/config.ts";
 import type { Config } from "../src/types.ts";
 
 describe("ScrapeCreators mapItems — response → RawVideo", () => {
@@ -89,5 +90,14 @@ describe("getProvider IG routing: ScrapeCreators when key present, free fallback
   test("tiktok-oss + tiktok → tiktok-oss regardless of key", () => {
     const cfg = { scraper_provider: "tiktok-oss", scraper_api_key: "sk-test" } as Config;
     expect(getProvider(cfg, "tiktok").name).toBe("tiktok-oss");
+  });
+
+  test("a whitespace-only config key is NOT used as the key (codex P2 — blank x-api-key avoided)", () => {
+    // effectiveScraperKey must trim and reject a whitespace-only config/env key,
+    // so it never gets sent as a blank x-api-key. (Routing then depends on the
+    // key FILE, tested separately — here we assert the blank string isn't the key.)
+    const k = effectiveScraperKey({ scraper_provider: "tiktok-oss", scraper_api_key: "   " } as Config);
+    expect(k).not.toBe("   ");
+    expect(k === undefined || k.trim().length > 0).toBe(true);
   });
 });
